@@ -1,0 +1,144 @@
+# bis_cb_rates.yaml — BIS Statistics Warehouse CBPOL_D Configuration
+# Data Source & Rates Adjustment v1.0 §8.2, §11.1
+# Single source of truth untuk BIS CB rates ingestion.
+#
+# Hierarki otoritas: Grand Design v1.2 > Supplementary Design v1.1 >
+#                    IDD v1.0 > Architecture v2.0 > Architecture Extension v1.0 >
+#                    Data Source & Rates Adjustment v1.0 (dokumen ini)
+#
+# ADR-010: ECB source dikoreksi dari FRED (monthly) ke BIS CBPOL_D (daily)
+# ADR-011: DM/EM split — context_rates_dm_cb (9 CBs) vs context_rates_em_cb (3 CBs)
+# ADR-012: PBOC = 7-day reverse repo rate ONLY (MLF/LPR not in free tier — accepted)
+
+version: "1.0"
+last_updated: "2026-06-30"
+
+# ── BIS API Endpoint (Data Source & Rates Adjustment v1.0 §3.2) ──────────────
+endpoint: "https://stats.bis.org/api/v1/data/WS_CBPOL_D/all"
+format: "csv"
+# No API key required — BIS CBPOL_D is free, no registration
+api_key_required: false
+cadence: "weekly"         # masuk WEEKLY_SEQUENCE — dijalankan hari Minggu
+est_minutes: 3            # BIS download ~100KB CSV, lightweight parse
+stale_tolerance_days: 7   # consumers (silver_global_rates) akui staleness 7 hari
+
+# ── REF_AREA Code Mapping (Data Source & Rates Adjustment v1.0 §3.1) ─────────
+# Key = BIS REF_AREA code, Value = internal central bank identifier
+ref_area_map:
+  XM: ECB       # Eurozone — ADR-010: CORRECTED from FRED (monthly) to BIS (daily)
+  GB: BOE       # United Kingdom
+  JP: BOJ       # Japan — YCC distortion 2016-2024 registered below
+  CA: BOC       # Canada
+  AU: RBA       # Australia
+  NZ: RBNZ      # New Zealand
+  CH: SNB       # Switzerland — negative rate period 2015-2022 registered below
+  KR: BOK       # South Korea — MSCI EM classification maintained (taxonomy consistency)
+  NO: NORGES    # Norway
+  SE: RIKSBANK  # Sweden
+  CN: PBOC      # China — ADR-012: 7-day repo rate ONLY (accepted limitation)
+  ID: BI        # Indonesia — structural break 2016-08-19 registered below
+
+# ── Subcategory Assignment (Data Source & Rates Adjustment v1.0 §5.2) ────────
+# Maps central_bank identifier -> instruments.yaml context subcategory
+subcategory_assignment:
+  ECB:     context_rates_dm_cb
+  BOE:     context_rates_dm_cb
+  BOJ:     context_rates_dm_cb
+  BOC:     context_rates_dm_cb
+  RBA:     context_rates_dm_cb
+  RBNZ:    context_rates_dm_cb
+  SNB:     context_rates_dm_cb
+  NORGES:  context_rates_dm_cb
+  RIKSBANK: context_rates_dm_cb
+  PBOC:    context_rates_em_cb
+  BOK:     context_rates_em_cb
+  BI:      context_rates_em_cb
+
+# ── Structural Break Registry (Data Source & Rates Adjustment v1.0 §10) ──────
+# Tiga entries baru — pola mengikuti NICKEL dan COAL_NEWC dari Extension v1.0 §7
+structural_break_registry:
+  BI_RATE:
+    central_bank: BI
+    break_date: "2016-08-19"
+    end_date: null           # ongoing — BI7DRR telah menggantikan BI Rate permanen
+    severity: "HIGH"         # Setara NICKEL March 2022
+    type: "instrument_change"
+    description: >
+      Bank of Indonesia mengganti benchmark rate dari BI Rate (overnight
+      lending rate) ke BI7DRR (7-Day Reverse Repo Rate). Perubahan fundamental
+      pada instrument design dan transmission mechanism — bukan sekadar rename.
+      Data pre/post 2016-08-19 TIDAK homogen.
+    silver_handling: "has_structural_break=True untuk semua obs sebelum 2016-08-19"
+    domain_score_handling: "partial_coverage_flag=True pada window ±30 hari (1 Agustus - 19 September 2016)"
+    correlation_handling: "Ledoit-Wolf robust estimator wajib untuk periode yang mengandung break ini"
+
+  PBOC_RATE:
+    central_bank: PBOC
+    break_date: "2020-01-15"
+    end_date: "2021-03-31"
+    severity: "MEDIUM"
+    type: "policy_distortion"
+    description: >
+      COVID coordinated multi-instrument easing — PBOC melakukan serangkaian
+      simultaneous cuts pada berbagai instruments (7-day repo, MLF, LPR) secara
+      bersamaan. Dalam periode ini, 7-day repo rate tidak sepenuhnya merepresentasikan
+      policy stance keseluruhan. Accepted limitation — documented di KNOWN_RISKS.md.
+    silver_handling: "has_structural_break=True untuk obs dalam window COVID easing"
+    known_limitation: "7-day repo rate tidak representatif untuk full policy stance periode COVID"
+
+  BOJ_YCC:
+    central_bank: BOJ
+    break_date: "2016-09-21"
+    end_date: "2024-03-19"
+    severity: "MEDIUM"
+    type: "policy_framework_change"
+    description: >
+      Yield Curve Control (YCC): BOJ policy rate flat -10bps selama 2016-2024.
+      Rate dalam BIS CBPOL_D tidak merepresentasikan actual policy stance — yang
+      sebenarnya adalah targeting 10Y JGB yield di ~0% lalu diperlebar ke ~1%.
+      Rate series tidak informatif untuk CrossAssetEngine domain score selama periode ini.
+    silver_handling: "has_structural_break=True untuk obs dalam period YCC (2016-09-21 / 2024-03-19)"
+    mitigation: "Ledoit-Wolf robust estimator di CorrelationModule menangani implisit"
+    note: "BOJ kembali ke conventional policy Maret 2024 — rate 0.10% -> 0.50% informatif kembali"
+
+# ── Accepted Limitations (Data Source & Rates Adjustment v1.0 §3.2, ADR-012) ─
+accepted_limitations:
+  PBOC_RATE_TYPE:
+    description: >
+      BIS CBPOL_D menyediakan hanya 7-day reverse repo rate untuk China (REF_AREA=CN).
+      MLF (1Y, ~2.50%) dan LPR (1Y ~3.45%, 5Y ~4.00%) tidak tersedia di BIS free tier.
+    impact: "Platform menggunakan short-term liquidity stance, bukan medium-term lending signal."
+    status: "accepted_risk"
+    tracking: "KNOWN_RISKS.md entry wajib sebelum production Wave 1"
+
+  BOK_EM_CLASSIFICATION:
+    description: >
+      Korea (BOK) diklasifikasikan sebagai EM untuk konsistensi taxonomy
+      (mengikuti MSCI classification per Juni 2026 — KOSPI masih classified EM).
+    note: "Jika MSCI upgrade Korea ke DM, satu-baris change di instruments.yaml sudah cukup."
+    status: "accepted_risk"
+
+  SNB_NEGATIVE_RATES:
+    description: >
+      SNB menerapkan negative interest rate -0.75% dari Januari 2015 sampai September 2022.
+      Rentang nilai ekstrem menciptakan distribusi skewed di ForecastModule PCA input.
+    mitigation: >
+      StandardScaler yang sudah ada di ForecastModule (Architecture v2.0 §6.4.2)
+      menangani rentang nilai negatif. Tidak ada floor assumption di Silver processing.
+    status: "accepted_risk"
+
+  BOJ_YCC_DISTORTION:
+    description: >
+      BOJ rate flat -10bps selama YCC period (2016-2024) tidak representatif
+      untuk conventional policy interpretation.
+    mitigation: "Structural break registry entry + Ledoit-Wolf di CorrelationModule."
+    status: "accepted_risk"
+
+# ── Silver Output Schema Reference (Data Source & Rates Adjustment v1.0 §9.2) ─
+silver_output:
+  path: "data/silver/global_rates/global_rates_policy.parquet"
+  primary_key: ["central_bank", "observation_date"]
+  compression: "zstd"
+  compression_level: 3
+  row_group_size: 50000
+  forward_fill_alert_days: 90   # is_stale=True jika forward_fill_days > threshold ini

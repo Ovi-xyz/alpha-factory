@@ -1,0 +1,191 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-and-test:
+    runs-on: ubuntu-latest
+
+    # ADD Decision A + companion action (GMI_Decision_Document_v3.docx §7.2,
+    # 2026-07-17): Python 3.11 + 3.12 matrix. Python floor stays >=3.11,<3.13
+    # (ADR-020) — this matrix is what actually exercises both ends of that
+    # declared range, instead of only ever running 3.11 in CI while the
+    # sandbox that authored ADR-020 tested exclusively on 3.12.3.
+    # fail-fast: false so a failure on one version doesn't hide the other
+    # version's result — useful signal on a brand-new matrix.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 1. Install dependencies — UPD Decision A (GMI_Decision_Document_v3.docx)
+      #
+      # SEBELUMNYA: `pip install -e '.[dev]'`. pytest/pytest-cov live ONLY in
+      # [tool.poetry.group.dev.dependencies], invisible to pip — there is no
+      # [tool.poetry.extras] table exposing them. Reproduced directly: this
+      # command installs 109 packages, pytest never among them, emits
+      # "WARNING: alpha-factory 1.10.0 does not provide the extra 'dev'",
+      # then every downstream gate that needs pytest fails with
+      # "No module named pytest" -> 0 tests collected -> Gate G-4-count
+      # fails against baseline (this is the actual CI failure log this
+      # change fixes).
+      #
+      # SEKARANG: `poetry install --with dev` against the committed
+      # poetry.lock — the lockfile was already being generated (ADR-020)
+      # but never actually read by CI, since only the poetry CLI consults
+      # it. Confirmed empirically: resolves cleanly, installs pytest 9.1.1
+      # + pytest-cov 7.1.0 alongside everything else.
+      - name: Install Poetry
+        run: pip install poetry --quiet
+
+      - name: Install dependencies (poetry install --with dev)
+        run: poetry install --with dev
+
+      # 2. GATE G-1: Syntax validation (ast.parse) semua .py
+      # Stdlib-only (ast/pathlib/sys) — runs against the interpreter setup-python
+      # provisions directly, no poetry environment needed.
+      - name: Gate G-1 — Syntax Validation (ast.parse)
+        run: |
+          python -c "
+          import ast, sys, pathlib
+          files = (
+              list(pathlib.Path('src').rglob('*.py')) +
+              list(pathlib.Path('tests').rglob('*.py')) +
+              list(pathlib.Path('scripts').rglob('*.py'))
+          )
+          errs = []
+          for f in files:
+              try:
+                  ast.parse(f.read_text(), filename=str(f))
+              except SyntaxError as e:
+                  errs.append(f'{f}: {e}')
+          for e in errs:
+              print(e)
+          sys.exit(1 if errs else 0)
+          "
+
+      # 3. GATE G-2: Anti-pattern check — f-string SQL (FIXED GLD-006)
+      #
+      # SEBELUMNYA: grep pattern hanya match f"SELECT / f'SELECT pada baris
+      # yang sama. Triple-quote multi-line f"""...SELECT... tidak terdeteksi.
+      # Akibatnya 10+ violations di Gold layer lolos CI tanpa terdeteksi.
+      #
+      # SEKARANG: Python script menggunakan regex untuk mendeteksi semua
+      # f-string (f""", f", f') yang mengandung SQL keyword dalam 300 char
+      # berikutnya — mencakup multi-line triple-quote pattern.
+      #
+      # GD §17.7: f-string SQL adalah explicit anti-pattern yang dilarang.
+      # Stdlib-only (pathlib/re/sys) — no poetry environment needed.
+      - name: Gate G-2 — Anti-Pattern Check (F-String SQL)
+        run: |
+          python -c "
+          import pathlib, re, sys
+
+          # SQL keywords yang relevan
+          SQL_KW = re.compile(r'\b(SELECT|FROM\s+read_parquet|INSERT|UPDATE|DELETE)\b', re.I)
+
+          # Match semua f-string openers: f\"\"\" f''' f\" f' (case-insensitive f prefix)
+          FSTR_OPEN = re.compile(r'[fF]\"\"\"')
+
+          errors = []
+          # Scan hanya src/ — test files boleh memiliki f-string SQL untuk fixture
+          # FIX CI-G2: scan ALL of src/ (was src/gold only — Silver/Bronze/Backtest violations missed)
+          for f in pathlib.Path('src').rglob('*.py'):
+              src = f.read_text(encoding='utf-8', errors='replace')
+              for m in FSTR_OPEN.finditer(src):
+                  # Ambil 400 char setelah opener untuk cover SELECT di baris berikutnya
+                  snippet = src[m.start() : m.start() + 400]
+                  if SQL_KW.search(snippet):
+                      # Hitung nomor baris untuk pesan error yang informatif
+                      line_no = src[:m.start()].count('\n') + 1
+                      errors.append(f'{f}:{line_no}: f-string SQL detected (triple-quote)')
+          for e in errors:
+              print(e)
+          if errors:
+              print()
+              print('FAIL: F-string SQL ditemukan (GD §17.7 anti-pattern).')
+              print('Konversi ke DuckDB \$name parameterized queries.')
+              print('Referensi: Grand Design v1.2 §17.7, audit GLD-003, GLD-006.')
+              sys.exit(1)
+          print(f'Gate G-2 PASSED — 0 f-string SQL violations di src/')
+          "
+
+      # 4. GATE G-3: Instruments validation
+      # Needs pyyaml -> poetry run.
+      - name: Gate G-3 — Validate instruments.yaml
+        run: poetry run python scripts/validate_instruments.py
+
+      # 5. GATE G-8: Layer 1/Layer 2 glob-scope enforcement — ADD ADR-022
+      # (GMI_Decision_Document_v2.docx). Code existed since v1.10.0
+      # (scripts/check_glob_scope.py) but was never actually wired into this
+      # workflow — confirmed empirically (grep on the live file before this
+      # change). Placed immediately after Gate G-3 per ADR-022's own design.
+      # Stdlib-only (ast/re/sys/pathlib) — no poetry environment needed.
+      - name: Gate G-8 — Layer 1/Layer 2 Glob-Scope Check
+        run: python scripts/check_glob_scope.py
+
+      # 6. GATE G-4 + G-5: Full test suite + collection monitoring
+      - name: Gate G-4/G-5 — Test Suite
+        run: |
+          poetry run python -m pytest tests/ -q --tb=short 2>&1 | tee pytest_output.txt
+          # Verifikasi tidak ada collection error
+          if grep -qi "ERROR collecting" pytest_output.txt; then
+            echo "FAIL: collection error terdeteksi — test tidak ter-collect"
+            exit 1
+          fi
+
+      # 7. GATE G-4-count: Monitor jumlah test ter-collect (mencegah NEW-4 terulang)
+      # FIX GMI-CI-001 (Bronze/Silver/Gold Solidification, v1.9.0): BASELINE
+      # sebelumnya hardcoded literal (676) — sudah stale sejak beberapa versi
+      # lalu relatif terhadap tests/COUNT_BASELINE.txt yang benar-benar dirawat.
+      # Fix: baca dari file yang sama yang setiap versi sudah diupdate, alih-
+      # alih dua sumber kebenaran yang bisa divergen diam-diam.
+      - name: Gate G-4-count — Test Count Monitor
+        run: |
+          COLLECTED=$(poetry run python -m pytest tests/ --collect-only -q 2>&1 \
+            | grep -oP '^\d+(?= tests? collected)' || echo "0")
+          BASELINE=$(cat tests/COUNT_BASELINE.txt)
+          echo "Collected: ${COLLECTED:-0} / Baseline: $BASELINE"
+          if [ "${COLLECTED:-0}" -lt "$BASELINE" ]; then
+            echo "FAIL: test count ${COLLECTED:-0} < baseline $BASELINE"
+            echo "Kemungkinan collection error atau test file dihapus."
+            echo "Update tests/COUNT_BASELINE.txt jika penambahan test disengaja."
+            exit 1
+          fi
+
+      # 8. GATE G-6: Coverage minimum (PR only)
+      - name: Gate G-6 — Coverage Gate (PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          poetry run python -m pytest tests/ \
+            --cov=src \
+            --cov-fail-under=70 \
+            --cov-report=term-missing \
+            -q
+
+      # 9. GATE G-7: CHANGELOG update check (PR only, warning only)
+      # Pure git/bash — no poetry environment needed.
+      - name: Gate G-7 — CHANGELOG Update Check (PR only)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true   # Warning only, not blocking
+        run: |
+          # Periksa apakah src/ berubah tanpa update CHANGELOG.md
+          git diff --name-only origin/${{ github.base_ref }}...HEAD > changed_files.txt
+          SRC_CHANGED=$(grep "^src/" changed_files.txt | wc -l)
+          CHANGELOG_CHANGED=$(grep "^CHANGELOG.md" changed_files.txt | wc -l)
+          if [ "$SRC_CHANGED" -gt "0" ] && [ "$CHANGELOG_CHANGED" -eq "0" ]; then
+            echo "WARNING: src/ modified tapi CHANGELOG.md tidak diupdate."
+            echo "Setiap perubahan src/ wajib disertai entry CHANGELOG.md (CI/CD Guide §8)."
+            echo "Ini adalah warning — tidak memblokir merge."
+          fi

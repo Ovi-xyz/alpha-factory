@@ -1,0 +1,20 @@
+version: "2024-01"
+source: polygon
+on_mismatch: quarantine
+
+expected_columns:
+  - name: open
+    type: float64
+    nullable: false
+  - name: high
+    type: float64
+    nullable: false
+  - name: low
+    type: float64
+    nullable: false
+  - name: close
+    type: float64
+    nullable: false
+  - name: volume
+    type: float64
+    nullable: true

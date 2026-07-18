@@ -1,0 +1,27 @@
+# Bronze schema registry: BIS CBPOL_D ingester
+# GD §3.7: mismatch -> quarantine + alert, tidak silent-fail
+# Data Source & Rates Adjustment v1.0 §8.1
+
+version: "1.0"
+source: "bis_cbpol_d"
+on_mismatch: "quarantine"
+
+expected_columns:
+  - name: ref_area
+    type: string
+    nullable: false
+  - name: central_bank
+    type: string
+    nullable: false
+  - name: obs_date
+    type: date
+    nullable: false
+  - name: rate_pct
+    type: float64
+    nullable: true   # NULL = no official meeting / data gap from BIS
+  - name: _source
+    type: string
+    nullable: false
+  - name: _ingested_at
+    type: string
+    nullable: false

@@ -1,0 +1,418 @@
+"""
+test_job_registry_integrity.py — Job Registry Integration Test
+Validates that all jobs in JOB_REGISTRY and PIPELINE_SEQUENCE are
+correctly wired: no missing dependencies, no circular deps, all
+job functions importable without error.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+import pytest
+
+from src.scheduler.job_registry import (
+    JOB_REGISTRY,
+    PIPELINE_SEQUENCE,
+    _passes_schedule,
+)
+
+
+class TestJobRegistryCompleteness:
+
+    def test_all_sequence_jobs_in_registry(self):
+        """Every job in PIPELINE_SEQUENCE must exist in JOB_REGISTRY."""
+        missing = [j for j in PIPELINE_SEQUENCE if j not in JOB_REGISTRY]
+        assert not missing, f"Jobs in PIPELINE_SEQUENCE missing from registry: {missing}"
+
+    def test_all_dependency_targets_exist(self):
+        """Every dependency target must exist as a registered job."""
+        broken = []
+        for job_name, job in JOB_REGISTRY.items():
+            for dep in job.get("depends_on", []):
+                if dep not in JOB_REGISTRY:
+                    broken.append(f"{job_name} → {dep}")
+        assert not broken, f"Broken dependency targets: {broken}"
+
+    def test_all_jobs_have_required_fields(self):
+        """Every job must have: description, fn, depends_on, layer, est_minutes."""
+        required = {"description", "fn", "depends_on", "layer", "est_minutes"}
+        incomplete = []
+        for name, job in JOB_REGISTRY.items():
+            missing = required - set(job.keys())
+            if missing:
+                incomplete.append(f"{name}: missing {missing}")
+        assert not incomplete, f"Incomplete job definitions: {incomplete}"
+
+    def test_all_layers_valid(self):
+        """All job layers must be one of: bronze, silver, gold, util."""
+        valid_layers = {"bronze", "silver", "gold", "util"}
+        invalid = [
+            f"{name}: layer={job['layer']!r}"
+            for name, job in JOB_REGISTRY.items()
+            if job.get("layer") not in valid_layers
+        ]
+        assert not invalid, f"Invalid layer assignments: {invalid}"
+
+    def test_no_circular_dependencies(self):
+        """No job should have itself as a (transitive) dependency."""
+        def has_cycle(job_name: str, visited: set, path: set) -> bool:
+            if job_name in path:
+                return True
+            if job_name in visited:
+                return False
+            visited.add(job_name)
+            path.add(job_name)
+            for dep in JOB_REGISTRY.get(job_name, {}).get("depends_on", []):
+                if has_cycle(dep, visited, path):
+                    return True
+            path.discard(job_name)
+            return False
+
+        cycles = []
+        for name in JOB_REGISTRY:
+            if has_cycle(name, set(), set()):
+                cycles.append(name)
+        assert not cycles, f"Circular dependencies detected: {cycles}"
+
+    def test_pipeline_sequence_respects_dependencies(self):
+        """In PIPELINE_SEQUENCE, each job's dependencies appear before it."""
+        position = {job: i for i, job in enumerate(PIPELINE_SEQUENCE)}
+        violations = []
+        for job_name in PIPELINE_SEQUENCE:
+            job_pos = position[job_name]
+            for dep in JOB_REGISTRY.get(job_name, {}).get("depends_on", []):
+                if dep in position and position[dep] >= job_pos:
+                    violations.append(
+                        f"{job_name} (pos {job_pos}) depends on"
+                        f" {dep} (pos {position[dep]})"
+                    )
+        assert not violations, f"Dependency order violations: {violations}"
+
+    def test_silver_fundamental_not_required_in_daily_sequence(self):
+        """
+        FIX NEW-2 (audit_v1_7_3_uncovered_findings.docx §3, Opsi A): silver_fundamental
+        intentionally absent from PIPELINE_SEQUENCE (alias DAILY_SEQUENCE).
+
+        Superseded assumption: this test previously asserted the OPPOSITE
+        ("silver_fundamental must appear in PIPELINE_SEQUENCE") under the
+        expectation that bronze_finnhub would already be implemented
+        (refactor_plan_sentiment_bronze.docx). That assumption was the root
+        cause of NEW-2 — bronze_finnhub is a deliberate NotImplementedError
+        stub (FIX R-F04), so silver_fundamental can never complete, and
+        forcing it into the sequence would make --job all fail unconditionally.
+        Correct contract (Opsi A, short-term): silver_fundamental stays out of
+        the sequence until bronze_finnhub gets a real implementation (Opsi B,
+        tracked separately) — gold_screener no longer hard-depends on it
+        (see test_gold_screener_not_dependent_on_silver_fundamental below).
+        """
+        assert "silver_fundamental" not in PIPELINE_SEQUENCE
+
+    def test_gold_screener_not_dependent_on_silver_fundamental(self):
+        """
+        FIX NEW-2 [BLOCKING]: gold_screener.depends_on must NOT include
+        silver_fundamental — GD §5.2.4 already designs earnings_calendar as a
+        LEFT JOIN ("data boleh null"); making it a hard dependency permanently
+        locks gold_screener since silver_fundamental's own dependency
+        (bronze_finnhub) is an intentional stub that never completes.
+        """
+        assert "silver_fundamental" not in JOB_REGISTRY["gold_screener"]["depends_on"]
+
+    def test_silver_fundamental_before_screener(self):
+        """If silver_fundamental is ever added back to the sequence (Opsi B),
+        it must precede gold_screener. Currently a no-op since silver_fundamental
+        is intentionally absent (FIX NEW-2) — kept for forward-compatibility."""
+        seq = PIPELINE_SEQUENCE
+        if "silver_fundamental" in seq and "gold_screener" in seq:
+            assert seq.index("silver_fundamental") < seq.index("gold_screener")
+
+    def test_active_symbols_before_sentiment(self):
+        """silver_active_symbols must precede silver_sentiment."""
+        seq = PIPELINE_SEQUENCE
+        if "silver_active_symbols" in seq and "silver_sentiment" in seq:
+            assert seq.index("silver_active_symbols") < seq.index("silver_sentiment")
+
+    def test_regime_before_sector_before_screener(self):
+        """gold_regime → gold_sector → gold_screener ordering."""
+        seq = PIPELINE_SEQUENCE
+        names = ["gold_regime", "gold_sector", "gold_screener"]
+        positions = [seq.index(n) for n in names if n in seq]
+        assert positions == sorted(positions), (
+            "Gold regime→sector→screener order violated in PIPELINE_SEQUENCE"
+        )
+
+    def test_callable_functions(self):
+        """All job fn values must be callable."""
+        non_callable = [
+            name for name, job in JOB_REGISTRY.items()
+            if not callable(job.get("fn"))
+        ]
+        assert not non_callable, f"Non-callable job functions: {non_callable}"
+
+
+class TestScheduleGuardIntegration:
+
+    def test_bronze_eia_only_wednesday(self):
+        """bronze_eia must only run on Wednesday."""
+        from datetime import date
+        job = JOB_REGISTRY["bronze_eia"]
+        monday    = date(2025, 1, 6)    # Monday
+        wednesday = date(2025, 1, 8)    # Wednesday
+        assert monday.weekday()    == 0
+        assert wednesday.weekday() == 2
+        assert not _passes_schedule(job, monday)
+        assert _passes_schedule(job, wednesday)
+
+    def test_daily_jobs_run_every_day(self):
+        """bronze_ohlcv_daily has no schedule constraints — runs every day."""
+        job = JOB_REGISTRY["bronze_ohlcv_daily"]
+        for wd in range(7):   # All days of week
+            from datetime import date, timedelta
+            d = date(2025, 1, 6) + timedelta(days=wd)
+            assert _passes_schedule(job, d), \
+                f"bronze_ohlcv_daily failed schedule check on weekday={wd}"
+
+    def test_bls_cpi_day_range(self):
+        """bronze_bls_cpi only runs on days 10-15 of month."""
+        job = JOB_REGISTRY["bronze_bls_cpi"]
+        from datetime import date
+        assert _passes_schedule(job, date(2025, 2, 10))
+        assert _passes_schedule(job, date(2025, 2, 15))
+        assert not _passes_schedule(job, date(2025, 2, 9))
+        assert not _passes_schedule(job, date(2025, 2, 16))
+
+    def test_bea_gdp_quarterly(self):
+        """bronze_bea_gdp runs in months 1,4,7,10 last week."""
+        job = JOB_REGISTRY["bronze_bea_gdp"]
+        from datetime import date
+        assert _passes_schedule(job, date(2025, 1, 28))     # January last week
+        assert not _passes_schedule(job, date(2025, 2, 28)) # February — wrong month
+        assert _passes_schedule(job, date(2025, 4, 27))     # April last week
+        assert not _passes_schedule(job, date(2025, 4, 10)) # April early — wrong day
+
+
+class TestGMIJR001BISRatesWiring:
+    """
+    ADD GMI-JR-001 — Data Source & Rates Adjustment v1.0 §8.2.
+    Verifies bronze_bis_rates / silver_global_rates job wiring correctness.
+    """
+
+    def test_bronze_bis_rates_registered(self):
+        assert "bronze_bis_rates" in JOB_REGISTRY
+
+    def test_bronze_bis_rates_has_no_dependencies(self):
+        """GD §17.3.1: Bronze ingesters must not depend on each other."""
+        assert JOB_REGISTRY["bronze_bis_rates"]["depends_on"] == []
+
+    def test_bronze_bis_rates_layer_is_bronze(self):
+        assert JOB_REGISTRY["bronze_bis_rates"]["layer"] == "bronze"
+
+    def test_silver_global_rates_registered(self):
+        assert "silver_global_rates" in JOB_REGISTRY
+
+    def test_silver_global_rates_depends_on_bronze_bis_rates(self):
+        assert JOB_REGISTRY["silver_global_rates"]["depends_on"] == ["bronze_bis_rates"]
+
+    def test_silver_global_rates_layer_is_silver(self):
+        assert JOB_REGISTRY["silver_global_rates"]["layer"] == "silver"
+
+    def test_both_jobs_in_weekly_sequence(self):
+        from src.scheduler.job_registry import WEEKLY_SEQUENCE
+        assert "bronze_bis_rates" in WEEKLY_SEQUENCE
+        assert "silver_global_rates" in WEEKLY_SEQUENCE
+
+    def test_bronze_bis_rates_not_in_daily_sequence(self):
+        """Weekly cadence — must NOT be in DAILY_SEQUENCE (matches bronze_macro_weekly pattern)."""
+        from src.scheduler.job_registry import DAILY_SEQUENCE
+        assert "bronze_bis_rates" not in DAILY_SEQUENCE
+        assert "silver_global_rates" not in DAILY_SEQUENCE
+
+    def test_weekly_sequence_order_bis_rates_before_global_rates(self):
+        """silver_global_rates must run after bronze_bis_rates (dependency order)."""
+        from src.scheduler.job_registry import WEEKLY_SEQUENCE
+        bis_idx = WEEKLY_SEQUENCE.index("bronze_bis_rates")
+        global_rates_idx = WEEKLY_SEQUENCE.index("silver_global_rates")
+        assert bis_idx < global_rates_idx
+
+    def test_weekly_sequence_order_bronze_before_silver(self):
+        """Both bronze jobs must precede both silver jobs (layer ordering)."""
+        from src.scheduler.job_registry import WEEKLY_SEQUENCE
+        bronze_bis_idx  = WEEKLY_SEQUENCE.index("bronze_bis_rates")
+        silver_macro_idx = WEEKLY_SEQUENCE.index("silver_macro")
+        assert bronze_bis_idx < silver_macro_idx
+
+    def test_bronze_bis_rates_fn_is_callable(self):
+        assert callable(JOB_REGISTRY["bronze_bis_rates"]["fn"])
+
+    def test_silver_global_rates_fn_is_callable(self):
+        assert callable(JOB_REGISTRY["silver_global_rates"]["fn"])
+
+    def test_bronze_bis_rates_fn_delegates_correctly(self):
+        """Wrapper must call src.bronze.bis_rates_ingester.run(run_date)."""
+        from unittest.mock import patch
+        with patch("src.bronze.bis_rates_ingester.run") as mock_run:
+            JOB_REGISTRY["bronze_bis_rates"]["fn"](date(2026, 6, 30))
+        mock_run.assert_called_once_with(date(2026, 6, 30))
+
+    def test_silver_global_rates_fn_delegates_correctly(self):
+        """Wrapper must call src.silver.global_rates_processor.run(run_date)."""
+        from unittest.mock import patch
+        with patch("src.silver.global_rates_processor.run") as mock_run:
+            JOB_REGISTRY["silver_global_rates"]["fn"](date(2026, 6, 30))
+        mock_run.assert_called_once_with(date(2026, 6, 30))
+
+    def test_silver_active_symbols_fn_delegates_to_module_run(self):
+        """
+        FIX GMI-JR-001: silver_active_symbols wrapper must delegate to the
+        module-level run() (which resolves BOTH Layer 1 and Layer 2), not
+        call resolver.resolve() directly (which would silently skip Layer 2).
+        """
+        from unittest.mock import patch
+        with patch("src.silver.active_symbols.run") as mock_run:
+            JOB_REGISTRY["silver_active_symbols"]["fn"](date(2026, 6, 30))
+        mock_run.assert_called_once_with(date(2026, 6, 30))
+
+
+class TestGMIJR002ContextOHLCVWiring:
+    """
+    ADD GMI-JR-002 — Architecture v2.0 §4, Architecture Extension v1.0 §2-3, §8.
+    Verifies bronze_ohlcv_context_daily / silver_ohlcv_context job wiring —
+    the Bronze/Silver Layer 2 OHLCV pipeline (GMI-BRZ-001 / GMI-SIL-001).
+    """
+
+    def test_bronze_ohlcv_context_daily_registered(self):
+        assert "bronze_ohlcv_context_daily" in JOB_REGISTRY
+
+    def test_bronze_ohlcv_context_daily_has_no_dependencies(self):
+        """GD §17.3.1: Bronze ingesters must not depend on each other —
+        independent of bronze_ohlcv_daily (Layer 1)."""
+        assert JOB_REGISTRY["bronze_ohlcv_context_daily"]["depends_on"] == []
+
+    def test_bronze_ohlcv_context_daily_layer_is_bronze(self):
+        assert JOB_REGISTRY["bronze_ohlcv_context_daily"]["layer"] == "bronze"
+
+    def test_silver_ohlcv_context_registered(self):
+        assert "silver_ohlcv_context" in JOB_REGISTRY
+
+    def test_silver_ohlcv_context_depends_on_bronze_ohlcv_context_daily(self):
+        assert JOB_REGISTRY["silver_ohlcv_context"]["depends_on"] == [
+            "bronze_ohlcv_context_daily"
+        ]
+
+    def test_silver_ohlcv_context_layer_is_silver(self):
+        assert JOB_REGISTRY["silver_ohlcv_context"]["layer"] == "silver"
+
+    def test_both_jobs_in_daily_sequence(self):
+        """Unlike BIS rates (weekly), Layer 2 context OHLCV is DAILY —
+        GlobalIndexRegimeModule and gold_domain_scores (Architecture v2.0
+        §6.5, Architecture Extension v1.0 §5) are daily-cadence consumers."""
+        from src.scheduler.job_registry import DAILY_SEQUENCE
+        assert "bronze_ohlcv_context_daily" in DAILY_SEQUENCE
+        assert "silver_ohlcv_context" in DAILY_SEQUENCE
+
+    def test_daily_sequence_order_bronze_before_silver_context(self):
+        from src.scheduler.job_registry import DAILY_SEQUENCE
+        bronze_idx = DAILY_SEQUENCE.index("bronze_ohlcv_context_daily")
+        silver_idx = DAILY_SEQUENCE.index("silver_ohlcv_context")
+        assert bronze_idx < silver_idx
+
+    def test_bronze_ohlcv_context_daily_before_layer1_silver_ohlcv_unrelated(self):
+        """Sanity: context Bronze job position must not accidentally depend
+        on, or be blocked by, Layer 1's silver_ohlcv position."""
+        from src.scheduler.job_registry import DAILY_SEQUENCE
+        assert DAILY_SEQUENCE.index("bronze_ohlcv_daily") < DAILY_SEQUENCE.index(
+            "silver_ohlcv_context"
+        )
+
+    def test_bronze_ohlcv_context_daily_fn_is_callable(self):
+        assert callable(JOB_REGISTRY["bronze_ohlcv_context_daily"]["fn"])
+
+    def test_silver_ohlcv_context_fn_is_callable(self):
+        assert callable(JOB_REGISTRY["silver_ohlcv_context"]["fn"])
+
+    def test_bronze_ohlcv_context_daily_fn_delegates_correctly(self):
+        """Wrapper must call MarketOHLCVIngester().run_context(run_date)."""
+        from unittest.mock import patch
+        with patch(
+            "src.bronze.market_ingester.MarketOHLCVIngester.run_context"
+        ) as mock_run:
+            JOB_REGISTRY["bronze_ohlcv_context_daily"]["fn"](date(2026, 7, 1))
+        mock_run.assert_called_once_with(date(2026, 7, 1))
+
+    def test_silver_ohlcv_context_fn_delegates_correctly(self):
+        """Wrapper must call src.silver.ohlcv_processor.run_context(run_date)."""
+        from unittest.mock import patch
+        with patch("src.silver.ohlcv_processor.run_context") as mock_run:
+            JOB_REGISTRY["silver_ohlcv_context"]["fn"](date(2026, 7, 1))
+        mock_run.assert_called_once_with(date(2026, 7, 1))
+
+    def test_context_ohlcv_jobs_do_not_disturb_existing_daily_sequence_length_floor(self):
+        """Anti-pattern guard (CI/CD Ops Guide §Anti-Pattern Test table):
+        assert a floor, not an exact count — sequence grows over cycles."""
+        from src.scheduler.job_registry import DAILY_SEQUENCE
+        assert len(DAILY_SEQUENCE) >= 15
+
+
+class TestGMIJR003ContextAnchorsWiring:
+    """
+    MOVED GMI-CTX-001 — Architecture v2.0 §4.4. Verifies silver_context_anchors
+    job wiring after Layer 2 context-anchor resolution was extracted from
+    active_symbols.py (ActiveSymbolsResolver.resolve_context()) into its own
+    module (src/silver/context_anchors.py::ContextAnchorsResolver) and its
+    own job, separate from silver_active_symbols (Layer 1).
+    """
+
+    def test_silver_context_anchors_registered(self):
+        assert "silver_context_anchors" in JOB_REGISTRY
+
+    def test_silver_context_anchors_has_no_dependencies(self):
+        """resolve() is pure InstrumentLoader enumeration — zero Silver
+        read, so a fake dependency would only add needless blocking risk
+        (see context_anchors.py::run() docstring)."""
+        assert JOB_REGISTRY["silver_context_anchors"]["depends_on"] == []
+
+    def test_silver_context_anchors_layer_is_silver(self):
+        assert JOB_REGISTRY["silver_context_anchors"]["layer"] == "silver"
+
+    def test_silver_context_anchors_in_daily_sequence(self):
+        from src.scheduler.job_registry import DAILY_SEQUENCE
+        assert "silver_context_anchors" in DAILY_SEQUENCE
+
+    def test_silver_context_anchors_fn_is_callable(self):
+        assert callable(JOB_REGISTRY["silver_context_anchors"]["fn"])
+
+    def test_silver_context_anchors_fn_delegates_correctly(self):
+        """Wrapper must call src.silver.context_anchors.run(run_date)."""
+        from unittest.mock import patch
+        with patch("src.silver.context_anchors.run") as mock_run:
+            JOB_REGISTRY["silver_context_anchors"]["fn"](date(2026, 7, 5))
+        mock_run.assert_called_once_with(date(2026, 7, 5))
+
+    def test_silver_active_symbols_still_registered_and_unaffected(self):
+        """Sanity: splitting Layer 2 out must not have disturbed Layer 1's
+        job entry (dependencies, layer, callability)."""
+        assert "silver_active_symbols" in JOB_REGISTRY
+        assert JOB_REGISTRY["silver_active_symbols"]["depends_on"] == [
+            "silver_ohlcv", "silver_validate"
+        ]
+        assert callable(JOB_REGISTRY["silver_active_symbols"]["fn"])
+
+    def test_active_symbols_resolver_no_longer_exposes_layer2_methods(self):
+        """Negative test — proves the extraction actually happened, not
+        just that a new module was added alongside a still-present old one
+        (the same discipline RISK-3's fix verification used: grep/introspect
+        for ABSENCE of the old pattern, not just presence of the new one)."""
+        from src.silver.active_symbols import ActiveSymbolsResolver
+        assert not hasattr(ActiveSymbolsResolver, "resolve_context")
+        assert not hasattr(ActiveSymbolsResolver, "load_context")
+        assert not hasattr(ActiveSymbolsResolver, "load_context_full")
+
+    def test_context_anchors_resolver_exposes_expected_api(self):
+        from src.silver.context_anchors import ContextAnchorsResolver
+        assert hasattr(ContextAnchorsResolver, "resolve")
+        assert hasattr(ContextAnchorsResolver, "load")
+        assert hasattr(ContextAnchorsResolver, "load_full")
+
+    def test_silver_context_anchors_job_does_not_disturb_daily_sequence_length_floor(self):
+        from src.scheduler.job_registry import DAILY_SEQUENCE
+        assert len(DAILY_SEQUENCE) >= 15

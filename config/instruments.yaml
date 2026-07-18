@@ -1,0 +1,1629 @@
+version: '1.5'
+last_updated: '2026-07-11'
+us_stocks:
+  Technology:
+  - symbol: AAPL
+  - symbol: ACLS
+  - symbol: ADI
+  - symbol: ALGM
+  - symbol: AMAT
+  - symbol: AMBA
+  - symbol: AMD
+  - symbol: ANET
+  - symbol: ANSS
+  - symbol: ARM
+  - symbol: AVGO
+  - symbol: CDNS
+  - symbol: CIEN
+  - symbol: COHR
+  - symbol: CRM
+  - symbol: CRWD
+  - symbol: DDOG
+  - symbol: DELL
+  - symbol: DIOD
+  - symbol: ENTG
+  - symbol: FORM
+  - symbol: FTNT
+  - symbol: GFS
+  - symbol: GOOG
+  - symbol: GOOGL
+  - symbol: HPE
+  - symbol: HPQ
+  - symbol: IBM
+  - symbol: ICHR
+  - symbol: INTC
+  - symbol: INTU
+  - symbol: JNPR
+  - symbol: KEYS
+  - symbol: KLAC
+  - symbol: LRCX
+  - symbol: MCHP
+  - symbol: META
+  - symbol: MKSI
+  - symbol: MPWR
+  - symbol: MRVL
+  - symbol: MSFT
+  - symbol: MU
+  - symbol: NET
+  - symbol: NOW
+  - symbol: NTAP
+  - symbol: NVDA
+  - symbol: OKTA
+  - symbol: 'ON'
+  - symbol: ONTO
+  - symbol: ORCL
+  - symbol: PANW
+  - symbol: PLTR
+  - symbol: PTC
+  - symbol: QCOM
+  - symbol: SMCI
+  - symbol: SNOW
+  - symbol: SNPS
+  - symbol: STX
+  - symbol: SWKS
+  - symbol: TXN
+  - symbol: WDAY
+  - symbol: WDC
+  - symbol: WOLF
+  - symbol: ZS
+  Consumer Discretionary:
+  - symbol: ABNB
+  - symbol: AMZN
+  - symbol: AN
+  - symbol: APTV
+  - symbol: BBWI
+  - symbol: BKNG
+  - symbol: BWA
+  - symbol: CAR
+  - symbol: CCL
+  - symbol: CMG
+  - symbol: CVNA
+  - symbol: DKNG
+  - symbol: DRI
+  - symbol: EBAY
+  - symbol: ETSY
+  - symbol: EXPE
+  - symbol: F
+  - symbol: GM
+  - symbol: HBI
+  - symbol: HD
+  - symbol: HLT
+  - symbol: HMC
+  - symbol: KMX
+  - symbol: LCID
+  - symbol: LEA
+  - symbol: LOW
+  - symbol: LVS
+  - symbol: MAR
+  - symbol: MCD
+  - symbol: MGA
+  - symbol: MGM
+  - symbol: NCLH
+  - symbol: NKE
+  - symbol: PENN
+  - symbol: PVH
+  - symbol: QSR
+  - symbol: RCL
+  - symbol: RIVN
+  - symbol: RL
+  - symbol: ROST
+  - symbol: SBUX
+  - symbol: STLA
+  - symbol: TJX
+  - symbol: TM
+  - symbol: TPR
+  - symbol: TSLA
+  - symbol: URBN
+  - symbol: VFC
+  - symbol: W
+  - symbol: WYNN
+  - symbol: YUM
+  Health Care:
+  - symbol: A
+  - symbol: ABBV
+  - symbol: ABC
+  - symbol: ABT
+  - symbol: ACAD
+  - symbol: AMGN
+  - symbol: AZN
+  - symbol: BAX
+  - symbol: BDX
+  - symbol: BIIB
+  - symbol: BMY
+  - symbol: BNTX
+  - symbol: BSX
+  - symbol: CAH
+  - symbol: CI
+  - symbol: CNC
+  - symbol: CRL
+  - symbol: CVS
+  - symbol: DHR
+  - symbol: DOCS
+  - symbol: EW
+  - symbol: EXAS
+  - symbol: GILD
+  - symbol: HALO
+  - symbol: HOLX
+  - symbol: HUM
+  - symbol: IDXX
+  - symbol: INCY
+  - symbol: IQV
+  - symbol: ISRG
+  - symbol: JNJ
+  - symbol: LLY
+  - symbol: MCK
+  - symbol: MDT
+  - symbol: MOH
+  - symbol: MRK
+  - symbol: MRNA
+  - symbol: MTD
+  - symbol: NTRA
+  - symbol: NVO
+  - symbol: PFE
+  - symbol: REGN
+  - symbol: RMD
+  - symbol: SYK
+  - symbol: TMO
+  - symbol: UNH
+  - symbol: VEEV
+  - symbol: VRTX
+  - symbol: WAT
+  - symbol: ZBH
+  Financials:
+  - symbol: AFL
+  - symbol: AIG
+  - symbol: ALL
+  - symbol: ALLY
+  - symbol: AXP
+  - symbol: BAC
+  - symbol: BLK
+  - symbol: BRK-B
+    raw_symbol: BRK.B
+  - symbol: C
+  - symbol: CB
+  - symbol: CBOE
+  - symbol: CFG
+  - symbol: CINF
+  - symbol: CMA
+  - symbol: CME
+  - symbol: COF
+  - symbol: DFS
+  - symbol: FDS
+  - symbol: FITB
+  - symbol: GL
+  - symbol: GS
+  - symbol: HBAN
+  - symbol: HIG
+  - symbol: ICE
+  - symbol: JPM
+  - symbol: KEY
+  - symbol: L
+  - symbol: LNC
+  - symbol: MA
+  - symbol: MCO
+  - symbol: MET
+  - symbol: MS
+  - symbol: MSCI
+  - symbol: MTB
+  - symbol: NDAQ
+  - symbol: PNC
+  - symbol: PRU
+  - symbol: PYPL
+  - symbol: RE
+  - symbol: RF
+  - symbol: RNR
+  - symbol: SCHW
+  - symbol: SPGI
+  - symbol: SQ
+  - symbol: SYF
+  - symbol: TFC
+  - symbol: TRV
+  - symbol: USB
+  - symbol: V
+  - symbol: WFC
+  - symbol: ZION
+  Communication Services:
+  - symbol: AMC
+  - symbol: APPS
+  - symbol: BMBL
+  - symbol: CHTR
+  - symbol: CMCSA
+  - symbol: DASH
+  - symbol: DIS
+  - symbol: EA
+  - symbol: FOX
+  - symbol: FOXA
+  - symbol: IAC
+  - symbol: LUMN
+  - symbol: LYFT
+  - symbol: LYV
+  - symbol: MGNI
+  - symbol: MTCH
+  - symbol: NFLX
+  - symbol: NWSA
+  - symbol: NYT
+  - symbol: PARA
+  - symbol: PINS
+  - symbol: PUBM
+  - symbol: RBLX
+  - symbol: RDDT
+  - symbol: SIRI
+  - symbol: SNAP
+  - symbol: SPOT
+  - symbol: T
+  - symbol: TMUS
+  - symbol: TTD
+  - symbol: TTWO
+  - symbol: U
+  - symbol: UBER
+  - symbol: VZ
+  - symbol: WBD
+  - symbol: ZM
+  Industrials:
+  - symbol: AAL
+  - symbol: ALK
+  - symbol: AME
+  - symbol: AOS
+  - symbol: AXON
+  - symbol: BA
+  - symbol: CAT
+  - symbol: CHRW
+  - symbol: CSX
+  - symbol: CTAS
+  - symbol: DAL
+  - symbol: DE
+  - symbol: DOV
+  - symbol: EMR
+  - symbol: ETN
+  - symbol: EXPD
+  - symbol: FDX
+  - symbol: GD
+  - symbol: GE
+  - symbol: GNRC
+  - symbol: HON
+  - symbol: HWM
+  - symbol: ITW
+  - symbol: JBHT
+  - symbol: JOBY
+  - symbol: LMT
+  - symbol: LUV
+  - symbol: MAS
+  - symbol: MMM
+  - symbol: MSA
+  - symbol: NOC
+  - symbol: NSC
+  - symbol: ODFL
+  - symbol: PH
+  - symbol: ROK
+  - symbol: ROP
+  - symbol: RSG
+  - symbol: RTX
+  - symbol: SAIA
+  - symbol: SAVE
+  - symbol: SPR
+  - symbol: TDG
+  - symbol: UAL
+  - symbol: UNP
+  - symbol: UPS
+  - symbol: VRSK
+  - symbol: WAB
+  - symbol: WM
+  - symbol: XPO
+  - symbol: XYL
+  Energy:
+  - symbol: APA
+  - symbol: AR
+  - symbol: BE
+  - symbol: BKR
+  - symbol: CHRD
+  - symbol: CLNE
+  - symbol: CNX
+  - symbol: COP
+  - symbol: CTRA
+  - symbol: CVX
+  - symbol: DINO
+  - symbol: DKL
+  - symbol: DVN
+  - symbol: EOG
+  - symbol: EPD
+  - symbol: EQT
+  - symbol: ET
+  - symbol: FANG
+  - symbol: FCEL
+  - symbol: HAL
+  - symbol: HES
+  - symbol: KMI
+  - symbol: MMP
+  - symbol: MPC
+  - symbol: MRO
+  - symbol: MTDR
+  - symbol: NOV
+  - symbol: OVV
+  - symbol: OXY
+  - symbol: PAA
+  - symbol: PBF
+  - symbol: PLUG
+  - symbol: PR
+  - symbol: PSX
+  - symbol: PXD
+  - symbol: RRC
+  - symbol: SLB
+  - symbol: SM
+  - symbol: TRGP
+  - symbol: VLO
+  - symbol: WMB
+  - symbol: XOM
+  Consumer Staples:
+  - symbol: ACI
+  - symbol: ADM
+  - symbol: BG
+  - symbol: BUD
+  - symbol: CAG
+  - symbol: CELH
+  - symbol: CHD
+  - symbol: CHEF
+  - symbol: CL
+  - symbol: CLX
+  - symbol: COKE
+  - symbol: COST
+  - symbol: CPB
+  - symbol: DXCM
+  - symbol: EL
+  - symbol: GIS
+  - symbol: GO
+  - symbol: HRL
+  - symbol: HSY
+  - symbol: K
+  - symbol: KHC
+  - symbol: KMB
+  - symbol: KO
+  - symbol: KR
+  - symbol: MDLZ
+  - symbol: MKC
+  - symbol: MNST
+  - symbol: MO
+  - symbol: PEP
+  - symbol: PG
+  - symbol: PM
+  - symbol: SAM
+  - symbol: SJM
+  - symbol: SPTN
+  - symbol: STZ
+  - symbol: SYY
+  - symbol: TAP
+  - symbol: TSN
+  - symbol: USM
+  - symbol: WMT
+  Real Estate:
+  - symbol: AMH
+  - symbol: AMT
+  - symbol: AVB
+  - symbol: CBL
+  - symbol: CCI
+  - symbol: COLD
+  - symbol: CUBE
+  - symbol: DLR
+  - symbol: DOC
+  - symbol: EGP
+  - symbol: EQIX
+  - symbol: EQR
+  - symbol: EXR
+  - symbol: FR
+  - symbol: FRT
+  - symbol: HR
+  - symbol: INVH
+  - symbol: IRM
+  - symbol: KIM
+  - symbol: MAC
+  - symbol: NNN
+  - symbol: O
+  - symbol: PEAK
+  - symbol: PLD
+  - symbol: PSA
+  - symbol: REG
+  - symbol: REXR
+  - symbol: SBAC
+  - symbol: SPG
+  - symbol: STAG
+  - symbol: UNIT
+  - symbol: VTR
+  - symbol: WELL
+  - symbol: WY
+  Utilities:
+  - symbol: AEP
+  - symbol: ATO
+  - symbol: AVA
+  - symbol: AWK
+  - symbol: CMS
+  - symbol: D
+  - symbol: DUK
+  - symbol: ED
+  - symbol: ES
+  - symbol: ETR
+  - symbol: EVRG
+  - symbol: EXC
+  - symbol: GWRS
+  - symbol: IDA
+  - symbol: LNT
+  - symbol: MSEX
+  - symbol: NEE
+  - symbol: NEW
+  - symbol: NI
+  - symbol: NWE
+  - symbol: OGE
+  - symbol: PCG
+  - symbol: POR
+  - symbol: SJW
+  - symbol: SO
+  - symbol: SRE
+  - symbol: SWX
+  - symbol: WEC
+  - symbol: WTRG
+  - symbol: XEL
+  Materials:
+  - symbol: AA
+  - symbol: APD
+  - symbol: ATI
+  - symbol: BALL
+  - symbol: CCK
+  - symbol: CE
+  - symbol: CENX
+  - symbol: CF
+  - symbol: CLF
+  - symbol: CRS
+  - symbol: CTVA
+  - symbol: ECL
+  - symbol: EMN
+  - symbol: FCX
+  - symbol: FMC
+  - symbol: GPK
+  - symbol: HUN
+  - symbol: IFF
+  - symbol: IP
+  - symbol: LIN
+  - symbol: LYB
+  - symbol: MLM
+  - symbol: MOS
+  - symbol: NEM
+  - symbol: NUE
+  - symbol: OLN
+  - symbol: PKG
+  - symbol: PPG
+  - symbol: RPM
+  - symbol: SEE
+  - symbol: SHW
+  - symbol: SLGN
+  - symbol: SMG
+  - symbol: STLD
+  - symbol: TS
+  - symbol: VMC
+  - symbol: WRK
+  - symbol: X
+  High Growth & Popular:
+  - symbol: ABCL
+  - symbol: ACMR
+  - symbol: ACVA
+  - symbol: AFRM
+  - symbol: AGIO
+  - symbol: ALLK
+  - symbol: ALNY
+  - symbol: ALTR
+  - symbol: AMPH
+  - symbol: APPN
+  - symbol: ARWR
+  - symbol: ASTR
+  - symbol: BAH
+  - symbol: BAND
+  - symbol: BEAM
+  - symbol: BILL
+  - symbol: BJ
+  - symbol: BLNK
+  - symbol: CACI
+  - symbol: CFLT
+  - symbol: CHPT
+  - symbol: CLSK
+  - symbol: COIN
+  - symbol: COOP
+  - symbol: CRSP
+  - symbol: DG
+  - symbol: DLTR
+  - symbol: DOCN
+  - symbol: EDIT
+  - symbol: ENVX
+  - symbol: ESTC
+  - symbol: EVGO
+  - symbol: FATE
+  - symbol: FIVE
+  - symbol: FOLD
+  - symbol: FROG
+  - symbol: FSLY
+  - symbol: GCMG
+  - symbol: GTLB
+  - symbol: HOOD
+  - symbol: HUBS
+  - symbol: HUT
+  - symbol: HYZN
+  - symbol: IBRX
+  - symbol: IMVT
+  - symbol: INDI
+  - symbol: INO
+  - symbol: INVZ
+  - symbol: IONS
+  - symbol: KTOS
+  - symbol: KYMR
+  - symbol: LAZR
+  - symbol: LDOS
+  - symbol: LHX
+  - symbol: LIDR
+  - symbol: MARA
+  - symbol: MBLY
+    raw_symbol: MOBILEYE
+  - symbol: MDB
+  - symbol: MNTS
+  - symbol: MSGM
+  - symbol: MSTR
+  - symbol: NCNO
+  - symbol: NKLA
+  - symbol: NTLA
+  - symbol: NVAX
+  - symbol: OCGN
+  - symbol: OLLI
+  - symbol: OPEN
+  - symbol: OUST
+  - symbol: PEGA
+  - symbol: PFSI
+  - symbol: PGEN
+  - symbol: PRAX
+  - symbol: PRGO
+  - symbol: PTGX
+  - symbol: RARE
+  - symbol: RCKT
+  - symbol: RDFN
+  - symbol: RDW
+  - symbol: RIDE
+  - symbol: RIOT
+  - symbol: RKLB
+  - symbol: RVMD
+  - symbol: RXRX
+  - symbol: SAIC
+  - symbol: SAVA
+  - symbol: SDGR
+  - symbol: SOFI
+  - symbol: SPCE
+  - symbol: SRPT
+  - symbol: SUMO
+  - symbol: SUPN
+  - symbol: TNGX
+  - symbol: TWLO
+  - symbol: UPST
+  - symbol: VERV
+  - symbol: VLDR
+  - symbol: VXRT
+  - symbol: WKHS
+  - symbol: XNCR
+  - symbol: Z
+  - symbol: ZI
+idx_stocks:
+  IDX30:
+  - symbol: AADI
+    yfinance_symbol: AADI.JK
+  - symbol: ADRO
+    yfinance_symbol: ADRO.JK
+  - symbol: AMRT
+    yfinance_symbol: AMRT.JK
+  - symbol: ANTM
+    yfinance_symbol: ANTM.JK
+  - symbol: ASII
+    yfinance_symbol: ASII.JK
+  - symbol: BBCA
+    yfinance_symbol: BBCA.JK
+  - symbol: BBNI
+    yfinance_symbol: BBNI.JK
+  - symbol: BBRI
+    yfinance_symbol: BBRI.JK
+  - symbol: BMRI
+    yfinance_symbol: BMRI.JK
+  - symbol: BRPT
+    yfinance_symbol: BRPT.JK
+  - symbol: BUMI
+    yfinance_symbol: BUMI.JK
+  - symbol: CPIN
+    yfinance_symbol: CPIN.JK
+  - symbol: EMTK
+    yfinance_symbol: EMTK.JK
+  - symbol: GOTO
+    yfinance_symbol: GOTO.JK
+  - symbol: ICBP
+    yfinance_symbol: ICBP.JK
+  - symbol: INCO
+    yfinance_symbol: INCO.JK
+  - symbol: INDF
+    yfinance_symbol: INDF.JK
+  - symbol: INKP
+    yfinance_symbol: INKP.JK
+  - symbol: ISAT
+    yfinance_symbol: ISAT.JK
+  - symbol: JPFA
+    yfinance_symbol: JPFA.JK
+  - symbol: KLBF
+    yfinance_symbol: KLBF.JK
+  - symbol: MBMA
+    yfinance_symbol: MBMA.JK
+  - symbol: MDKA
+    yfinance_symbol: MDKA.JK
+  - symbol: MEDC
+    yfinance_symbol: MEDC.JK
+  - symbol: PGAS
+    yfinance_symbol: PGAS.JK
+  - symbol: PGEO
+    yfinance_symbol: PGEO.JK
+  - symbol: PTBA
+    yfinance_symbol: PTBA.JK
+  - symbol: TLKM
+    yfinance_symbol: TLKM.JK
+  - symbol: UNTR
+    yfinance_symbol: UNTR.JK
+  - symbol: UNVR
+    yfinance_symbol: UNVR.JK
+# ADD Decision B Step 1 (GMI_Decision_Document_v3.docx, 2026-07-17):
+# commodity_role/commodity_subcategory added to all 14 commodity
+# instruments (3 here + 11 in context.commodity below) — Architecture
+# v2.1 Addendum §7.1 specified these fields down to the code, but zero
+# occurrences existed anywhere in this file until now (confirmed via
+# grep before this change). commodity_role='trading' here matches these
+# 3 being the only commodity instruments actually eligible for
+# gold_screener (Addendum §2.1).
+commodity:
+  Gold/Silver/Oil:
+  - symbol: AG
+    yfinance_symbol: SI=F
+    commodity_role: trading
+    commodity_subcategory: precious_metals
+  - symbol: AU
+    yfinance_symbol: GC=F
+    commodity_role: trading
+    commodity_subcategory: precious_metals
+  - symbol: CL
+    yfinance_symbol: CL=F
+    commodity_role: trading
+    commodity_subcategory: energy
+forex:
+  Usd/Eur/Gbp:
+  - symbol: AUD_USD
+    raw_symbol: AUD/USD
+    yfinance_symbol: AUDUSD=X
+  - symbol: EUR_AUD
+    raw_symbol: EUR/AUD
+    yfinance_symbol: EURAUD=X
+  - symbol: EUR_CAD
+    raw_symbol: EUR/CAD
+    yfinance_symbol: EURCAD=X
+  - symbol: EUR_CHF
+    raw_symbol: EUR/CHF
+    yfinance_symbol: EURCHF=X
+  - symbol: EUR_GBP
+    raw_symbol: EUR/GBP
+    yfinance_symbol: EURGBP=X
+  - symbol: EUR_JPY
+    raw_symbol: EUR/JPY
+    yfinance_symbol: EURJPY=X
+  - symbol: EUR_NZD
+    raw_symbol: EUR/NZD
+    yfinance_symbol: EURNZD=X
+  - symbol: EUR_USD
+    raw_symbol: EUR/USD
+    yfinance_symbol: EURUSD=X
+  - symbol: GBP_AUD
+    raw_symbol: GBP/AUD
+    yfinance_symbol: GBPAUD=X
+  - symbol: GBP_CAD
+    raw_symbol: GBP/CAD
+    yfinance_symbol: GBPCAD=X
+  - symbol: GBP_CHF
+    raw_symbol: GBP/CHF
+    yfinance_symbol: GBPCHF=X
+  - symbol: GBP_JPY
+    raw_symbol: GBP/JPY
+    yfinance_symbol: GBPJPY=X
+  - symbol: GBP_NZD
+    raw_symbol: GBP/NZD
+    yfinance_symbol: GBPNZD=X
+  - symbol: GBP_USD
+    raw_symbol: GBP/USD
+    yfinance_symbol: GBPUSD=X
+  - symbol: NZD_USD
+    raw_symbol: NZD/USD
+    yfinance_symbol: NZDUSD=X
+  - symbol: USD_CAD
+    raw_symbol: USD/CAD
+    yfinance_symbol: USDCAD=X
+  - symbol: USD_CHF
+    raw_symbol: USD/CHF
+    yfinance_symbol: USDCHF=X
+  - symbol: USD_IDR
+    raw_symbol: USD/IDR
+    yfinance_symbol: USDIDR=X
+  - symbol: USD_JPY
+    raw_symbol: USD/JPY
+    yfinance_symbol: USDJPY=X
+index: []
+context:
+  dollar:
+    _meta:
+      subcategory_id: context_dollar
+      source: yfinance
+      description: US Dollar Index — primary macro anchor
+      contributes_to:
+      - score: score_dollar_strength
+        weight: 0.5
+        aggregation: z_score_level
+    instruments:
+    - symbol: DXY
+      yfinance_symbol: DX-Y.NYB
+      layer: 2
+      context_category: context_dollar
+      context_group: dollar
+      context_available: true
+      include_in_forecast: true
+      reclassified_from: layer_1_forex
+      timezone: UTC
+  # ADD ADR-013/014/015/016 (GMI_Decision_Document_v1.docx): Broad Dollar
+  # Index basket-input completion. Architecture v2.0 §7.2's own
+  # compute_broad_dollar() design specifies 10 forex pairs as inputs; only
+  # 6 (EUR_USD, USD_JPY, GBP_USD, USD_CAD, USD_CHF, AUD_USD — all Layer 1)
+  # plus USD_IDR (Layer 1, weight logic changes per ADR-018) existed
+  # anywhere in the universe. These 6 net-new EM/DM-differentiating legs
+  # close that gap. contributes_to is deliberately empty — this subcategory
+  # supplies raw Bronze/Silver ingestion for a future CrossAssetEngine
+  # compute_broad_dollar() to consume directly (hardcoded-basket-dict
+  # pattern, same as the original design), NOT a domain-score contributor
+  # in its own right (ADR-014). Per-currency basket weights (incl. HKD's
+  # near-zero token weight, ADR-015; IDR's platform-relevance override,
+  # ADR-018) are a CrossAssetEngine-internal concern, not yet built —
+  # see GMI_Decision_Document_v1.docx §6 Gate 1 (BIS EER weight-component
+  # sourcing, blocking exact numeric values) and §8 Gate 2 (yfinance ticker
+  # convention, non-blocking — USD<CCY>=X used here for consistency with
+  # the existing USD_CAD/USD_CHF/USD_JPY convention, live-unconfirmed for
+  # the 6 currencies below except CNH per ADR-013).
+  dollar_basket:
+    _meta:
+      subcategory_id: context_dollar_basket
+      source: yfinance
+      description: Broad Dollar Index basket-completion currencies — EM/DM legs beyond DXY's 6-currency composition
+      contributes_to: []
+    instruments:
+    - symbol: CNH
+      yfinance_symbol: USDCNH=X
+      layer: 2
+      context_category: context_dollar_basket
+      context_group: dollar_basket
+      context_available: true
+      include_in_forecast: true
+      timezone: UTC
+      notes: 'ADR-013: offshore renminbi (not onshore CNY) — avoids PBOC policy-rate/managed-FX double-counting with context_rates_em_cb. Ticker confirmed live (USDCNH=X and CNH=X both exist on Yahoo Finance).'
+    - symbol: KRW
+      yfinance_symbol: USDKRW=X
+      layer: 2
+      context_category: context_dollar_basket
+      context_group: dollar_basket
+      context_available: true
+      include_in_forecast: true
+      timezone: UTC
+      notes: 'Ticker convention unconfirmed live — Gate 2 (GMI_Decision_Document_v1.docx §6), non-blocking.'
+    - symbol: SGD
+      yfinance_symbol: USDSGD=X
+      layer: 2
+      context_category: context_dollar_basket
+      context_group: dollar_basket
+      context_available: true
+      include_in_forecast: true
+      timezone: UTC
+      notes: 'ADR-016: included on standalone FX-policy grounds — MAS manages policy via the S$NEER exchange-rate band rather than an interest rate, making SGD a direct policy-transmission signal (no CB-rate or equity-index anchor elsewhere in the universe). Ticker convention unconfirmed live — Gate 2, non-blocking.'
+    - symbol: HKD
+      yfinance_symbol: USDHKD=X
+      layer: 2
+      context_category: context_dollar_basket
+      context_group: dollar_basket
+      context_available: true
+      include_in_forecast: true
+      reliability_flag: true
+      timezone: UTC
+      notes: 'ADR-015: Hong Kong Linked Exchange Rate System pegs HKD to USD in a ~7.75-7.85 band since 1983 — near-flat noise under normal conditions, included at a near-zero token basket weight (exact value set inside CrossAssetEngine when built) rather than excluded outright, so a future peg-break event is not structurally invisible. Same reliability_flag pattern as SSEC (Architecture v2.0 §3.5) and the BOJ YCC annotation. Ticker convention unconfirmed live — Gate 2, non-blocking.'
+    - symbol: TWD
+      yfinance_symbol: USDTWD=X
+      layer: 2
+      context_category: context_dollar_basket
+      context_group: dollar_basket
+      context_available: true
+      include_in_forecast: true
+      timezone: UTC
+      notes: 'Ticker convention unconfirmed live — Gate 2, non-blocking.'
+    - symbol: NOK
+      yfinance_symbol: USDNOK=X
+      layer: 2
+      context_category: context_dollar_basket
+      context_group: dollar_basket
+      context_available: true
+      include_in_forecast: true
+      timezone: UTC
+      notes: 'DM basket leg. Ticker convention unconfirmed live — Gate 2, non-blocking.'
+  # ADD ADR-024 (GMI_Decision_Document_v2.docx): point-fix FX anchor for
+  # CPO's future MYR->USD Silver-layer normalization (ADR-023 narrowed
+  # Wave 2's MYR dependency to CPO alone — TIN/RUBBER are USD-native).
+  # Deliberately NOT folded into context_dollar_basket above — two
+  # unrelated purposes (Broad Dollar Index computation vs. a single
+  # commodity's currency conversion) kept under separate labels per
+  # ADR-024's rationale. contributes_to is empty: zero domain-score
+  # weight. NOT a CrossAssetEngine input when that engine is built —
+  # sole consumer is the future Silver-layer CPO normalization join
+  # (CPO_usd = CPO_myr / MYR_USD_rate), which is why
+  # include_in_forecast=false here despite context_available=true.
+  fx_normalization:
+    _meta:
+      subcategory_id: context_fx_normalization
+      source: yfinance
+      description: Single-purpose FX anchor(s) for commodity currency normalization — not a CrossAssetEngine input
+      contributes_to: []
+    instruments:
+    - symbol: MYR
+      yfinance_symbol: MYR=X
+      layer: 2
+      context_category: context_fx_normalization
+      context_group: fx_normalization
+      context_available: true
+      include_in_forecast: false
+      timezone: UTC
+      notes: 'ADR-024: USD/MYR, confirmed live as MYR=X (Yahoo Finance canonical form, same <currency>=X convention as JPY=X/HKD=X/SGD=X/IDR=X — differs from the USD<CCY>=X convention used for context_dollar_basket above by explicit ADR choice). Sole consumer: Silver-layer CPO normalization (ADR-023). Not consumed by CrossAssetEngine, gold_signals, or gold_screener.'
+  rates:
+    fed:
+      _meta:
+        subcategory_id: context_rates_fed
+        source: fred
+        description: FED policy rates — FRED API exclusive
+        # FIX ADR-019 (GMI_Decision_Document_v1.docx): contributes_to emptied.
+        # Previously carried undocumented weights into score_dollar_strength
+        # (0.30) and score_yield_curve (0.20) with no traceable rationale —
+        # neither appears in Architecture Extension v1.0 §5.2's original
+        # contributor tables nor Data Source & Rates Adjustment v1.0 §7's
+        # revised tables. Restoring either requires a new, explicit,
+        # documented follow-on ADR, not silent reinstatement.
+        contributes_to: []
+        series:
+        - SOFR
+        - FEDFUNDS
+        - IORB
+        - EFFR
+        series_count: 4
+    curve:
+      _meta:
+        subcategory_id: context_rates_curve
+        source: fred
+        description: US Treasury yield curve — key tenors
+        contributes_to:
+        - score: score_yield_curve
+          weight: 0.5
+        - score: score_dollar_strength
+          weight: 0.3
+        series:
+        - DGS2
+        - DGS5
+        - DGS10
+        - DGS30
+        series_count: 4
+    spread:
+      _meta:
+        subcategory_id: context_rates_spread
+        source: fred
+        description: Yield curve spread — recession signal
+        # FIX ADR-019: score_inflation_pressure entry (weight 0.22) restored.
+        # It matches Data Source & Rates Adjustment v1.0 §7.4's documented
+        # table but had been displaced by an undocumented
+        # context_commodity_coal contribution at the same weight — see
+        # context.commodity.coal._meta above, now corrected to omit it.
+        contributes_to:
+        - score: score_yield_curve
+          weight: 0.5
+        - score: score_credit_stress
+          weight: 0.5
+        - score: score_inflation_pressure
+          weight: 0.22
+        series:
+        - T10Y2Y
+        - T10Y3M
+        series_count: 2
+    dm_cb:
+      _meta:
+        subcategory_id: context_rates_dm_cb
+        source: bis_cbpol_d
+        description: G10 ex-FED central bank policy rates — BIS CBPOL_D
+        # FIX ADR-019: score_yield_curve entry (weight 0.10) removed — it was
+        # undocumented in both Architecture Extension v1.0 §5.2 and Data
+        # Source & Rates Adjustment v1.0 §7's contributor tables for
+        # score_yield_curve. score_dollar_strength and score_global_growth
+        # contributions below are unchanged (they match those tables).
+        contributes_to:
+        - score: score_dollar_strength
+          weight: 0.2
+          aggregation: rate_differential_fed_minus_dm_weighted
+        - score: score_global_growth
+          weight: 0.1
+          aggregation: z_score_level_inverted_mean
+        central_banks:
+        - ECB
+        - BOE
+        - BOJ
+        - BOC
+        - RBA
+        - RBNZ
+        - SNB
+        - NORGES
+        - RIKSBANK
+        ref_area_codes:
+          ECB: XM
+          BOE: GB
+          BOJ: JP
+          BOC: CA
+          RBA: AU
+          RBNZ: NZ
+          SNB: CH
+          NORGES: 'NO'
+          RIKSBANK: SE
+        reliability_notes: 'BOJ: YCC 2016-2024 causes rate_bps to be flat -10bps — registered. SNB: Negative rate -75bps (2015-2022)
+          — StandardScaler handles range.'
+    em_cb:
+      _meta:
+        subcategory_id: context_rates_em_cb
+        source: bis_cbpol_d
+        description: EM central bank rates — carry and capital flow signals
+        contributes_to:
+        - score: score_em_risk
+          weight: 0.25
+          aggregation: rate_differential_fed_minus_em_bi_weighted_2x
+        - score: score_global_growth
+          weight: 0.1
+        - score: score_inflation_pressure
+          weight: 0.05
+        central_banks:
+        - PBOC
+        - BOK
+        - BI
+        ref_area_codes:
+          PBOC: CN
+          BOK: KR
+          BI: ID
+        reliability_notes: 'PBOC: 7-day repo rate only (MLF/LPR not in BIS free tier). Accepted. BI: Structural break 2016-08-19
+          (BI Rate → BI7DRR). Registered. BOK: MSCI EM classification maintained for taxonomy consistency.'
+  equity:
+    dm:
+      _meta:
+        subcategory_id: context_equity_dm
+        description: DM equity indices — global risk appetite
+        # FIX ADR-019: score_risk_appetite entry (weight 0.25) removed —
+        # undocumented in both governing weight tables. score_global_growth
+        # contribution below is unchanged (matches Architecture Extension
+        # v1.0 §5.2 and Data Source & Rates Adjustment v1.0 §7).
+        contributes_to:
+        - score: score_global_growth
+          weight: 0.4
+          aggregation: z_score_momentum_20d
+      instruments:
+      - symbol: SPX
+        yfinance_symbol: ^GSPC
+        layer: 2
+        context_category: context_equity_dm
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        reclassified_from: layer_1_index
+        timezone: America/New_York
+      - symbol: NYA
+        yfinance_symbol: ^NYA
+        layer: 2
+        context_category: context_equity_dm
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        timezone: America/New_York
+      - symbol: DJI
+        yfinance_symbol: ^DJI
+        layer: 2
+        context_category: context_equity_dm
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        timezone: America/New_York
+      - symbol: IXIC
+        yfinance_symbol: ^IXIC
+        layer: 2
+        context_category: context_equity_dm
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        timezone: America/New_York
+      - symbol: FTSE
+        yfinance_symbol: ^FTSE
+        layer: 2
+        context_category: context_equity_dm
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        timezone: Europe/London
+      - symbol: DAX
+        yfinance_symbol: ^GDAXI
+        layer: 2
+        context_category: context_equity_dm
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        timezone: Europe/Berlin
+      - symbol: CAC
+        yfinance_symbol: ^FCHI
+        layer: 2
+        context_category: context_equity_dm
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        timezone: Europe/Paris
+      - symbol: N225
+        yfinance_symbol: ^N225
+        layer: 2
+        context_category: context_equity_dm
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        timezone: Asia/Tokyo
+      - symbol: AXJO
+        yfinance_symbol: ^AXJO
+        layer: 2
+        context_category: context_equity_dm
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        timezone: Australia/Sydney
+    em:
+      _meta:
+        subcategory_id: context_equity_em
+        description: EM equity indices — capital flow signals
+        contributes_to:
+        - score: score_global_growth
+          weight: 0.15
+          aggregation: z_score_momentum_20d
+        - score: score_em_risk
+          weight: 0.4
+      instruments:
+      - symbol: TWSE
+        yfinance_symbol: ^TWII
+        layer: 2
+        context_category: context_equity_em
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        timezone: Asia/Taipei
+      - symbol: KOSPI
+        yfinance_symbol: ^KS11
+        layer: 2
+        context_category: context_equity_em
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        timezone: Asia/Seoul
+      - symbol: HSI
+        yfinance_symbol: ^HSI
+        layer: 2
+        context_category: context_equity_em
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        timezone: Asia/Hong_Kong
+      - symbol: SSEC
+        yfinance_symbol: ^SSEC
+        layer: 2
+        context_category: context_equity_em
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        reliability_flag: true
+        exclude_from_lead_lag_leader: true
+        timezone: Asia/Shanghai
+        notes: Circuit breakers, structural breaks — use robust estimators
+      - symbol: JKSE
+        yfinance_symbol: ^JKSE
+        layer: 2
+        context_category: context_equity_em
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        timezone: Asia/Jakarta
+    volatility:
+      _meta:
+        subcategory_id: context_volatility
+        description: VIX — threshold-based regime indicator
+        contributes_to:
+        - score: score_risk_appetite
+          weight: 0.4
+          aggregation: z_score_inverted
+      instruments:
+      - symbol: VIX
+        yfinance_symbol: ^VIX
+        layer: 2
+        context_category: context_volatility
+        context_group: equity
+        context_available: true
+        include_in_forecast: true
+        reclassified_from: layer_1_index
+        timezone: America/New_York
+  commodity:
+    energy:
+      _meta:
+        subcategory_id: context_commodity_energy
+        contributes_to:
+        - score: score_commodity_cycle
+          weight: 0.4
+          aggregation: z_score_momentum_60d
+        - score: score_inflation_pressure
+          weight: 0.38
+      instruments:
+      - symbol: BRENT
+        yfinance_symbol: BZ=F
+        layer: 2
+        context_category: context_commodity_energy
+        context_group: commodity
+        context_available: true
+        include_in_forecast: true
+        timezone: UTC
+        commodity_role: context
+        commodity_subcategory: energy
+      - symbol: NG
+        yfinance_symbol: NG=F
+        layer: 2
+        context_category: context_commodity_energy
+        context_group: commodity
+        context_available: true
+        include_in_forecast: true
+        timezone: UTC
+        commodity_role: context
+        commodity_subcategory: energy
+    metals:
+      _meta:
+        subcategory_id: context_commodity_metals
+        contributes_to:
+        - score: score_global_growth
+          weight: 0.25
+          aggregation: z_score_momentum_20d
+        - score: score_commodity_cycle
+          weight: 0.4
+          aggregation: z_score_momentum_60d
+        reliability_notes: Nickel structural break 2022-03-07 registered
+      instruments:
+      - symbol: COPPER
+        yfinance_symbol: HG=F
+        layer: 2
+        context_category: context_commodity_metals
+        context_group: commodity
+        context_available: true
+        include_in_forecast: true
+        timezone: UTC
+        commodity_role: context
+        commodity_subcategory: base_metals
+        notes: Industrial bellwether, leading PMI
+      - symbol: NICKEL
+        yfinance_symbol: NI=F
+        layer: 2
+        context_category: context_commodity_metals
+        context_group: commodity
+        context_available: true
+        include_in_forecast: true
+        timezone: UTC
+        commodity_role: context
+        commodity_subcategory: base_metals
+        structural_break:
+          date: '2022-03-07'
+          severity: HIGH
+          description: LME trading suspension — price +100% in hours
+        notes: EV/battery cycle indicator
+      - symbol: ALUMINIUM
+        yfinance_symbol: ALI=F
+        layer: 2
+        context_category: context_commodity_metals
+        context_group: commodity
+        context_available: true
+        include_in_forecast: true
+        timezone: UTC
+        commodity_role: context
+        commodity_subcategory: base_metals
+      - symbol: ZINC
+        yfinance_symbol: ZN=F
+        layer: 2
+        context_category: context_commodity_metals
+        context_group: commodity
+        context_available: true
+        include_in_forecast: true
+        timezone: UTC
+        commodity_role: context
+        commodity_subcategory: base_metals
+        notes: Verify ZN=F ticker empirically before production deploy
+      - symbol: IRON_ORE
+        yfinance_symbol: VALE
+        layer: 2
+        context_category: context_commodity_metals
+        context_group: commodity
+        context_available: true
+        include_in_forecast: true
+        proxy_for: IRON_ORE_SGX_FE62
+        proxy_instrument: VALE
+        proxy_correlation_expected: 0.81
+        timezone: America/New_York
+        # ADD Decision B Step 1: commodity_subcategory=base_metals is the
+        # PRIMARY classification per Addendum §11 OD-C6's own resolution
+        # ("DEFERRED — base_metals primary, bulks secondary"). IO has real
+        # bulks/physical-shipping characteristics too (Addendum §2.2), but
+        # OD-C6 left true dual-registration as a future CrossAssetEngine
+        # cluster-analysis enhancement, not yet built — a single-value
+        # field matches what was actually decided, not what was deferred.
+        commodity_role: context
+        commodity_subcategory: base_metals
+        notes: VALE proxy — ~67pct revenue from iron ore. Corr ~0.81 vs SGX benchmark
+      - symbol: TIN
+        yfinance_symbol: null
+        layer: 2
+        context_category: context_commodity_metals
+        context_group: commodity
+        context_available: false
+        include_in_forecast: false
+        commodity_role: context
+        commodity_subcategory: base_metals
+        # FIX ADR-023 (GMI_Decision_Document_v2.docx): TIN is USD-native via
+        # LME (tvdatafeed LME|SN) — it does NOT require MYR->USD
+        # normalization. The original Architecture Extension v1.0 framing
+        # (grouping TIN with CPO/RUBBER as MYR-blocked) was superseded by
+        # Architecture v2.1 Addendum's more specific routing decision and is
+        # corrected here. Still deferred — blocked only on tvdatafeed
+        # ticker/exchange verification (Addendum §11 OD-C1), unrelated to
+        # currency.
+        deferred_reason: tvdatafeed LME ticker/exchange verification pending (OD-C1) — not currency-related
+        planned_wave: 2
+        requires_fx_normalization: false
+        base_currency: USD
+    agri:
+      _meta:
+        subcategory_id: context_commodity_agri
+        contributes_to:
+        - score: score_inflation_pressure
+          weight: 0.35
+          aggregation: z_score_level
+        note: Weights normalized when context_available=False (Wave 2 deferred)
+      instruments:
+      - symbol: CPO
+        yfinance_symbol: null
+        layer: 2
+        context_category: context_commodity_agri
+        context_group: commodity
+        context_available: false
+        include_in_forecast: false
+        commodity_role: context
+        commodity_subcategory: agricultural
+        # ADR-023: CPO is now the SOLE MYR-dependent Wave 2 instrument
+        # (Bursa Malaysia FCPO). Normalization will use the new MYR=X Layer 2
+        # anchor (ADR-024, context_fx_normalization) via a Silver-layer join
+        # once Wave 2 is implemented — not a general normalization framework.
+        deferred_reason: MYR→USD normalization pipeline not yet implemented
+        planned_wave: 2
+        requires_fx_normalization: true
+        base_currency: MYR
+      - symbol: RUBBER
+        yfinance_symbol: null
+        layer: 2
+        context_category: context_commodity_agri
+        context_group: commodity
+        context_available: false
+        include_in_forecast: false
+        commodity_role: context
+        commodity_subcategory: agricultural
+        # FIX ADR-023 (GMI_Decision_Document_v2.docx): RUBBER is USD-native
+        # via SICOM/SGX (tvdatafeed SGX|SICOM_TSR20) — it does NOT require
+        # MYR->USD normalization. Architecture v2.1 Addendum §5.3 explicitly
+        # chose SICOM TSR20 (USD) over TOCOM RSS3 (JPY) specifically to avoid
+        # a currency-conversion timestamp/lookahead risk. Still deferred —
+        # blocked only on tvdatafeed ticker/exchange verification (Addendum
+        # §11 OD-C1), unrelated to currency.
+        deferred_reason: tvdatafeed SGX ticker/exchange verification pending (OD-C1) — not currency-related
+        planned_wave: 2
+        requires_fx_normalization: false
+        base_currency: USD
+    coal:
+      _meta:
+        subcategory_id: context_commodity_coal
+        # FIX ADR-019: score_inflation_pressure entry (weight 0.22) removed.
+        # It had displaced the documented context_rates_spread contributor at
+        # the same weight for this score — see context.rates.spread._meta
+        # above, which now carries the restored 0.22 entry instead.
+        contributes_to:
+        - score: score_commodity_cycle
+          weight: 0.2
+          aggregation: z_score_momentum_60d
+      instruments:
+      - symbol: COAL_NEWC
+        yfinance_symbol: WHC.AX
+        layer: 2
+        context_category: context_commodity_coal
+        context_group: commodity
+        context_available: true
+        include_in_forecast: true
+        proxy_for: NEWC_THERMAL_COAL
+        proxy_instrument: WHC.AX
+        proxy_correlation_expected: 0.78
+        timezone: Australia/Sydney
+        # ADD Decision B Step 1: commodity_subcategory=energy (NOT 'coal')
+        # per Addendum §8.2's explicit REGIME_SECTOR_WEIGHTS key mapping —
+        # "commodity_energy: CL, BRENT, NG, COAL_NEWC". This is deliberately
+        # a DIFFERENT, coarser taxonomy than context_category/context_group
+        # above (the 22-subcategory CrossAssetEngine taxonomy, where coal
+        # stays its own context_commodity_coal group) — commodity_subcategory
+        # exists specifically to drive the 5-key REGIME_SECTOR_WEIGHTS lookup.
+        commodity_role: context
+        commodity_subcategory: energy
+        structural_break:
+          dates:
+          - date: '2020-10-01'
+            end: '2022-01-15'
+            severity: MEDIUM
+            description: China import ban — NEWC and WHC.AX diverged
+        notes: WHC.AX = Whitehaven Coal, Pacific basin alignment
+  etf:
+    broad_market:
+      _meta:
+        subcategory_id: context_etf_broad
+        description: Broad market benchmarks — NOT in ForecastModule (multicollinearity)
+        contributes_to:
+        - score: score_risk_appetite
+          weight: 0.25
+      instruments:
+      - symbol: SPY
+        yfinance_symbol: SPY
+        layer: 2
+        context_category: context_etf_broad
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: IVV
+        yfinance_symbol: IVV
+        layer: 2
+        context_category: context_etf_broad
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: QQQ
+        yfinance_symbol: QQQ
+        layer: 2
+        context_category: context_etf_broad
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: DIA
+        yfinance_symbol: DIA
+        layer: 2
+        context_category: context_etf_broad
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: IWM
+        yfinance_symbol: IWM
+        layer: 2
+        context_category: context_etf_broad
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+    sector:
+      _meta:
+        subcategory_id: context_etf_sector
+        description: Sector ETFs — NOT in ForecastModule (subset of Layer 1)
+      instruments:
+      - symbol: XLK
+        yfinance_symbol: XLK
+        layer: 2
+        context_category: context_etf_sector
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: XLF
+        yfinance_symbol: XLF
+        layer: 2
+        context_category: context_etf_sector
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: XLV
+        yfinance_symbol: XLV
+        layer: 2
+        context_category: context_etf_sector
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: XLY
+        yfinance_symbol: XLY
+        layer: 2
+        context_category: context_etf_sector
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: XLP
+        yfinance_symbol: XLP
+        layer: 2
+        context_category: context_etf_sector
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: XLI
+        yfinance_symbol: XLI
+        layer: 2
+        context_category: context_etf_sector
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: XLB
+        yfinance_symbol: XLB
+        layer: 2
+        context_category: context_etf_sector
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: XLU
+        yfinance_symbol: XLU
+        layer: 2
+        context_category: context_etf_sector
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: XLRE
+        yfinance_symbol: XLRE
+        layer: 2
+        context_category: context_etf_sector
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: XLC
+        yfinance_symbol: XLC
+        layer: 2
+        context_category: context_etf_sector
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+    factor:
+      _meta:
+        subcategory_id: context_etf_factor
+        description: Factor ETFs — NOT in ForecastModule (dividend subset of Layer 1)
+      instruments:
+      - symbol: SCHD
+        yfinance_symbol: SCHD
+        layer: 2
+        context_category: context_etf_factor
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+      - symbol: NOBL
+        yfinance_symbol: NOBL
+        layer: 2
+        context_category: context_etf_factor
+        context_group: etf
+        context_available: true
+        include_in_forecast: false
+        timezone: America/New_York
+    credit:
+      _meta:
+        subcategory_id: context_etf_credit
+        contributes_to:
+        - score: score_credit_stress
+          weight: 0.5
+          aggregation: z_score_inverted
+      instruments:
+      - symbol: HYG
+        yfinance_symbol: HYG
+        layer: 2
+        context_category: context_etf_credit
+        context_group: etf
+        context_available: true
+        include_in_forecast: true
+        timezone: America/New_York
+        notes: Daily credit risk proxy — genuinely orthogonal to equity
+    commodity_etf:
+      _meta:
+        subcategory_id: context_etf_commodity
+        # FIX ADR-019: score_inflation_pressure entry (weight 0.05) removed —
+        # undocumented in both governing weight tables.
+        contributes_to: []
+      instruments:
+      - symbol: DBA
+        yfinance_symbol: DBA
+        layer: 2
+        context_category: context_etf_commodity
+        context_group: etf
+        context_available: true
+        include_in_forecast: true
+        timezone: America/New_York
+        notes: Agriculture macro — external supply shock indicator
+    international:
+      _meta:
+        subcategory_id: context_etf_international
+        # FIX ADR-019: score_global_growth entry (weight 0.05) removed —
+        # undocumented in both governing weight tables. score_em_risk
+        # contribution below is unchanged (matches Architecture Extension
+        # v1.0 §5.2 and Data Source & Rates Adjustment v1.0 §7).
+        contributes_to:
+        - score: score_em_risk
+          weight: 0.35
+          aggregation: z_score_momentum_20d
+      instruments:
+      - symbol: EEM
+        yfinance_symbol: EEM
+        layer: 2
+        context_category: context_etf_international
+        context_group: etf
+        context_available: true
+        include_in_forecast: true
+        timezone: America/New_York
+      - symbol: EFA
+        yfinance_symbol: EFA
+        layer: 2
+        context_category: context_etf_international
+        context_group: etf
+        context_available: true
+        include_in_forecast: true
+        timezone: America/New_York
+      - symbol: EWJ
+        yfinance_symbol: EWJ
+        layer: 2
+        context_category: context_etf_international
+        context_group: etf
+        context_available: true
+        include_in_forecast: true
+        timezone: America/New_York
+      - symbol: INDA
+        yfinance_symbol: INDA
+        layer: 2
+        context_category: context_etf_international
+        context_group: etf
+        context_available: true
+        include_in_forecast: true
+        timezone: America/New_York
+      - symbol: EIDO
+        yfinance_symbol: EIDO
+        layer: 2
+        context_category: context_etf_international
+        context_group: etf
+        context_available: true
+        include_in_forecast: true
+        timezone: America/New_York
+        notes: iShares MSCI Indonesia — bridge EIDO→IDX30. Leads by 1 day.
+    thematic:
+      _meta:
+        subcategory_id: context_etf_thematic
+        contributes_to:
+        - score: score_risk_appetite
+          weight: 0.35
+          aggregation: z_score_momentum
+      instruments:
+      - symbol: ARKK
+        yfinance_symbol: ARKK
+        layer: 2
+        context_category: context_etf_thematic
+        context_group: etf
+        context_available: true
+        include_in_forecast: true
+        timezone: America/New_York
+        notes: Risk appetite proxy — leading indicator speculative behavior

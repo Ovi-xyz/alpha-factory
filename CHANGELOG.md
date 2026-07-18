@@ -1,0 +1,2209 @@
+# CHANGELOG — Data Platform
+
+## v1.11.0 — GMI Decision Document v3 Implementation: Dependency Architecture, Security Hardening, Commodity Taxonomy (Juli 2026)
+
+Dokumen referensi: `GMI_Decision_Document_v3.docx` (Decision A, Decision B
+Step 1)
+
+Total: **Decision A diimplementasikan penuh** (poetry sebagai single
+source of truth dependency graph, CI fix, Gate G-8 + Python matrix
+wiring) + **Decision B Step 1 diimplementasikan** (commodity taxonomy gap
+closure — commodity_role/commodity_subcategory + REGIME_SECTOR_WEIGHTS
+disaggregation) + **1 inkonsistensi internal ditemukan dan diperbaiki**
+di Architecture v2.1 Addendum sendiri (commodity_precious vs
+commodity_precious_metals) + **security hardening** (.gitignore
+ditambahkan, runtime artifact di-untrack) | **1204 passed / 0 failed / 0
+error** (Δ +16 dari v1.10.0 — 1188)
+
+Konteks: GMI_Decision_Document_v3.docx menyatakan status **"decided,
+nothing implemented"** pada saat penulisan, dan mengoreksi klaim
+GMI_Implementation_Checkpoint_v4.docx yang ternyata tidak akurat — Gate
+G-8 dan Python 3.11+3.12 matrix TIDAK pernah benar-benar ter-wire ke
+ci.yml meskipun code pendukungnya (`scripts/check_glob_scope.py`,
+`scripts/preflight/*.py`) sudah ter-commit. Setiap klaim dalam dokumen
+ini diverifikasi ulang secara empiris terhadap live repository (fresh
+clone dari `github.com/Ovi-xyz/alpha-factory`, tag v1.10.0) sebelum
+diimplementasikan — bukan dipercaya dari checkpoint sebelumnya.
+
+### Decision A [pyproject.toml, environment.yml, Makefile, .github/workflows/ci.yml, .env.example] — Poetry sebagai single source of truth dependency graph
+
+**Blocking CI fix — tanpa ini, `--job all`/test suite tidak bisa jalan di
+CI sama sekali.** Root cause diverifikasi langsung: `pip install -e
+'.[dev]'` menghasilkan `WARNING: alpha-factory 1.10.0 does not provide
+the extra 'dev'` karena pytest/pytest-cov hanya berada di
+`[tool.poetry.group.dev.dependencies]`, tidak pernah diekspos lewat
+`[tool.poetry.extras]` — pip sama sekali tidak melihatnya. `poetry.lock`
+sudah di-generate sejak ADR-020 tapi tidak pernah benar-benar dibaca CI,
+karena hanya Poetry CLI yang membacanya.
+
+- `ci.yml`: `pip install -e '.[dev]'` -> `poetry install --with dev`.
+  Diverifikasi: resolve bersih, pytest 9.1.1 + pytest-cov 7.1.0
+  terinstall.
+- `pyproject.toml`: tvdatafeed di-declare ulang sebagai Poetry git
+  dependency (`{git = "https://github.com/rongardF/tvdatafeed.git"}`) —
+  dikonfirmasi 404 di PyPI JSON API untuk versi apapun. Import
+  diverifikasi langsung: `import tvDatafeed` berhasil.
+- `environment.yml`: blok `pip:` dipensiunkan sepenuhnya — root cause
+  kegagalan conda di `alpha-factory logs.txt` (`ERROR: Could not find a
+  version that satisfies the requirement tvdatafeed>=2.0`) adalah conda
+  me-resolve seluruh blok `pip:` sebagai SATU pip call atomik; satu spec
+  rusak (tvdatafeed) meracuni instalasi PyYAML, pytest, dan semua paket
+  lain di blok yang sama. `alpha-vantage` juga di-drop — diverifikasi
+  tidak pernah di-import sebagai package pihak ketiga di manapun di
+  `src/` (hanya `AlphaVantageForexAdapter` buatan sendiri, berbasis
+  `requests`/`httpx`, yang eksis).
+- **ADD Gate G-8**: wired ke `ci.yml` setelah Gate G-3 — code
+  (`scripts/check_glob_scope.py`) sudah eksis sejak v1.10.0 tapi tidak
+  pernah benar-benar terhubung ke workflow manapun (dikonfirmasi via
+  `grep` langsung pada file live sebelum perubahan ini).
+- **ADD Python 3.11 + 3.12 matrix**: `fail-fast: false`. Python floor
+  TETAP `>=3.11,<3.13` (tidak dinaikkan) — matrix ini yang benar-benar
+  menguji kedua ujung range yang sudah dideclare, bukan hanya 3.12 seperti
+  sandbox yang menulis ADR-020.
+- **ADD `.env.example`**: gap orisinal (belum pernah ada di commit
+  manapun), spesifikasi lengkap sudah ada di IDD v1.0 §8.5. Isi
+  direkonsiliasi terhadap seluruh `os.getenv()` call site nyata di `src/`
+  via grep empiris.
+- `Makefile`: `make install`/`make setup` di-repoint ke
+  `poetry install --with dev` — daftar pip hardcoded sebelumnya sudah
+  drift sendiri (masih `pandas-ta`, bukan `-classic`; tidak ada
+  scipy/statsmodels/tvdatafeed).
+
+### Security — `.gitignore` ditambahkan, runtime artifact di-untrack
+
+Repo sebelumnya **tidak memiliki `.gitignore` sama sekali**. Audit
+empiris (`git log --all --name-only --diff-filter=A` di ketiga commit)
+mengonfirmasi **tidak ada secret/API key/credential** yang pernah
+ter-commit di working tree maupun history manapun — tapi menemukan 5 file
+`.DS_Store` dan 3 runtime artifact (`data/health/hmm_regime_model.pkl`,
+`pipeline_runs.db`, `progress.db`) ter-tracked di git.
+
+- `.gitignore` dibuat: secrets (`.env` + varian, `*.pem`/`*.key`),
+  Python/Poetry cache, `data/` (runtime pipeline output — terlalu besar
+  untuk version control per estimasi GD §7, ~73-117 GB, dan
+  regenerable), OS/editor metadata.
+- 5x `.DS_Store` + 3x `data/health/*` di-untrack via `git rm --cached`
+  (bukan history rewrite — tidak diperlukan karena tidak ada secret yang
+  pernah ter-commit). File tetap ada di disk lokal.
+- Rasional keamanan untuk pickle binary di source control secara khusus:
+  `pickle.load()`/`joblib.load()` bisa mengeksekusi kode arbitrary jika
+  file pernah tertukar atau dimodifikasi pihak lain — risiko
+  deserialization yang berdiri sendiri terlepas dari isi file saat ini.
+  Empiris dikonfirmasi juga rentan drift versi: test suite run yang men-
+  generate ulang `hmm_regime_model.pkl` dari awal menghilangkan
+  `InconsistentVersionWarning` yang muncul saat file lama (dari
+  environment sklearn berbeda) masih dipakai.
+
+### Decision B Step 1 [config/instruments.yaml, src/config/instrument_loader.py, src/gold/sector_rotation.py, scripts/validate_instruments.py] — Commodity dual-classification gap closure
+
+**Menutup gap Architecture v2.1 Addendum §7.1/§8** — `commodity_role`/
+`commodity_subcategory` sudah dispesifikasikan turun ke level kode di
+dokumen tersebut, tapi nol occurrence eksis di manapun di live repo
+sebelum perubahan ini (dikonfirmasi via `grep` empiris). `sector_rotation.py`
+masih memakai flat key `"commodity"` tunggal — komentarnya sendiri masih
+mereferensikan IDD §4, bukan Addendum.
+
+- `instruments.yaml`: `commodity_role` (`trading`/`context`) +
+  `commodity_subcategory` (`energy`/`precious_metals`/`base_metals`/
+  `agricultural`/`bulks`) ditambahkan ke seluruh 14 instrumen commodity —
+  3 Layer 1 (`AU`/`AG`/`CL`) + 11 Layer 2 (termasuk 3 deferred:
+  `TIN`/`CPO`/`RUBBER`).
+- `instrument_loader.py`: dua field baru ditambahkan ke `Instrument`
+  dataclass (default `None` — non-commodity instruments tidak terpengaruh).
+  Dipopulasikan di kedua builder (`_build_commodity` untuk Layer 1,
+  `_build_context_instrument` untuk Layer 2 via `_CONTEXT_CONSUMED_KEYS`).
+- `sector_rotation.py`: `REGIME_SECTOR_WEIGHTS`'s flat `"commodity"` key
+  diganti 5 key subcategory (`commodity_energy`, `commodity_precious_metals`,
+  `commodity_base_metals`, `commodity_agricultural`, `commodity_bulks`) di
+  seluruh 5 regime, nilai persis sesuai matrix Addendum §8.3. Lookup logic
+  di `run()` diupdate: instrumen commodity sekarang route via
+  `f"commodity_{inst.commodity_subcategory}"`, bukan `inst.market`.
+- **Inkonsistensi internal ditemukan di Addendum sendiri, diperbaiki**:
+  §7.1 men-declare enum value `precious_metals`, tapi §8.2's key-name
+  table menyebut `commodity_precious` (tanpa `_metals`) — satu-satunya
+  dari 5 key yang menyimpang dari formula mekanis
+  `f"commodity_{subcategory}"` yang diikuti 4 key lainnya secara
+  konsisten. Ditemukan empiris lewat test baru
+  (`test_no_orphaned_commodity_subcategory`) yang gagal dengan
+  `KeyError` — tanpa test ini, AU/AG akan diam-diam terdegradasi ke
+  weight neutral 1.0 di setiap regime lewat `weights.get(key, 1.0)`nya
+  alih-alih error. Diresolusi ke arah formula mekanis
+  (`commodity_precious_metals`) — 4 dari 5 key lain sudah literal
+  mengikutinya, jadi ini pilihan yang konsisten secara internal, bukan
+  `commodity_precious`.
+- `validate_instruments.py`: `commodity_role`/`commodity_subcategory`
+  wajib untuk seluruh 14 instrumen commodity (termasuk yang deferred, per
+  Addendum §7.1 "Required For: ALL commodity"), enum-validated. Fungsi
+  `_validate_commodity_taxonomy()` dipakai bersama oleh Layer 1 dan Layer
+  2 — satu validator, bukan dua yang bisa drift terpisah.
+- **Test:** 16 test baru — `TestCommoditySubcategoryDisaggregation` (7,
+  `test_sector_rotation.py`) + `TestCommodityTaxonomyValidation` (11,
+  `test_validate_instruments.py`), termasuk
+  `test_subcategory_to_weight_key_map_matches_sector_rotation_keys` — guard
+  cross-module permanen yang secara spesifik akan menangkap ulang kelas
+  bug `commodity_precious`/`commodity_precious_metals` di atas jika kedua
+  modul kembali drift terpisah di masa depan.
+
+EXPECTED_TOTAL tetap 699 (Layer 1=640, Layer 2=59), subcategories tetap
+22 — ini adalah penambahan field-level taxonomy, bukan perubahan ukuran
+universe.
+
+
+
+Dokumen referensi: `GMI_Decision_Document_v1.docx` (ADR-013–019),
+`GMI_Decision_Document_v2.docx` (ADR-020–025), `KNOWN_RISKS.md`
+(RISK-7, RISK-8 baru; FP-AIO-001 baru)
+
+Total: **13 ADR diimplementasikan** (7 dari Decision Doc v1, 6 dari
+Decision Doc v2) + **1 bug independen ditemukan dan diperbaiki**
+(FP-AIO-001) + **6 instance RISK-6 tambahan ditemukan dan diperbaiki**
+(di luar 2 yang sudah diperbaiki v1.9.0) | **1188 passed / 0 failed / 0
+error** (Δ +57 dari v1.9.0 — 1131)
+
+Konteks: kedua Decision Document eksplisit menyatakan status **"DECIDED
+— Nothing implemented"** pada saat penulisan. Rilis ini adalah
+implementasi penuh dari kedua dokumen tersebut, dilakukan SEBELUM
+melanjutkan ke GMI Wave 1 Cycle 4 (CrossAssetEngine) — persis prinsip
+yang sama yang menjustifikasi audit v1.8.1 dan solidifikasi v1.9.0:
+jangan bangun modul analitik canggih (CorrelationModule, LeadLagModule,
+ForecastModule) di atas fondasi dependency yang rusak (CI tidak bisa
+resolve pandas-ta sama sekali) atau config yang belum diverifikasi
+(domain score weight-sum drift, instrument universe gap). Setiap
+implementasi diverifikasi empiris sebelum diterapkan — termasuk
+memverifikasi ulang **PyPI package state** (pandas-ta vs pandas-ta-classic,
+langsung via `pypi.org/pypi/<pkg>/json`), **library output shape**
+(pandas-ta-classic `ta.adx()`/`ta.bbands()` column names, terinstall dan
+dipanggil langsung), dan **DuckDB glob semantics** (brace-alternation
+TIDAK didukung — dibuktikan dengan percobaan langsung sebelum kode
+produksi ditulis).
+
+### ADR-020 [pyproject.toml, environment.yml, src/gold/indicators/pandas_indicators.py] — pandas-ta -> pandas-ta-classic migration
+
+**Blocking dependency fix — tanpa ini, environment tidak bisa di-install
+sama sekali.** Diverifikasi empiris terhadap PyPI: seluruh pandas-ta
+0.3.x line (termasuk floor yang di-declare, 0.3.14) sudah dihapus dari
+index; hanya tersisa dua prerelease build (0.4.67b0, 0.4.71b0), keduanya
+`requires_python >=3.12`, dan bahkan di Python 3.12 constraint
+`pandas-ta>=0.3.14` tetap gagal resolve (pip meng-exclude prerelease dari
+floor eksplisit secara default). pandas-ta-classic adalah fork
+community-maintained dari lineage 0.3.x yang sama, dengan rilis stabil
+asli (hingga 0.6.52), `requires_python` kompatibel dengan floor project
+(>=3.11 — **tidak dinaikkan ke 3.12**).
+
+- `import pandas_ta as ta` -> `import pandas_ta_classic as ta` di kedua
+  situs (`add_bbands()`, `add_adx()`).
+- Diverifikasi langsung (bukan diasumsikan): `ta.adx()` pandas-ta-classic
+  0.6.52 mengembalikan **`['ADX_14', 'DMP_14', 'DMN_14']`** — TIDAK ADA
+  kolom ADXR. Artinya collision di balik FIX GLD-ADX-001 (v1.9.0) tidak
+  bisa terjadi di fork ini. Guard `startswith("adx_")` **dipertahankan**
+  (bukan di-revert ke `startswith("adx")`) — lebih presisi, gratis, dan
+  tetap jadi guard hidup jika rilis mendatang memunculkan kolom serupa.
+  `ta.bbands()` mengembalikan urutan kolom yang sama
+  (`BBL_/BBM_/BBU_/BBB_/BBP_`) — wrapper existing tidak perlu berubah.
+- **Test:** `test_pandas_indicators.py::test_adxr_is_not_silently_used_as_adx`
+  diganti dengan `test_wrapper_adx_matches_raw_adx_column` (basic
+  correctness) + `test_pandas_ta_classic_does_not_emit_adxr_column` (live
+  regression guard, bukan asumsi tertulis di komentar). Kedua test
+  fallback ImportError-simulation diupdate ke nama modul baru.
+
+### ADR-021 [pyproject.toml, environment.yml] — scipy / statsmodels / hmmlearn promoted to hard dependencies
+
+Sebelumnya hanya pip-installed ad hoc di sandbox tiap sesi, tidak pernah
+di-declare di manifest — gap yang sudah di-flag sejak
+`GMI_Implementation_Checkpoint.docx` dan dibawa terus tanpa resolusi
+melalui v1.9.0. Wajib untuk GMI Wave 1 Cycle 4 (CorrelationModule
+butuh scipy.linkage/fcluster + Ledoit-Wolf; LeadLagModule butuh
+statsmodels Granger causality; ForecastModule butuh statsmodels VAR).
+Di-declare SETELAH ADR-020 menetapkan floor Python, menghindari pola
+kegagalan yang sama (pin dependency lalu baru temukan wheel gap).
+
+### Companion actions — CI Python matrix + poetry.lock
+
+- `.github/workflows/ci.yml`: `strategy.matrix.python-version: ['3.11',
+  '3.12']` ditambahkan ke job `validate-and-test` — memverifikasi floor
+  DAN ceiling benar-benar lolos CI, bukan sekadar diklaim.
+- `poetry.lock` **baru** (113 packages, dihasilkan via `poetry lock`
+  langsung, diverifikasi berisi `pandas-ta-classic==0.6.52`,
+  `scipy==1.17.1`, `statsmodels==0.14.6`). `pyproject.toml`
+  `[tool.poetry.dev-dependencies]` dimodernisasi ke
+  `[tool.poetry.group.dev.dependencies]` (poetry 2.x deprecation
+  warning yang muncul saat generate lock pertama kali).
+
+### ADR-022 [scripts/check_glob_scope.py (NEW), .github/workflows/ci.yml] — CI Gate G-8: Layer 1/Layer 2 glob-scope enforcement
+
+**Menutup dua pertanyaan audit terbuka `GMI_Implementation_Checkpoint_v3.docx`
+§11.1/§11.3** sebagai gate permanen, bukan temuan manual yang harus
+di-re-verify tiap kali: (a) double-`**` glob literal (RISK-2 defect
+class), (b) glob `market_ohlcv` unfiltered yang tidak melalui
+`silver_scope.py`'s `layer1_globs()`/`context_glob()` (RISK-6 defect
+class). Scanner ditulis berbasis **AST** (bukan regex, tidak seperti
+Gate G-2) — draft regex awal false-positive di docstring modul
+`technical_signals.py` sendiri yang MEMBAHAS path lama sebagai sejarah,
+bukan konstruksi live; AST membedakan docstring (`bare ast.Expr`
+statement) dari string constant yang genuinely dipakai (assignment,
+dict/list value, argumen call, fragment f-string).
+
+**Saat gate ditambahkan, ditemukan 6 instance RISK-6 TAMBAHAN** di luar
+2 yang sudah diperbaiki v1.9.0 (`quality_validator.py`,
+`technical_signals.py`) — persis skenario yang diantisipasi ADR-022
+sendiri. Semua 6 diperbaiki dalam rilis ini (bukan sekadar
+di-grandfather), karena gate blocking yang gagal langsung saat merge
+lebih buruk daripada tidak menambah gate sama sekali:
+
+- **`src/backtest/pit_data.py`** [efisiensi, bukan korupsi data —
+  query per-simbol dengan `WHERE symbol=$symbol` sudah menyaring benar]:
+  `SILVER_OHLCV_PATH` (string tunggal unfiltered) -> `layer1_globs()`
+  (list, dibind sebagai parameter DuckDB `$path`) di `get_ohlcv()` dan
+  `get_ohlcv_universe()`. Modul ini sebelumnya nol test coverage
+  dedicated (hanya tercakup insidental via `test_backtest_engine.py`,
+  `test_fstring_sql_absence.py`, `test_preexisting_violations_v1.py`) —
+  ketiganya di-rerun, 139 test lolos.
+- **`src/gold/correlation_matrix.py`** [efisiensi — `active_symbols`
+  filter sudah Layer-1-only]: `SILVER_1D_PATH` dihapus, `run()` sekarang
+  membangun list via `layer1_globs()`, skip graceful jika kosong.
+  **Modul ini sebelumnya NOL test coverage dedicated sama sekali** — file
+  baru `tests/unit/test_correlation_matrix_glob_scope.py` (4 test)
+  ditulis sebagai first-ever coverage, scoped khusus ke fix ini.
+- **`src/gold/screener.py::_check_data_freshness`** **[P1 — bug korektnes
+  nyata, bukan sekadar efisiensi]**: gate freshness ini persis pola
+  masking-bug `quality_validator.py::_check_coverage` yang SUDAH
+  diperbaiki v1.9.0 — `COUNT(DISTINCT symbol)` dari glob unfiltered
+  dibagi denominator Layer-1-only (`get_loader().count()`). Beberapa
+  anchor Layer 2 yang fresh bisa mendorong coverage% di atas angka
+  Layer 1 sebenarnya, membuat gate yang SATU-SATUNYA tujuannya
+  memblokir screener saat data Layer 1 stale bisa lolos padahal
+  seharusnya blok. Fix: `layer1_globs()`. Dua test threshold existing
+  (`test_screener_gld005.py`) yang hanya mock `duckdb.connect` (bukan
+  filesystem) diupdate untuk juga mock `layer1_globs` — tanpa ini,
+  guard baru "skip jika belum ada data Layer 1" membuatnya short-circuit
+  sebelum mock DuckDB pernah dipanggil. + 1 test baru untuk graceful-skip.
+- **`src/gold/views.py`** **[severity tertinggi — ini adalah Interface
+  Contract (GD §0.4) untuk Trading Engine, consumer eksternal yang
+  TIDAK bisa di-audit/dikoordinasikan pipeline ini]**: `v_ohlcv_1D` /
+  `v_ohlcv_1H` / `v_ohlcv_all` sebelumnya bisa mengekspos VIX/DXY/ETF
+  seolah-olah instrumen tradeable — persis yang SUDAH direklasifikasi
+  keluar Layer 1 via ADR-003. **Percobaan pertama fix ini SALAH**: SQL
+  list literal 4-market di-bake pada IMPORT TIME via `layer1_markets()`
+  — langsung gagal karena `read_parquet()` dengan list argumen RAISE
+  untuk SELURUH query jika SATU SAJA entry list-nya nol match (dibuktikan
+  empiris; persis perilaku yang sudah didokumentasikan `silver_scope.py`
+  untuk pola Python-list-parameter). Data Bronze/Silver datang bertahap
+  per market saat runtime, bukan saat import — fixture test manapun yang
+  hanya punya 1 dari 4 market akan gagal. Fix final: 3 SQL view
+  ditulis sebagai TEMPLATE, di-resolve **saat call time** via
+  `_resolve_ohlcv_view_sql()` yang memanggil `layer1_globs()` fresh
+  setiap `get_pipeline_connection()` dipanggil (skip market yang belum
+  ada data). DuckDB TIDAK mendukung brace-alternation glob (dibuktikan:
+  `'{a,b}/**/*.parquet'` raise "No files found" walau kedua subdirektori
+  ada) — SQL list literal adalah konstruk yang benar (dikonfirmasi
+  bekerja standalone dan di dalam `CREATE VIEW`).
+  **Percobaan kedua JUGA sempat trip Gate G-2** (f-string SQL) karena
+  memakai f-string untuk interpolasi `view_name` + glob list — diperbaiki
+  dengan concatenation + `_quoted_identifier()`, pola yang SUDAH
+  established di file yang sama untuk alasan yang sama persis
+  (identifier tidak bisa di-`$name`-bind di SQL engine manapun).
+  3 test existing diperbaiki (pre-warm `get_loader()` sebelum
+  `monkeypatch.chdir()`, karena `layer1_globs()` kini bergantung pada
+  `InstrumentLoader` yang resolve `config/instruments.yaml` via path
+  relatif) + 3 test BARU (`TestOhlcvViewsGlobScope`) membuktikan properti
+  korektnes sebenarnya: VIX tidak bocor ke `v_ohlcv_1D`, view tetap
+  bekerja walau baru 1 dari 4 market Layer 1 yang punya data (regression
+  guard eksplisit untuk kegagalan percobaan pertama).
+- **`src/utils/delta_reprocessor.py`**: `SILVER_GLOB` (default hardcoded
+  unfiltered) -> sentinel `None`, `_effective_glob()` fallback ke
+  `layer1_globs()` saat tidak di-override. Mekanisme override test
+  existing (`monkeypatch.setattr(dr, "SILVER_GLOB", ...)`) dipertahankan
+  utuh (6 test existing tetap lolos tanpa diubah) + 3 test baru untuk
+  default path, termasuk bukti `find_stale_symbols()` tidak lagi
+  melaporkan VIX (Layer 2) sebagai stale.
+- **`src/utils/pipeline_dashboard.py`** [display-only, severity
+  terendah]: baris "Silver OHLCV" dipecah jadi "Silver OHLCV (Layer 1)"
+  dan "Silver OHLCV (Layer 2 context)" — perbaikan informasi genuine
+  untuk operator, bukan sekadar gate-compliance. File baru
+  `test_pipeline_dashboard_coverage.py` (2 test, first-ever coverage
+  untuk modul ini).
+
+**Test baru:** `tests/unit/test_check_glob_scope.py` (12 test untuk
+scanner itu sendiri, termasuk regression guard eksplisit untuk false
+positive docstring yang ditemukan saat menulis draft regex pertama, dan
+`test_real_repo_currently_passes` yang menjalankan scanner terhadap repo
+sungguhan sebagai live guard).
+
+### ADR-013/ADR-014/ADR-015/ADR-016/ADR-024 [config/instruments.yaml, src/config/instrument_loader.py, src/utils/symbol_utils.py] — Layer 2 universe expansion: context_dollar_basket + context_fx_normalization
+
+Melengkapi Broad Dollar Index Architecture v2.0 §7.2's basket 10-pasangan
+— hanya 6 dari 10 pasangan yang di-desain (+ USD_IDR) yang sebelumnya ada
+di universe manapun. 6 mata uang net-baru (CNH, KRW, SGD, HKD, TWD, NOK,
+ADR-014) + 1 anchor point-fix untuk normalisasi CPO (MYR, ADR-024)
+ditambahkan sebagai instrumen Layer 2 di bawah dua subcategory BARU:
+
+- **`context_dollar_basket`** (ADR-014): 6 instrumen, `contributes_to: []`
+  (nol bobot domain-score langsung — mencegah triple-counting DM/EM
+  dollar strength lintas DXY + raw pairs + fitur derived Broad Dollar
+  Index masa depan). CNH memakai offshore renminbi (ADR-013 — bukan
+  onshore CNY, menghindari double-counting kebijakan PBOC yang sudah
+  di-track via `context_rates_em_cb`). HKD disertakan dengan
+  `reliability_flag: true` (ADR-015 — pegged currency, pola sama dengan
+  SSEC/BOJ). SGD disertakan atas alasan FX-policy-band mandiri
+  (ADR-016 — MAS mengelola kebijakan via S$NEER band, bukan interest
+  rate).
+- **`context_fx_normalization`** (ADR-024): 1 instrumen (MYR=X — bentuk
+  kanonik Yahoo Finance, BERBEDA sengaja dari konvensi USD<CCY>=X yang
+  dipakai 6 mata uang basket di atas), `contributes_to: []`,
+  `include_in_forecast: false` (satu-satunya consumer: normalisasi CPO
+  Silver-layer masa depan — bukan CrossAssetEngine/gold_signals/
+  gold_screener). Sengaja TIDAK digabung ke `context_dollar_basket` —
+  dua tujuan tak berhubungan (komputasi Broad Dollar Index vs. konversi
+  mata uang satu komoditas) tetap terpisah.
+- **ADR-017/ADR-018 [PARTIALLY GATED di dokumen sumber]**: nilai bobot
+  basket persis dan magnitude override IDR TIDAK diimplementasikan di
+  rilis ini — keduanya terblokir pada Gate 1 (ketersediaan data
+  komponen bobot BIS EER), yang TIDAK bisa diverifikasi dari sandbox ini
+  (tanpa akses network ke `stats.bis.org`). Prinsip ADR-018 (IDR
+  di-override naik mengikuti presedan BI 2x-weighting) dicatat di
+  komentar YAML untuk implementasi masa depan begitu Gate 1 selesai —
+  BUKAN diimplementasikan sebagai angka konkret sekarang, konsisten
+  dengan status "PARTIALLY GATED" dokumen sumber.
+- `InstrumentLoader._CONTEXT_DIRECT_KEYS` diperluas dari `("dollar",)` ke
+  `("dollar", "dollar_basket", "fx_normalization")` — mekanisme yang
+  sama persis dipakai `dollar`/`context_dollar` yang sudah ada, tidak
+  ada logic baru yang diperlukan.
+- `scripts/validate_instruments.py`: `EXPECTED_TOTAL` 692 -> 699,
+  `EXPECTED_SUBCATEGORIES` 20 -> 22, **BARU**
+  `ZERO_WEIGHT_SUBCATEGORIES` guard (memastikan 2 subcategory baru tidak
+  pernah diam-diam mendapat bobot domain-score).
+- **Test:** 12 test baru di `TestGMIDecisionDocumentsV1V2`
+  (`test_instrument_loader.py`) — mencakup setiap ADR individual
+  (dollar_basket count, CNH offshore ticker, HKD reliability_flag, SGD
+  documentation, MYR placement + forecast exclusion + ticker
+  convention berbeda by design).
+
+### ADR-019 [config/instruments.yaml] — Domain score weight-sum correction
+
+**Audit penuh seluruh `_meta.contributes_to` block** (5 grup Layer 2:
+dollar/rates/equity/commodity/etf) mereproduksi persis temuan
+`GMI_Decision_Document_v1.docx` §3.4: 5 dari 8 domain score TIDAK sum ke
+1.00 (`score_dollar_strength`=1.30, `score_yield_curve`=1.30,
+`score_global_growth`=1.05, `score_inflation_pressure`=1.05,
+`score_risk_appetite`=1.25) akibat kontributor undocumented tanpa
+rasional yang bisa ditelusuri — sementara 3 lainnya (`score_commodity_cycle`,
+`score_credit_stress`, `score_em_risk`) sudah persis cocok tabel dokumen
+governing, bukti drift ini adalah kecelakaan yang tidak di-review, bukan
+redesign yang disengaja.
+
+Restorasi literal ke tabel Architecture Extension v1.0 §5.2 / Data
+Source & Rates Adjustment v1.0 §7:
+`context_rates_fed.contributes_to` dikosongkan total (0.30 + 0.20
+undocumented dihapus); `context_rates_dm_cb` kehilangan entry
+`score_yield_curve` (0.10, undocumented); `context_equity_dm` kehilangan
+entry `score_risk_appetite` (0.25, undocumented); `context_etf_international`
+kehilangan entry `score_global_growth` (0.05, undocumented);
+`context_commodity_coal` kehilangan entry `score_inflation_pressure`
+(0.22 — TERNYATA MENGGANTIKAN entry `context_rates_spread` yang
+terdokumentasi di weight yang sama persis) — entry itu **dipulihkan** di
+`context_rates_spread` sebagai gantinya; `context_etf_commodity`
+kehilangan entry `score_inflation_pressure` (0.05, undocumented).
+
+- **BARU** `scripts/validate_instruments.py::_validate_domain_score_weights()`
+  — walk seluruh tree `context`, assert setiap score sum ke 1.00 exact
+  (toleransi float 1e-9). Wajib per §9 Definition of Done dokumen sumber:
+  *"All 8 domain scores' `_meta.contributes_to` weights sum to exactly
+  1.00, verified by a new regression test."*
+- **Test baru:** `TestDomainScoreWeightSumValidation` (3 test) —
+  reproduksi langsung audit real-file, negative test yang menanam ulang
+  SATU kontributor undocumented persis yang dihapus ADR-019
+  (`context_rates_fed` -> `score_dollar_strength` 0.30) dan membuktikan
+  validator menangkapnya, plus test enforcement `ZERO_WEIGHT_SUBCATEGORIES`.
+
+### ADR-023 [config/instruments.yaml] — Commodity MYR-normalization scope correction
+
+**Tiga dokumen governing berbeda pendapat** — diverifikasi via
+Architecture v2.1 Addendum §4.2/§5.3 sebagai sumber paling spesifik dan
+terbaru: dari 3 komoditas Wave 2 yang deferred (TIN, CPO, RUBBER), HANYA
+CPO yang genuinely MYR-dependent. TIN (LME, tvdatafeed `SN`) dan RUBBER
+(SICOM/SGX, tvdatafeed `SICOM_TSR20`) adalah USD-native — Addendum §5.3
+secara eksplisit menolak TOCOM RSS3 (JPY) untuk RUBBER demi menghindari
+risiko timestamp-conversion/lookahead, keputusan ADR yang disengaja,
+bukan oversight.
+
+- `TIN`/`RUBBER`: `deferred_reason` diperbaiki dari klaim normalisasi MYR
+  ke verifikasi ticker/exchange tvdatafeed (OD-C1, tidak terkait mata
+  uang); `requires_fx_normalization: false`; `base_currency: USD`.
+  Status `context_available: false` **TIDAK berubah** — hanya alasan
+  blocking yang dikoreksi.
+- `CPO`: tidak berubah (`requires_fx_normalization: true`,
+  `base_currency: MYR`) — kini didokumentasikan sebagai satu-satunya
+  instrumen MYR-dependent, akan dinormalisasi via anchor MYR=X baru
+  (ADR-024) begitu Wave 2 diimplementasikan.
+- **Test:** `test_adr023_only_cpo_is_myr_dependent` (di
+  `TestGMIDecisionDocumentsV1V2`) mengunci ketiga instrumen per-simbol,
+  bukan asersi uniform seperti sebelumnya. `test_deferred_instruments_have_required_fields`
+  (`test_instrument_loader.py`) ditulis ulang total — assert uniform
+  lama (`requires_fx_normalization is True` untuk SEMUA deferred) sudah
+  tidak valid post-ADR-023, diganti per-simbol.
+
+### Companion action — high_52w/low_52w rename (finnhub_ingester.py)
+
+Nama field misnomer: field `h`/`l` Finnhub adalah high/low HARI
+TRADING SAAT INI, bukan rentang 52-minggu. Direname ke `day_high`/
+`day_low` di `finnhub_ingester.py`, `config/schemas/finnhub_quote.yaml`.
+
+**Premis dokumen sumber ("zero current consumers, zero migration cost")
+TERBUKTI SALAH saat verifikasi empiris** — `src/silver/fundamental_processor.py
+::process_quotes()` adalah consumer nyata dan live, membaca kolom ini
+langsung dari Bronze via SQL SELECT dan menulisnya utuh ke Silver. Fix
+memperbarui SQL SELECT di `process_quotes()` juga (bukan hanya sisi
+Bronze) — konsisten dengan prinsip empirical-verification-over-
+documentation-trust project ini.
+
+### FIX FP-AIO-001 [P1, ditemukan tidak direncanakan] — atomic_write_parquet tidak pernah di-import di fundamental_processor.py
+
+**Ditemukan sebagai efek samping** menulis test end-to-end pertama untuk
+`process_quotes()` (bagian rename di atas) — bukan item yang direncanakan
+dari ADR manapun. `atomic_write_parquet()` dipanggil di DUA situs
+(`process_earnings()`, `process_quotes()`) tapi **tidak pernah
+di-import** di file ini — `NameError` pada setiap invocation NYATA
+(non-empty). Test graceful-no-data existing untuk kedua method
+(`test_process_earnings_graceful_no_bronze`,
+`test_process_quotes_graceful_no_bronze`) return awal sebelum mencapai
+baris write, persis mengapa ini tidak pernah terdeteksi — kelas akar
+masalah yang sama dengan FIX GLD-ADX-001 (v1.9.0): jalur invocation
+nyata dengan nol test coverage sampai baru ditulis di sesi ini.
+
+- `from src.utils.atomic_io import atomic_write_parquet` ditambahkan.
+- **Test baru:** `test_process_quotes_reads_day_high_day_low` dan
+  `test_process_earnings_writes_real_data` — first-ever invocation nyata
+  (non-empty data) untuk KEDUA method, bukan hanya method yang memicu
+  penemuan bug.
+
+### ADR-025 [scripts/preflight/*.py (NEW)] — External-source verification: authored now, executed when network-enabled
+
+Tiga script pre-flight ditulis sebagai artifact checked-in, TIDAK
+dieksekusi terhadap API live (sandbox sesi ini juga tidak punya akses
+network ke yfinance/BIS/Finnhub — constraint yang sama persis
+didokumentasikan di setiap checkpoint GMI sebelumnya):
+
+- `check_yfinance_tickers.py` — verifikasi shape OHLCV untuk semua
+  instrumen Layer 2 aktif, perhatian khusus ke 7 mata uang baru rilis
+  ini (Gate 2 kedua dokumen keputusan menandai KRW/SGD/HKD/TWD/NOK
+  sebagai live-unconfirmed; CNH dan MYR masing-masing dikonfirmasi via
+  ADR-013/ADR-024).
+- `check_bis_cbpol_d.py` — verifikasi resolusi harian (bukan bulanan)
+  utuh 12 REF_AREA code, menutup Data Source & Rates Adjustment v1.0
+  §13 checklist item □1/□2 yang terus dibawa "belum diverifikasi" sejak
+  checkpoint pertama.
+- `check_finnhub_shape.py` — verifikasi shape response live `/quote` dan
+  `/calendar/earnings` terhadap kontrak yang di-declare schema (dibangun
+  via web search di v1.9.0, bukan panggilan API live).
+- **Test:** `test_preflight_scripts.py` (14 test) — mencakup logic murni/
+  network-independent SAJA (date-math resolusi harian, shape-check
+  terhadap client yang di-mock, penanganan prerequisite hilang) —
+  sengaja TIDAK mencoba test panggilan network nyata, konsisten dengan
+  framing ADR-025 sendiri.
+
+### Test Suite Summary
+
+| Checkpoint | Total | Δ |
+|---|---|---|
+| Inherited baseline (v1.9.0) | 1131 | — |
+| + ADR-020 (pandas_indicators rename) | 1132 | +1 |
+| + TestGMIDecisionDocumentsV1V2 + TestDomainScoreWeightSumValidation | 1147 | +15 |
+| + high_52w/low_52w rename + FP-AIO-001 | 1150 | +3 |
+| + Gate G-8 (scanner + 6 file fixes + their tests) | 1174 | +24 |
+| + ADR-025 preflight script tests | 1188 | +14 |
+
+**Reconciled: 1131 + 57 = 1188.** Cocok persis dengan hasil test suite
+akhir yang diverifikasi ulang.
+
+
+
+Dokumen referensi: `KNOWN_RISKS.md` (RISK-4 resolved; RISK-5, RISK-6 baru)
+
+Total: **6 finding diperbaiki** (1 refactor arsitektural + 3 bug fix + 1
+critical pre-existing bug + 1 dormant risk resolved) | **22 file**
+(9 baru, 13 dimodifikasi) | **1131 passed / 0 failed / 0 error**
+(Δ +76 dari v1.8.1 — 1055)
+
+Konteks: eksplisit permintaan user untuk **menyelesaikan dan
+mensolidkan modul crucial/critical di Bronze-Silver-Gold SEBELUM**
+melanjutkan ke GMI Wave 1 Cycle 4 (CrossAssetEngine) — persis prinsip
+yang sama yang menjustifikasi audit v1.8.1: jangan bangun statistik yang
+canggih (Ledoit-Wolf correlation, Granger-causality lead-lag, HMM regime)
+di atas fondasi yang belum benar-benar diverifikasi. Setiap temuan di
+bawah ini ditemukan secara **empiris** (baca kode aktual, jalankan probe
+nyata terhadap DuckDB/Polars/pandas-ta yang benar-benar terinstall) —
+bukan diasumsikan dari dokumentasi desain.
+
+### ADD GMI-CTX-001 — Separation of Concerns: context_anchors.py dipisah dari active_symbols.py
+
+Permintaan eksplisit user: `ActiveSymbolsResolver` melakukan dua pekerjaan
+yang secara struktural tidak berhubungan — Layer 1 (query DuckDB
+liquidity-screened yang sudah diaudit, AS-1..AS-12, dilindungi
+KNOWN_RISKS.md sebagai "jangan disentuh tanpa correctness defect
+konkret") dan Layer 2 (passthrough config-driven, tanpa Silver query sama
+sekali — Architecture v2.0 §4.2: *"Filter: None"*). Blast-radius check
+sebelum ekstraksi (bukan asumsi): `resolve_context()`/`load_context()`/
+`load_context_full()` nol caller di luar `active_symbols.py` dan file
+test-nya sendiri — memungkinkan **clean break**, bukan migrasi
+compatibility-shim.
+
+- **NEW** `src/silver/context_anchors.py::ContextAnchorsResolver` —
+  `resolve()`/`load()`/`load_full()` (drop qualifier "_context" — tidak
+  ambigu lagi di kelas sendiri). Output path BARU:
+  `data/silver/context_anchors/context_anchors_{date}.parquet` (bukan
+  legacy-alongside-new seperti `active_ohlcv_{date}.parquet`, karena
+  blast-radius check membuktikan tidak ada consumer path lama).
+- **NEW job** `silver_context_anchors` — `depends_on: []` **sengaja**,
+  bukan shortcut: `resolve()` murni enumerasi InstrumentLoader, nol
+  Silver read, jadi fake dependency ke `silver_ohlcv` hanya menambah
+  risiko blocking tanpa alasan nyata (lihat docstring `run()` untuk
+  rationale lengkap).
+- `active_symbols.py` sekarang Layer 1 murni — `resolve()`/`_RESOLVE_QUERY`/
+  `_SCREENED_LIMIT=175` **tidak disentuh sama sekali** (diverifikasi:
+  hanya baris `resolve_context()`/`load_context()`/`load_context_full()`
+  dan satu call site di `run()` yang dihapus).
+- **Test:** `tests/unit/test_context_anchors.py` (13 test — migrasi 4 dari
+  `test_active_symbols.py` + 9 baru, termasuk `load()`/`load_full()` yang
+  **sebelumnya nol test coverage sama sekali**, di bawah nama apapun).
+  `tests/integration/test_job_registry_integrity.py::TestGMIJR003ContextAnchorsWiring`
+  (10 test) termasuk negative test eksplisit
+  (`test_active_symbols_resolver_no_longer_exposes_layer2_methods`) yang
+  membuktikan ekstraksi benar-benar terjadi, bukan sekadar modul baru
+  ditambah di samping yang lama.
+
+### FIX QV-L2-01 / GLD-L2-01 [P1] — Layer 1 checks silently scanned Layer 2 rows
+
+**RISK-6 di KNOWN_RISKS.md.** Root cause tunggal, tiga symptom: setiap
+consumer `data/silver/market_ohlcv/` (5 check `quality_validator.py`,
+Silver read `technical_signals.py`) memakai glob rekursif tanpa filter
+market. Sejak GMI Cycle 3 menambah Layer 2 context OHLCV di root yang
+SAMA (`market_ohlcv/context/...`), glob tanpa filter itu **diam-diam
+ikut scan baris Layer 2**. Dibuktikan empiris (bukan diasumsikan) via
+probe DuckDB langsung sebelum fix ditulis:
+
+- `_check_coverage`: simbol Layer 2 menggembungkan numerator
+  `COUNT(DISTINCT symbol)` terhadap denominator Layer-1-only
+  (`get_loader().count()`) — coverage% bisa terbaca >100% dari angka
+  Layer 1 sebenarnya, menyembunyikan penurunan coverage Layer 1 yang
+  nyata di bawah gate 95%.
+- `_check_freshness`: satu anchor Layer 2 yang fresh (mis. VIX)
+  menyembunyikan staleness Layer 1 pipeline-wide, karena `MAX(timestamp)`
+  dihitung lintas kedua layer sekaligus. **Reproduksi empiris**: AAPL
+  (Layer 1) 19 hari stale + VIX (Layer 2) fresh hari ini → pre-fix,
+  freshness_check melaporkan lag 0 hari (PASS yang salah).
+- `technical_signals.py::_process_timeframe`: RSI/MACD/ADX/BBands
+  dihitung untuk VIX, DXY, 13 global index, 25 ETF, 8 commodity context
+  seolah-olah tradeable candidates — bertentangan langsung dengan
+  rationale ADR-003 sendiri untuk reklasifikasi VIX/DXY keluar Layer 1
+  ("RSI pada VIX... tidak bermakna").
+
+**Fix:** utility baru `src/utils/silver_scope.py`
+(`layer1_globs()`/`context_glob()`) — market list Layer 1 diturunkan dari
+`InstrumentLoader`, bukan hardcode; skip market directory yang belum ada
+(bukan include glob mati yang bikin DuckDB `read_parquet($list)` raise
+untuk SELURUH list ketika satu entry nol-match — diverifikasi empiris).
+Dipakai di `quality_validator.py` (5 check di-scope ulang) dan
+`technical_signals.py` (Silver read di-scope ulang). **Layer 2 check
+suite baru** ditambahkan sekaligus — `_check_context_null/_price_sanity/
+_coverage/_gap_detection/_outlier_detection/_freshness` — level
+**WARNING**, sengaja bukan CRITICAL: belum ada Gold-layer consumer Layer
+2 Silver OHLCV (CrossAssetEngine = Cycle 4, belum dibangun); mem-block
+seluruh Gold layer karena satu anchor Layer 2 bermasalah hari ini
+melanggar Separation of Concerns (over-coupling consumer yang belum ada).
+
+### ADD GLD-ACTIVE-001 [Architecture v2.0 §5.2] — gold_signals active_ohlcv filter
+
+Spec Architecture v2.0 (~190 Layer 1 candidates, bukan seluruh 640) tidak
+pernah diimplementasikan. `_resolve_active_ohlcv_symbols()` baru —
+`ActiveSymbolsResolver.load_ohlcv(run_date)`, fallback graceful ke Layer
+1 penuh (degraded tapi benar, bukan crash) jika `silver_active_symbols`
+belum jalan untuk `run_date` — hanya relevan untuk invocation langsung/
+out-of-sequence; `DependencyGuard` produksi sudah menjamin urutan yang
+benar. Filter diterapkan via DuckDB `= ANY($active_symbols)` (list-bound
+parameter, diverifikasi bekerja — bukan f-string SQL).
+
+### FIX GLD-ADX-001 [P0, CRITICAL] — add_adx() crash pada setiap invocation nyata
+
+**RISK-5 di KNOWN_RISKS.md. Ditemukan tidak sengaja** saat menulis test
+pertama untuk `technical_signals.py`/`pandas_indicators.py` — **keduanya
+nol test coverage sebelumnya**, dikonfirmasi via grep penuh `tests/`.
+`add_adx()` me-rename kolom output `ta.adx()` via
+`lc.startswith("adx")` — pandas-ta versi terinstall (0.4.71b0)
+mengembalikan EMPAT kolom, bukan tiga: `['ADX_14', 'ADXR_14_2', 'DMP_14',
+'DMN_14']`. `ADXR` (Average Directional Index **Rating**, varian smoothed
+yang tidak dipakai pipeline ini) JUGA match `startswith("adx")` — kedua
+kolom di-rename ke nama target yang SAMA (`"adx"`), menghasilkan
+DataFrame pandas dengan nama kolom duplikat.
+`pl.from_pandas()` **benar** menolak ini (`ValueError: non-unique
+indices and/or column names`) — artinya **setiap** invocation nyata
+`add_adx()` (= setiap invocation nyata `gold_signals`, dan semua yang
+bergantung padanya: `gold_mtf`, `gold_screener`) **raise**. Dikonfirmasi
+bug ini **byte-identical dengan pristine v1.8.1** (diff langsung) — pre-
+existing, bukan regresi dari sesi ini.
+
+**Fix:** match `lc.startswith("adx_")` (dengan underscore) — tetap match
+`ADX_14`, benar-benar exclude `ADXR_14_2` (`"adxr_14_2".startswith("adx_")`
+= `False`, karakter setelah "adx" adalah "r" bukan "_"). `add_bbands()`
+diaudit dengan output pandas-ta nyata yang sama, dikonfirmasi TIDAK
+punya collision serupa (`BBB_`/`BBP_` tidak match pattern upper/mid/lower
+manapun) — tidak ada perubahan diperlukan di sana.
+
+**Test:** `tests/unit/test_pandas_indicators.py` (10 test, file pertama
+untuk modul ini) — termasuk `test_adxr_is_not_silently_used_as_adx` yang
+menghitung ADX/ADXR independent lalu assert kolom wrapper `adx` cocok
+dengan ADX (bukan hanya "tidak crash"), sehingga collision serupa di masa
+depan (pandas-ta versi baru menambah kolom ADX-prefixed lain) tertangkap
+sebagai assertion failure, bukan silent value-swap.
+
+### FIX RISK-4 [KNOWN_RISKS.md] — finnhub_ingester.py: zero schema validation → RESOLVED
+
+Blocker asli (butuh schema nyata, sandbox tidak ada akses network ke
+Finnhub) diselesaikan via **web search terhadap dokumentasi resmi
+Finnhub** (`/quote`, `/calendar/earnings` response shape — field names,
+types, nullability) — blocker itu untuk *response data*, bukan
+*dokumentasi*, dan schema hanya butuh yang terakhir.
+`config/schemas/finnhub_quote.yaml` + `finnhub_earnings_calendar.yaml`
+baru. Kedua write path (`_ingest_earnings_calendar`, `_ingest_symbol`)
+sekarang gate lewat `SchemaValidator` sebelum `write()`.
+
+**Fragility kedua ditemukan sekaligus** (bukan trivial mechanical wiring):
+ingester ini fetch window 90-hari FORWARD, jadi `eps_actual` genuinely
+`None` untuk hampir semua baris di operasi nyata — kasus NORMAL, bukan
+anomali. Membiarkan Polars infer dtype dari raw dict value berarti kolom
+all-`None` infer `Null` dtype, bukan `Float64` — gagal validasi pada
+kasus paling umum. `revenueEstimate` juga bisa datang sebagai integer
+JSON polos (tanpa titik desimal) — batch all-integer infer `Int64`
+terhadap schema `Float64`. Kedua write path sekarang eksplisit
+`.cast(pl.Float64, strict=False)`/`.cast(pl.Int64, strict=False)` setiap
+kolom SEBELUM validasi — kontrak schema stabil terlepas dari value apa
+yang kebetulan ada di satu fetch.
+
+**Tidak disentuh:** `_bronze_finnhub`'s `NotImplementedError` block
+(job_registry.py) — fix ini mengeraskan `FinnhubIngester` untuk saat blok
+itu dicabut nanti ("Finnhub Integration" roadmap), tidak mencabutnya.
+Misnomer `high_52w`/`low_52w` (sebenarnya high/low HARI INI, bukan
+52-week) didokumentasikan di komentar YAML, tidak di-rename — di luar
+scope fix validasi schema, dan nol consumer membaca data ini saat ini.
+
+**Test:** `tests/unit/test_finnhub_ingester.py` (16 test, file pertama
+untuk modul ini) — termasuk regression guard langsung untuk kedua
+fragility di atas (`test_all_null_eps_actual_does_not_cause_spurious_quarantine`,
+`test_integer_shaped_revenue_estimate_does_not_cause_spurious_quarantine`).
+
+### Diverifikasi
+
+`ast.parse()` OK pada seluruh file .py yang dimodifikasi/dibuat (9 baru +
+13 dimodifikasi); full suite **1131 passed / 0 failed / 0 error** (dari
+1055 → +76); `validate_instruments.py` exit 0 (692 symbols, tidak
+terpengaruh); setiap fix di atas punya regression test yang secara
+spesifik mereproduksi bug asli sebelum membuktikan fix-nya, bukan hanya
+"tidak crash lagi".
+
+---
+
+
+
+Dokumen referensi: `KNOWN_RISKS.md` (RISK-2, RISK-3, RISK-4)
+
+Total: **1 audit pass** | **6 file dimodifikasi** (2 fix, 3 test, 1 doc) |
+**1055 passed / 0 failed / 0 error** (Δ +19 dari v1.8.0 — 1036)
+
+Konteks: Cycle 3 (v1.8.0) menutup foundational gap Layer 2 OHLCV, tapi
+dalam prosesnya menemukan bug yang sudah silently live sejak sebelum
+sesi ini dimulai (glob DuckDB double-`**`, GMI-GLD-001) — disembunyikan
+sepenuhnya oleh `except Exception: pass`. Sinyal itu cukup kuat untuk
+menjustifikasi audit formal Bronze+Silver SEBELUM lanjut ke Cycle 4
+(CrossAssetEngine) — membangun HMM regime detection, Ledoit-Wolf
+correlation, dan Granger-causality lead-lag di atas fondasi yang belum
+diverifikasi selain "compile dan lolos test sintetis" adalah urutan
+pekerjaan yang salah untuk platform yang seluruh nilainya bergantung pada
+sinyal yang bisa dipercaya.
+
+### Audit dilakukan (mekanis, terverifikasi empiris — bukan grep sekali lalu percaya)
+
+- **RISK-2 (CLOSED — audited, tidak fixed lagi karena tidak ada yang perlu difix):**
+  Scan komprehensif seluruh `src/` tree (bukan hanya Bronze/Silver) untuk
+  pola double-`**` dalam satu glob string. Ditemukan hanya 2 instance lain
+  di luar yang sudah difix di v1.8.0 — keduanya di `ohlcv_processor.py`
+  (PASS 1 loop Layer 1 yang sudah ada, dan `run_context()` Layer 2 baru),
+  dan keduanya memakai `pl.scan_parquet()` (Polars) — diverifikasi
+  empiris Polars TOLERAN terhadap pattern yang DuckDB tolak. Kesimpulan:
+  bug class ini adalah **insiden terisolasi**, bukan pola sistemik.
+- **RISK-3 (FIXED):** Investigasi mendalam terhadap `test_fstring_sql_absence.py`
+  (test yang sudah ada dari audit GLD-003 sebelumnya) mengungkap root
+  cause ganda: (1) scope GLD-003 secara eksplisit TIDAK mencakup
+  `sector_rotation.py`/`views.py`, dan (2) scanner function-nya sendiri
+  hanya mendeteksi f-string TRIPLE-quote — kedua violation memakai
+  SINGLE-quote f-string yang bahkan tidak akan terdeteksi sekalipun
+  file-nya ada di scope. **Kedua akar masalah diperbaiki sekaligus**, bukan
+  hanya gejalanya.
+- **Layer Independence Guarantee (GD §17.2):** Verifikasi mekanis lintas
+  seluruh `src/bronze/`, `src/silver/`, `src/gold/` — Bronze tidak pernah
+  baca Silver/Gold, Silver tidak pernah baca Gold, Gold tidak pernah baca
+  Bronze langsung, Silver tidak pernah panggil external API kecuali
+  `sentiment_processor.py` (exception yang memang didesain GD §17.4).
+  **Hasil: BERSIH, nol pelanggaran.**
+- **Schema validation coverage:** Semua 10 Bronze ingester dicek satu per
+  satu. 8 dari 10 punya `SchemaValidator` yang aktif. `treasury_ingester.py`
+  legitimate (delegasi ke `FREDIngester` yang sudah punya validator sendiri).
+  `finnhub_ingester.py` — **RISK-4 baru, lihat di bawah.**
+- **Atomic write compliance:** 4 call site (`active_symbols.py` ×3,
+  `global_rates_processor.py` ×1) memakai `write_parquet()` langsung,
+  BUKAN via `atomic_write_parquet()` shared utility — diverifikasi tiap
+  satu: semuanya reimplementasi manual pattern `tempfile` + `os.replace`
+  yang IDENTIK dan tetap atomic secara benar. Bukan correctness bug,
+  dicatat sebagai catatan konsolidasi minor di `KNOWN_RISKS.md`.
+
+#### FIX GMI-AUD-001 [P2] — src/gold/sector_rotation.py
+
+`_get_active_regime()`: f-string SQL (`f"SELECT regime FROM
+read_parquet('{regime_path}')" f" WHERE date = '{run_date}' LIMIT 1"`) →
+`$path`/`$run_date` parameterized binding. `str(run_date)` dipakai (bukan
+raw `date` object) untuk mempertahankan semantik perbandingan STRING yang
+persis sama dengan versi f-string asli.
+
+#### FIX GMI-AUD-002 [P2] — src/gold/views.py
+
+`register_views()`/`list_available_views()`: f-string SQL identifier
+interpolation (`f"SELECT COUNT(*) FROM {view_name} LIMIT 1"`) TIDAK bisa
+diperbaiki dengan `$name` binding — parameter binding di SQL engine
+manapun hanya untuk VALUE, tidak pernah untuk identifier di posisi FROM.
+Fix: `_quoted_identifier()` helper baru — validasi regex
+`^[A-Za-z_][A-Za-z0-9_]*$`, quote dengan tanda kutip ganda, raise
+`ValueError` untuk apapun selain itu — dipakai via string concatenation
+biasa (bukan f-string). `view_name` selalu berasal dari
+`VIEW_DEFINITIONS.keys()` (dict hardcoded internal) — risiko injection
+nol secara struktural, tapi guard tetap ditambahkan sebagai defense-in-depth.
+
+#### ADD GMI-AUD-003 — tests/unit/test_fstring_sql_absence.py
+
+Scanner AST-based baru (`_scan_fstring_sql_violations_ast`) menggantikan
+pendekatan character-window lama sebagai regression guard PRIMER: presisi
+(hanya melihat konten literal node `ast.JoinedStr` itu sendiri, bukan
+"dalam radius 400 karakter dari SQL asli di fungsi yang sama" yang
+menghasilkan 7 false positive terverifikasi selama audit ini), dan
+berjalan di SELURUH `src/` tree secara permanen — menutup pola "diaudit
+sebagian, file demi file, dengan scope tiap audit lebih sempit dari
+codebase" yang menjadi root cause RISK-3 tidak pernah ketemu sebelumnya.
+
+**Ditemukan tapi TIDAK diperbaiki di pass ini** (RISK-4 baru,
+`KNOWN_RISKS.md`): `finnhub_ingester.py` menulis ke Bronze tanpa schema
+validation sama sekali — GD §3.7 secara eksplisit menyebut Finnhub
+sebagai motivating example untuk kenapa schema validation dibutuhkan.
+Blast radius saat ini DORMANT (`_bronze_finnhub` wrapper di
+`job_registry.py` sengaja selalu `NotImplementedError` — belum reachable
+via pipeline), tapi perlu diperbaiki SEBELUM roadmap item "Finnhub
+Integration" dimulai. Tidak diperbaiki sekarang karena butuh desain
+schema nyata (field list, types, nullability) yang idealnya diverifikasi
+terhadap live API response — sandbox ini tidak punya akses network ke
+Finnhub untuk itu; mendesain schema dari field list kode saja berisiko
+mengkodekan asumsi sebagai fakta.
+
+**Diverifikasi:** `ast.parse()` OK pada 133 file .py; 1055 passed / 0
+failed / 0 error (dari 1036 → +19); CI Gate G-2 bersih (`grep -rn
+'f"SELECT...'` → nol hasil); `validate_instruments.py` exit 0 (692 symbols,
+tidak terpengaruh audit ini).
+
+---
+
+## v1.8.0 — GMI Wave 1: Dual-Layer Universe + BIS Rates + Layer 2 OHLCV Pipeline (Juli 2026)
+
+Dokumen referensi: `GMI_Implementation_Checkpoint.docx` (handoff dari sesi sebelumnya)
+                   `alpha_factory_architecture_v2.docx`
+                   `alpha_factory_architecture_extension_v1.docx`
+                   `alpha_factory_data_source_rates_adjustment_v1_0.docx`
+
+Total: **3 cycles (Cycle 1-3) dikonsolidasikan** | **13 file dimodifikasi** |
+**1036 passed / 0 failed / 0 error** (Δ +35 tests dari baseline v1.7.7 — 1001)
+
+Catatan versi: Cycle 1 dan 2 diimplementasikan dan diuji lengkap di sesi
+sebelumnya (checkpoint doc) tapi **tidak pernah dipaketkan sebagai zip
+berversi** — working copy hanya ada di sandbox ephemeral sesi tersebut,
+tanpa entry CHANGELOG, tanpa version bump. v1.8.0 ini adalah rilis
+konsolidasi pertama untuk seluruh GMI Wave 1 (Cycle 1-3 sekaligus) — bukan
+tiga rilis terpisah, karena tidak pernah ada build yang benar-benar
+"shipped" tanpa Cycle 3 (universe 692-instrumen yang dideklarasikan tanpa
+Cycle 3 tidak punya data OHLCV Layer 2 sama sekali — state yang secara
+sengaja tidak dijadikan checkpoint version boundary).
+
+---
+
+### GMI Wave 1 Cycle 1 — Dual-Layer Universe Foundation (692 instruments)
+
+**instruments.yaml v1.2 → v1.4, InstrumentLoader dual-layer rewrite, 20 Layer 2 subcategories**
+
+- Universe diperluas 643 → 656 (Architecture v2.0: +13 global equity
+  indices) → 692 (Architecture Extension v1.0: +36 — 11 commodity context,
+  25 ETF context) → tidak berubah lagi di Data Source & Rates Adjustment
+  v1.0 (12 CB rates = macro series, bukan OHLCV instrument, tidak
+  menambah EXPECTED_TOTAL).
+- SPX, VIX, DXY direklasifikasi dari Layer 1 (us_stocks.Index / forex) ke
+  Layer 2 context (ADR-003) — Layer 1 turun dari 643 ke 640.
+- Layer 2 final: 52 OHLCV instruments (49 aktif + 3 deferred Wave 2:
+  TIN/CPO/RUBBER — MYR→USD normalization pipeline belum ada, ADR-007),
+  dalam 20 subcategories lintas 5 groups (dollar/rates/equity/
+  commodity/etf).
+- `InstrumentLoader` ditulis ulang: Layer 1 API (`all_symbols()`,
+  `get()`, `by_market()`, `count()`) **100% backward-compatible**, ditambah
+  API Layer 2 baru: `all_context()`, `by_context_category()`,
+  `by_context_group()`, `forecast_context()`, `correlation_context()`,
+  `deferred_count()`, `get_context()`, `subcategory_meta()`,
+  `all_subcategory_ids()`.
+- Diverifikasi empiris (bukan asumsi) sebelum konsolidasi ini:
+  `loader.all_context(include_deferred=False)` → 49 instruments, breakdown
+  `{etf:25, equity:15, commodity:8, dollar:1}`; `loader.count()` → 640;
+  `loader.count_total()` → 689; `validate_instruments.py` →
+  `VALIDATION PASSED — 692 symbols (Layer 1=640, Layer 2=52)`.
+- Tag: `# ADD GMI-IL-001`, `# ADD GMI-VAL-001`, `# ADD GMI-AS-001`
+
+---
+
+### GMI Wave 1 Cycle 2 — BIS Central Bank Rates Infrastructure (13 CBs)
+
+**bis_rates_ingester.py, global_rates_processor.py, bis_cb_rates.yaml**
+
+- ECB dikoreksi dari FRED (ECBDFR, monthly — cadence mismatch untuk daily
+  computation) ke BIS Statistics Warehouse CBPOL_D (daily, ADR-010).
+- 12 CB non-FED (ECB, BOE, BOJ, BOC, RBA, RBNZ, SNB, NORGES, RIKSBANK,
+  PBOC, BOK, BI) via satu ingester tunggal `bronze_bis_rates` — no API
+  key, CSV format, weekly cadence (WEEKLY_SEQUENCE).
+- `silver_global_rates` — tabel PIT terpisah dari `silver_macro_enriched`
+  (semantik `effective_date` vs `observation_date` berbeda fundamental,
+  §9.1) — forward-fill, structural break flags (BI_RATE 2016-08-19,
+  PBOC_RATE COVID 2020, BOJ_YCC 2016-2024).
+- `job_registry.py`: `silver_active_symbols` wrapper diperbaiki untuk
+  delegate ke module-level `run()` (yang resolve Layer 1 DAN Layer 2),
+  bukan memanggil `resolver.resolve()` langsung (yang silently skip
+  Layer 2) — FIX GMI-JR-001.
+- Tag: `# ADD GMI-JR-001`
+
+---
+
+### GMI Wave 1 Cycle 3 — Layer 2 Context OHLCV Pipeline [BLOCKING, closes foundational gap]
+
+**Bronze/Silver ingestion untuk 49 Layer 2 context anchors aktif — sebelum ini nol.**
+
+#### GMI-BRZ-001 [BLOCKING] — src/bronze/market_ingester.py
+
+**Root cause:** `MarketOHLCVIngester.run()` hanya meng-iterate
+`loader.all_symbols()` (Layer 1, 640 trading candidates). 49 Layer 2
+context anchors aktif (VIX, DXY, 13 global equity indices, 25 ETF, 8
+commodity context) tidak pernah punya OHLCV data di Bronze sama sekali —
+setiap consumer Gold-layer Layer 2 yang direncanakan (CrossAssetEngine,
+GlobalIndexRegimeModule, gold_domain_scores — Architecture v2.0 §6,
+Architecture Extension v1.0 §5) tidak akan punya raw price data untuk
+beroperasi begitu diimplementasikan.
+
+**Diverifikasi empiris sebelum implementasi (bukan asumsi):**
+- `to_api_symbol('DXY', 'context', 'yfinance')` mengembalikan `'DXY'`
+  (SALAH — seharusnya `'DX-Y.NYB'`). Tidak ada cabang untuk
+  `market='context'` di `symbol_utils.py`; fallback `YFINANCE_SUFFIX.get(market, "")`
+  mengembalikan raw symbol tanpa transformasi. `instruments.yaml` v1.4
+  sudah menyimpan `yfinance_symbol` siap-pakai per instrumen Layer 2 —
+  dipakai LANGSUNG, `to_api_symbol()` di-bypass sepenuhnya untuk Layer 2.
+- `YFinanceAdapter.fetch()` sudah market-agnostic (docstring: "api_symbol
+  must already be in yfinance format") — reuse 100% tanpa modifikasi.
+- `_fetch()`'s market dispatch sudah punya cabang `else` (yfinance-only,
+  no fallback chain) yang otomatis berlaku untuk `market='context'` —
+  reuse tanpa modifikasi.
+- `IncFetchProtocol.resolve_start_date()`, `BronzeIngester.write()`,
+  `SchemaValidator` (`config/schemas/yfinance_ohlcv.yaml` — kolom lowercase,
+  `volume` nullable "some instruments have null volume (indices)", sudah
+  cocok untuk VIX/global index tanpa perubahan) — semuanya generic
+  terhadap `market` sebagai path segment string; nol modifikasi.
+
+**Opsi dipertimbangkan** (Bronze write-path convention untuk Layer 2):
+(A) partisi per `context_group` (`market/ohlcv/context/{group}/...`) —
+DITOLAK: butuh modifikasi `IncFetchProtocol`/glob patterns untuk
+mendukung depth tambahan, manfaat (browsability per grup) tidak
+dibutuhkan consumer manapun saat ini. (B — **dipilih**) satu bucket
+`context` flat (`market/ohlcv/context/...`), identik dengan pola setiap
+`inst.market` Layer 1 lainnya — nol modifikasi ke infrastruktur shared;
+`context_group`/`context_category` tetap queryable via
+`InstrumentLoader.get_context(symbol)` (single source of truth) tanpa
+didup­likasi ke setiap row Parquet.
+
+**Fix:** dua method baru di `MarketOHLCVIngester` — `run_context()` dan
+`_run_context_symbol()` — paralel struktur dengan `run()`/`_run_symbol()`
+Layer 1, checkpoint namespace terpisah (`bronze_ohlcv_context_daily`, GD
+§17.3.1 independence). Default timeframes 1D/1W/1M (`DEFAULT_TIMEFRAMES`)
+— identik dengan perilaku AKTUAL job `bronze_ohlcv_daily` hari ini (tidak
+ada override `timeframes=` di manapun untuk 5m/15m/1H).
+
+#### GMI-SIL-001 [BLOCKING] — src/silver/ohlcv_processor.py
+
+**Fix:** `run_context(run_date)` — module-level entry point paralel dengan
+`run()`, reuse `OHLCVProcessor.process_symbol()`/`write()` **tanpa
+modifikasi** (diverifikasi: `_normalize_timestamps()` menerima `tz_hint`
+sebagai explicit override yang prioritas di atas market→timezone dict
+internal — `market='context'` tidak perlu entry khusus di dict tersebut).
+1-pass saja (tidak ada sintesis 4H — tidak ada consumer Layer 2 yang
+terdefinisi butuh 4H, dan Bronze context tidak pernah fetch 1H untuk
+context anchors juga). Checkpoint namespace: `silver_ohlcv_context`,
+terpisah dari `silver_ohlcv_p1`/`silver_ohlcv_4h`.
+
+#### GMI-GLD-001 [P1 HIGH] — src/gold/technical_signals.py — DUA bug, ditemukan berurutan
+
+**Bug 1 (diantisipasi checkpoint):** `_get_latest_vix()` membaca dari
+`data/silver/market_ohlcv/index/` — path Layer 1 yang **permanently
+empty** sejak ADR-003 (VIX direklasifikasi ke Layer 2 context, Cycle 1).
+
+**Bug 2 (ditemukan BARU lewat empirical testing, TIDAK diantisipasi
+checkpoint):** glob pattern memakai **dua** `**` dalam satu path
+(`context/**/symbol=VIX/**/*_1D_silver.parquet`). DuckDB `read_parquet()`
+menolak ini secara eksplisit — `IO Error: Cannot use multiple '**' in one
+path`. Diverifikasi bug ini **sudah ada sebelum ADR-003 sekalipun** —
+string `index/**/symbol=VIX/**/...` yang ASLI (pre-fix) menghasilkan error
+identik. `except Exception: pass` di sekitar primary query menyembunyikan
+KEDUA bug ini sejak fungsi pertama ditulis — primary read tidak pernah
+benar-benar berhasil, fallback FRED VIXCLS selalu dipakai secara diam-diam.
+Memperbaiki Bug 1 saja tanpa Bug 2 akan menjadi half-fix murni kosmetik
+(fungsi tetap selalu jatuh ke fallback, hanya dengan pesan error yang
+berbeda) — keduanya diperbaiki bersamaan dalam commit yang sama.
+
+**Fix:** path → `market_ohlcv/context/`; glob → satu `*` pada filename,
+nol `**` (struktur write Silver deterministic untuk symbol tunggal, tidak
+butuh wildcard direktori sama sekali).
+
+**Ditemukan tapi SENGAJA di luar scope** (RISK-2, RISK-3 di
+`KNOWN_RISKS.md`): (a) kelas bug DuckDB double-`**` di atas belum diaudit
+di ~20 call site `read_parquet($glob...)` lain; grep string literal tidak
+menemukan instance lain, tapi tidak setara audit lengkap. (b) CI Gate G-2
+(f-string SQL) menemukan 2 pelanggaran pre-existing di
+`src/gold/sector_rotation.py:193` dan `src/gold/views.py:182,196` — TIDAK
+disentuh cycle ini (file tidak dimodifikasi, di luar scope Task 9.1,
+`views.py` butuh pendekatan identifier-safe quoting yang lebih hati-hati
+daripada `$name` binding sederhana). Keduanya didokumentasikan di
+`KNOWN_RISKS.md` untuk audit Gold-layer formal berikutnya (R-4).
+
+#### GMI-JR-002 — src/scheduler/job_registry.py
+
+**Fix:** dua job baru — `bronze_ohlcv_context_daily` (`depends_on: []`,
+independen dari `bronze_ohlcv_daily`, GD §17.3.1) dan `silver_ohlcv_context`
+(`depends_on: ["bronze_ohlcv_context_daily"]`). Keduanya masuk
+`DAILY_SEQUENCE` (bukan weekly) — konsisten dengan `GlobalIndexRegimeModule`
+(Architecture v2.0 §6.5) yang daily, bukan weekly seperti
+`CorrelationModule`/`LeadLagModule`/`ForecastModule`. `JOB_REGISTRY`: 24 →
+26 entries. `DAILY_SEQUENCE`: 13 → 15. `WEEKLY_SEQUENCE`: 19 → 21.
+
+**Test baru:**
+- `tests/unit/test_market_ingester.py` (BARU — file ini sebelumnya tidak
+  ada sama sekali untuk `market_ingester.py`) — 11 test:
+  `TestContextSymbolResolution` (3), `TestContextSymbolWrite` (5),
+  `TestRunContextEntryPoint` (3)
+- `tests/unit/test_ohlcv_processor.py` — `TestRunContextEntryPoint` (6 test baru)
+- `tests/unit/test_technical_signals_vix_path.py` (BARU) — 4 test,
+  termasuk assertion langsung terhadap DuckDB read yang sebelumnya diam-diam
+  selalu gagal (bukan sekadar "tidak crash")
+- `tests/integration/test_job_registry_integrity.py` —
+  `TestGMIJR002ContextOHLCVWiring` (14 test baru)
+
+**Diverifikasi:** `ast.parse()` OK pada 132 file .py; 1036 passed / 0
+failed / 0 error (baseline 1001 → +35); `validate_instruments.py` exit 0
+(692 symbols, Layer 1=640, Layer 2=52) — tidak terpengaruh cycle ini.
+
+**Masih di luar scope Cycle 3** (untuk cycle berikutnya, bukan lupa):
+`silver_validate`/`quality_validator.py` belum meng-cover Layer 2 symbols
+(quality check tetap Layer-1-only untuk saat ini — perluasan butuh
+keputusan desain tersendiri tentang bagaimana null/outlier/price-sanity
+check berlaku untuk context anchors yang punya karakteristik statistik
+berbeda dari saham, mis. VIX yang sering volume=null). `gold_signals`
+belum difilter ke `active_ohlcv` (Architecture v2.0 §5.2 — masih memproses
+643/640, bukan ~190). `CrossAssetEngine` 4 modul (Correlation/LeadLag/
+Forecast/GlobalIndexRegime), `signal_aggregation`, `gold_domain_scores` —
+semuanya BELUM diimplementasikan; Cycle 3 ini murni membuka jalan data
+mentah untuk mereka.
+
+---
+
+## v1.7.7 — Pre-existing Violations Remediation Wave 2 (Juni 2026)
+
+Dokumen referensi: `audit_preexisting_violations_v1_0.docx`
+
+Total: **5 findings diperbaiki** | **6 file dimodifikasi** | **685 passed / 26 pre-existing failed / 0 error**
+(Δ +116 tests dari baseline v1.7.5 — 569 passed)
+
+---
+
+### BCK-SQL-001 [P1 HIGH] — src/backtest/pit_data.py
+
+**6 f-string SQL violations → $name parameterized queries (GD §17.7)**
+
+- Root cause: `PITDataLoader` menggunakan `f"""..."""` untuk semua 6 query (get_ohlcv,
+  get_ohlcv_universe, get_macro_series, get_regime, get_signals, get_mtf_score). Variabel
+  `symbol`, `trade_date`, `series_id`, path, dan date range semua di-inject langsung ke SQL
+  string — PIT date injection memungkinkan lookahead bias jika nilai date dari luar scope.
+- Opsi yang dipertimbangkan: (A) `$name` binding untuk semua parameter termasuk IN list,
+  (B) IN list via Python-side f-string dengan path+dates parameterized.
+  Dipilih A: DuckDB 1.5.4 mendukung list param via `= ANY($symbols)` — fully parameterized.
+- Fix: semua 6 query menggunakan `$name` binding; get_ohlcv_universe menggunakan
+  `= ANY($symbols)` untuk list param (avoids f-string IN clause).
+- Diverifikasi: `ast.parse()` OK; 0 f-string SQL violations via regex scan.
+- Test baru: `tests/unit/test_preexisting_violations_v1.py::TestBCKSQL001PITData` (10 tests)
+- Tag: `# FIX BCK-SQL-001`
+
+---
+
+### SIL-RPQ-001 [P2 MEDIUM] — Silver layer eager read_parquet
+
+**Eager `pl.read_parquet()` → `pl.scan_parquet().collect()` (Lazy API, GD §10.2)**
+
+Files dimodifikasi:
+- `src/silver/ohlcv_processor.py` (2 lokasi: Bronze read loop, 4H synthesis)
+- `src/silver/macro_processor.py` (1 lokasi: revision detection)
+- `src/silver/fundamental_processor.py` (1 lokasi: get_upcoming_earnings)
+- `src/silver/active_symbols.py` (2 lokasi: load(), load_full())
+
+- Root cause: Eager `pl.read_parquet()` membaca seluruh file ke memory sebelum operasi.
+  Pada M1 8GB dengan 643 symbol × 7 TF, ini berpotensi OOM di Silver processing loop.
+  Polars lazy API dengan `scan_parquet().collect()` memungkinkan columnar pushdown.
+- Fix: ganti semua `pl.read_parquet(path)` dengan `pl.scan_parquet(str(path)).collect()`
+  di Silver layer (Gold layer exempt — Gold audit terpisah, lihat R-4 KNOWN_RISKS.md).
+- Tag: `# FIX SIL-RPQ-001`
+
+---
+
+### UTL-SQL-001 [P2 MEDIUM] — src/utils/delta_reprocessor.py
+
+**2 f-string SQL violations → $name parameterized queries**
+
+- Root cause: `find_stale_symbols()` dan `get_version_summary()` inject glob path dan
+  `CURRENT_SILVER_VERSION` string langsung ke f-string SQL.
+- Fix: `$glob` dan `$current_version` parameter binding.
+- Tag: `# FIX UTL-SQL-001`
+
+---
+
+### BCK-AIO-001 [P2 MEDIUM] + BCK-PIT-001 [P2 MEDIUM] — src/backtest/engine.py
+
+**Non-atomic writes + date.today() PIT violation di `_save_results()`**
+
+- BCK-AIO-001: `result.trades_df.write_parquet()` dan `pl.DataFrame([result.metrics]).write_parquet()`
+  diganti `atomic_write_parquet()` — crash di tengah write menghasilkan partial backtest result file.
+- BCK-PIT-001: `ts = date.today().isoformat()` di `_save_results()` menyebabkan backtest results
+  file ter-stamp dengan tanggal eksekusi, bukan simulation end date — tidak reproducible saat
+  di-re-run pada hari berbeda. Fix: `ts = self.config.end_date.isoformat()`.
+- Tag: `# FIX BCK-AIO-001`, `# FIX BCK-PIT-001`
+
+---
+
+### CI Gate G-2 Scope Fix — .github/workflows/ci.yml
+
+**Gate G-2 diperluas dari `src/gold/` ke `src/` penuh**
+
+- Root cause: Gate G-2 hanya scan `pathlib.Path('src/gold').rglob('*.py')` — semua
+  violations di Silver, Bronze, Backtest, Utils layer lolos CI tanpa terdeteksi.
+  Inilah mengapa pre-existing violations dari audit bisa ada selama ini.
+- Fix: `pathlib.Path('src').rglob('*.py')` — scan semua layer.
+- Tag: `# FIX CI-G2`
+
+---
+
+## v1.7.6 — Pre-existing Violations Remediation Wave 1 (Juni 2026)
+
+Dokumen referensi: `audit_preexisting_violations_v1_0.docx`
+
+Total: **9 findings diperbaiki** | **13 file dimodifikasi** | **1 test file baru** |
+**685 passed / 26 pre-existing failed / 0 error**
+
+---
+
+### SIL-SQL-001 [BLOCKING] — src/silver/quality_validator.py
+
+**9 f-string SQL violations → $name parameterized queries + COPY TO restructure**
+
+- Root cause: `_check_null`, `_check_price_sanity`, `_check_coverage`, `_check_gap_detection`,
+  `_check_freshness`, `_check_macro_pit`, `_check_adj_integrity`, `_check_vix_circuit_breaker`
+  (8 queries) dan `_flag_outliers_in_file` (COPY TO dengan f-string path) — total 9 violations.
+  `SILVER_OHLCV_PATH`, `run_date`, dan `vix_glob` di-inject langsung ke f-string SQL.
+- Opsi untuk COPY TO: (A) SELECT .pl() + atomic_write_parquet (requires pyarrow via DuckDB .pl()),
+  (B) COPY TO via string concatenation — to_path adalah tmpfile kita buat, bukan user input.
+  Dipilih B: preserves DuckDB native Parquet writer, zero pyarrow dependency, POSIX-atomic via
+  manual tempfile + os.replace. String concat bukan f-string (tidak trigger CI Gate G-2).
+- Fix: 8 execute() dikonversi ke parameterized; COPY TO restructure ke string concat + os.replace.
+  Semua path via `$glob`, date via `$run_date`, threshold via `$threshold`.
+- Diverifikasi: 0 f-string SQL via regex; `test_quality_validator.py::TestOutlierWriteback` 5/5 pass.
+- Test: `tests/unit/test_preexisting_violations_v1.py::TestSILSQL001QualityValidator` (11 tests)
+- Tag: `# FIX SIL-SQL-001`
+
+---
+
+### SIL-AIO-001 [BLOCKING] — src/silver/ohlcv_processor.py
+
+**Non-atomic Parquet write → `atomic_write_parquet()` (GD §17.7)**
+
+- Root cause: `_write_silver()` langsung panggil `df.write_parquet(out_path)` tanpa temp file.
+  Crash mid-write menghasilkan corrupt Silver OHLCV — ini mempengaruhi downstream Gold layer.
+- Fix: `atomic_write_parquet(df, out_path, compression="zstd", ...)` via `src/utils/atomic_io.py`.
+- Tag: `# FIX SIL-AIO-001`
+
+---
+
+### SIL-AIO-002 [BLOCKING] — src/silver/macro_processor.py
+
+**Non-atomic Parquet write di `_write_silver()` → atomic_write_parquet()**
+
+- Root cause: Macro Silver write tidak atomic — partial macro Silver file mengkorupsi
+  regime detection di Gold layer (macro regime baca langsung macro Silver).
+- Fix: `atomic_write_parquet()`.
+- Tag: `# FIX SIL-AIO-002`
+
+---
+
+### SIL-SQL-002 [P1 HIGH] — src/silver/macro_processor.py
+
+**f-string SQL di `_process_source()` → $glob parameter**
+
+- Root cause: `domain_glob` path di-inject ke `f"""SELECT ... FROM read_parquet('{domain_glob}')"""`.
+- Fix: `$glob` parameter binding.
+- Tag: `# FIX SIL-SQL-002`
+
+---
+
+### SIL-AIO-003 [P1 HIGH] — src/silver/active_symbols.py
+
+**`shutil.move()` → `os.replace()` untuk atomic rename**
+
+- Root cause: `shutil.move()` adalah pseudo-atomic — pada cross-filesystem operasi, ia melakukan
+  copy+delete bukan atomic rename. `os.replace()` adalah POSIX-guaranteed atomic.
+  Dua lokasi: `_save()` (line 372) dan `_save_fallback()` (line 407).
+- Fix: ganti `shutil.move(str(tmp), str(final))` dengan `os.replace(tmp_path, final)`;
+  hapus `import shutil` (tidak digunakan lagi).
+- Test: `test_active_symbols.py::TestAS9AtomicWrite::test_save_uses_temp_then_rename` diupdate.
+- Tag: `# FIX SIL-AIO-003`
+
+---
+
+### BRZ-AIO-001 [P1 HIGH] — Bronze layer ingesters (3 files)
+
+**Non-atomic writes di Bronze layer → atomic_write_parquet() dengan snappy config**
+
+Files dimodifikasi:
+- `src/bronze/base_ingester.py` (2 lokasi: `write()`, `write_macro()`)
+- `src/bronze/forex_cache.py` (1 lokasi: `ForexDayCache.save()`)
+- `src/bronze/schema_validator.py` (1 lokasi: quarantine write)
+
+- Root cause: Bronze ingesters menulis langsung tanpa temp file. Crash mid-write menghasilkan
+  corrupt Bronze file yang kemudian dibaca oleh Silver layer (IncFetchProtocol.scan_last_date).
+- Fix: `atomic_write_parquet(df, fname, compression="snappy", compression_level=None,
+  row_group_size=100_000, statistics=False, use_pyarrow=False)` — Bronze snappy per GD §7.1.
+  `use_pyarrow=False`: Bronze tidak butuh pyarrow; snappy compression level=None (tidak ada level).
+- Tag: `# FIX BRZ-AIO-001`
+
+---
+
+### BRZ-SQL-001 [P1 HIGH] — Bronze ingesters (2 files)
+
+**f-string SQL di incremental scan queries**
+
+Files dimodifikasi:
+- `src/bronze/eia_ingester.py` (1 lokasi: `_get_last_dates()`)
+- `src/bronze/fred_ingester.py` (1 lokasi: `_get_last_dates()`)
+
+- Root cause: `pattern` (glob path) di-inject ke f-string SQL `FROM read_parquet('{pattern}')`.
+- Fix: `$glob` parameter binding.
+- Tag: `# FIX BRZ-SQL-001`
+
+---
+
+### SIL-SQL-003 [P1 HIGH] + SIL-AIO-004 [P1 HIGH] — Silver fundamental & sentiment
+
+**f-string SQL violations + non-atomic writes di `fundamental_processor.py` dan `sentiment_processor.py`**
+
+Files dimodifikasi:
+- `src/silver/fundamental_processor.py`: 2 f-string SQL (process_earnings, process_quotes) +
+  2 non-atomic writes (earnings, quotes output)
+- `src/silver/sentiment_processor.py`: 1 non-atomic write di `_write()`
+
+- Fix: `$glob` parameterized untuk kedua query; `atomic_write_parquet()` untuk semua writes.
+  `use_pyarrow=False` di sentiment processor (original tidak punya pyarrow dep, preserve behavior).
+- Tag: `# FIX SIL-SQL-003`, `# FIX SIL-AIO-004`
+
+---
+
+### New Test File
+
+**`tests/unit/test_preexisting_violations_v1.py` (116 tests)**
+
+Comprehensive regression guard untuk semua findings di `audit_preexisting_violations_v1_0.docx`.
+Covers: SIL-SQL-001, SIL-AIO-001/002/003/004, BRZ-AIO-001, BRZ-SQL-001, SIL-SQL-002/003,
+BCK-SQL-001, SIL-RPQ-001, UTL-SQL-001, BCK-AIO-001, BCK-PIT-001, CI Gate G-2 scope.
+`TestGlobalAuditClearance` adalah single gate test untuk semua 14 audit-scope files:
+14 × syntax + 14 × f-string SQL + 9 × non-atomic write = 37 parametrized test cases.
+
+---
+
+## v1.7.5 — Gold Layer Audit Remediation (Juni 2026)
+
+Dokumen referensi: `audit_gold_layer_v1_7_4.docx`
+
+Total: **6 BLOCKING findings diperbaiki** | **13 file dimodifikasi** | **1 file baru dibuat** |
+**772 passed / 0 failed / 0 error** (Δ +96 tests dari baseline 676)
+
+---
+
+### GLD-001 [BLOCKING] — src/bronze/bea_ingester.py
+
+**BEA NIPA unit-mixing: LINE_FILTER dict + LineDescription filter di `_fetch_nipa()`**
+
+- Root cause: `_fetch_nipa()` menyimpan seluruh 27+ baris respons BEA NIPA table per quarter
+  tanpa filter. Table T10106 mengembalikan GDP total (level, billions) sekaligus komponen
+  (PCE, GPDI, Government, Net Exports) dan %-change rows dalam satu response — semua tersimpan
+  ke Bronze dengan `series_id='real_gdp'` yang sama. HMM `_load_features()` kemudian membaca
+  campuran unit yang tidak konsisten → training data corrupted.
+- Opsi yang dipertimbangkan: (A) filter per `LineNumber` integer, (B) filter per `LineDescription`
+  string. Dipilih B: `LineDescription` lebih stabil lintas BEA API version dan readable.
+- Fix: tambahkan `LINE_FILTER: dict[str, str]` constant (3 entries) dan apply filter di loop
+  `_fetch_nipa()` — `continue` jika `item['LineDescription'].strip() != target_desc`.
+  Series tanpa LINE_FILTER entry → semua rows tersimpan (backward-compatible untuk series baru).
+- Diverifikasi: mock response 5 baris → 1 row tersimpan (target LineDescription only).
+  Multi-quarter: 4 baris (2 per quarter) → 2 rows (1 per quarter).
+- Test baru: `tests/unit/test_bea_ingester_gld001.py` (11 tests)
+- Tag: `# FIX GLD-001`
+
+---
+
+### GLD-002 [BLOCKING] — src/gold/macro_regime.py
+
+**DXY score hardcoded 0.5 → formula aktual: `max(0, min(1, (110 - dxy) / 20))`**
+
+- Root cause: `MacroRegimeDetector._classify()` menetapkan `'dxy': 0.5` sebagai score konstan.
+  `_load_indicators()` sudah memuat `DEXUSEU` dan mengkonversi ke DXY proxy dengan benar,
+  tapi nilai tersebut tidak pernah dibaca oleh `_classify()` — `ind.get('dxy')` tidak dipanggil.
+  Dampak: composite_score RISK_ON vs RISK_OFF identik terlepas dari DXY 80 vs DXY 120.
+  RISK_OFF tidak terdeteksi saat dollar sangat kuat (krisis EM), menyebabkan false RISK_ON signal.
+- Opsi yang dipertimbangkan: (A) formula linear dengan anchor 100 dan range ±10, (B) log-scaling,
+  (C) z-score normalize dari historical DXY. Dipilih A: konsisten dengan formula indicator lain
+  (vix, yield_spread, cpi, gdp menggunakan linear normalization), auditable, dan no extra data.
+- Fix: ekstrak `dxy = ind.get("dxy", 100.0)` (default neutral 100) dan compute
+  `"dxy": max(0, min(1, (110 - dxy) / 20))`. DXY=90→1.0, DXY=100→0.5, DXY=110→0.0.
+- Diverifikasi: DXY=90 score=1.0 ✓; DXY=100 score=0.5 ✓; DXY=110 score=0.0 ✓;
+  DXY=125 capped 0.0 ✓; DXY=80 capped 1.0 ✓. Composite score berbeda antara DXY=90/110 ✓.
+- Test baru: `tests/unit/test_macro_regime_gld002.py` (12 tests)
+- Tag: `# FIX GLD-002`
+
+---
+
+### GLD-003 [BLOCKING] — 5 Gold layer files
+
+**10 f-string SQL locations → $name parameterized queries (GD §17.7)**
+
+Files dimodifikasi:
+- `src/gold/technical_signals.py` (2 × `_get_latest_vix`, 1 × `_process_timeframe`)
+- `src/gold/mtf_alignment.py` (1 × `_compute_mtf_alignment`, 1 × `_apply_regime_compatible`)
+- `src/gold/screener.py` (1 × `_check_data_freshness`, 1 × `build_watchlist` via table registration, 1 × `_deduplicate_by_cluster`)
+- `src/gold/correlation_matrix.py` (1 × `compute_correlation_matrix` + symbol injection)
+- `src/gold/hmm_regime.py` (1 × `_load_features`)
+
+- Root cause: semua query menggunakan `f"""SELECT ... FROM read_parquet('{path}')..."""`
+  dengan path dan nilai runtime diinterpolasi langsung ke SQL string. Pattern ini:
+  (1) melangggar GD §17.7 anti-pattern hard constraint, (2) tidak terdeteksi oleh CI Gate G-2
+  lama (grep hanya match f"SELECT pada baris yang sama, triple-quote multi-line lolos),
+  (3) menciptakan SQL injection risk pada `correlation_matrix.py` yang menggunakan
+  `f"symbol IN ({symbols_sql})"` dengan join dari active_symbols list.
+- Fix strategy:
+  - `technical_signals`, `mtf_alignment`, `hmm_regime`: replace f-string dengan
+    `con.execute(QUERY, {"path": ..., "run_date": ...})` pattern.
+  - `screener.build_watchlist`: replace f-string conditional paths + `/dev/null` injection
+    dengan Arrow table registration pattern: load optional sources ke Polars DF, register ke
+    DuckDB via `con.register()`, kemudian clean SQL dengan `$name` parameters. Helper functions
+    `_empty_regime_df()`, `_empty_sector_df()`, `_empty_active_df()` dibuat untuk placeholder
+    saat optional data tidak tersedia.
+  - `correlation_matrix`: replace `f"symbol IN ({symbols_sql})"` dengan
+    `con.register("active_symbols_tbl", active_df.to_arrow())` + `WHERE symbol IN (SELECT ...)`
+- Diverifikasi: `test_fstring_sql_absence.py` scan src/gold/ dengan regex window 400 char → 0 violations.
+- Test baru: `tests/unit/test_fstring_sql_absence.py` (9 tests)
+- Tag: `# FIX GLD-003`
+
+---
+
+### GLD-004 [BLOCKING] — 6 Gold layer files
+
+**Non-atomic Parquet writes → `atomic_write_parquet()` via tempfile + os.replace**
+
+Files dimodifikasi:
+- `src/utils/atomic_io.py` (file baru)
+- `src/gold/macro_regime.py`, `technical_signals.py`, `mtf_alignment.py`,
+  `screener.py`, `correlation_matrix.py`, `sector_rotation.py`
+
+- Root cause: semua Gold layer Parquet writes menggunakan direct `df.write_parquet(path)`.
+  Pada M1 8GB RAM dengan 643 symbols × 7 TF pipeline, OOM mid-write meninggalkan partial/corrupt
+  Parquet file di target path. Pipeline re-run berikutnya akan membaca file corrupt dan crash
+  di downstream job. Pattern ini melanggar Supplementary Design G2 §3.5 yang mewajibkan
+  atomic writes untuk Silver/Gold.
+- Fix: buat `src/utils/atomic_io.py` dengan `atomic_write_parquet()`:
+  1. Buat `NamedTemporaryFile` di direktori parent yang sama dengan target.
+  2. `df.write_parquet(tmp_path, **kwargs)`.
+  3. `os.replace(tmp_path, path)` — atomic pada POSIX jika same filesystem (guaranteed).
+  4. Exception: cleanup tmpfile, re-raise. Target path tidak pernah partial/corrupt.
+  Default kwargs: zstd level-3, row_group_size=50_000, statistics=True, use_pyarrow=True.
+- Opsi yang ditolak: (A) write_and_verify (baca kembali setelah write) — lebih lambat dan tidak
+  mencegah corrupt file tetap ada. (B) custom Parquet writer — tidak perlu, POSIX rename sudah cukup.
+- Diverifikasi: mock `write_parquet` raise MemoryError → target path tidak ada ✓; tidak ada
+  orphaned .parquet.tmp ✓; os.replace atomic pada same filesystem ✓.
+- Test baru: `tests/unit/test_atomic_io.py` (11 tests)
+- Tag: `# FIX GLD-004`
+
+---
+
+### GLD-005 [BLOCKING] — src/gold/screener.py
+
+**`TOTAL_INSTRUMENTS = 643` hardcode → `get_loader().count()` dinamis**
+
+- Root cause: `_check_data_freshness()` menggunakan `TOTAL_INSTRUMENTS = 643` literal untuk
+  menghitung coverage percentage threshold (95% × 643 = 610.85). Saat universe diperluas ke
+  692 (GMI Architecture Extension, Architecture Extension Document v1.0), gate ini diam-diam
+  menjadi terlalu longgar: 88% coverage (610/692) akan diterima sebagai ≥95% (610 > 610.85),
+  memungkinkan screener berjalan dengan 82 symbols yang tidak ter-cover dari Layer 2 universe.
+- Fix: `TOTAL_INSTRUMENTS = get_loader().count()` — import `get_loader` dari instrument_loader,
+  tambahkan ke import block screener.py. Count selalu sesuai dengan instruments.yaml saat ini.
+- Diverifikasi: mock loader.count()=692, fresh_count=610 → RuntimeError (88.2% < 95%) ✓;
+  fresh_count=660 → no raise (95.4% ≥ 95%) ✓. loader.count() dipanggil saat freshness check ✓.
+- Test baru: `tests/unit/test_screener_gld005.py` (5 tests)
+- Tag: `# FIX GLD-005`
+
+---
+
+### GLD-006 [BLOCKING] — .github/workflows/ci.yml
+
+**CI Gate G-2 blind spot: grep → Python regex dengan 400-char sliding window**
+
+- Root cause: CI Gate G-2 menggunakan `grep -rn 'f"SELECT\|f'"'"'SELECT' src/` yang hanya
+  mendeteksi f-string SQL pada baris yang sama. Triple-quote multi-line f-string:
+  ```
+  f"""
+      SELECT ...
+  """
+  ```
+  tidak terdeteksi karena `f"""` dan `SELECT` berada di baris yang berbeda. Akibatnya 10
+  violations di Gold layer lolos CI tanpa terdeteksi selama seluruh siklus development v1.7.4.
+- Fix: replace grep one-liner dengan Python script yang:
+  1. Scan semua `[fF]"""` opener di src/ menggunakan `re.finditer()`.
+  2. Ambil 400 char setelah setiap opener (sliding window).
+  3. Cek apakah window mengandung SQL keyword (`SELECT`, `FROM read_parquet`, dll).
+  4. Report semua violations dengan file path dan line number.
+  Semua varian (f""", f''') ter-cover. False positive minimal: f-string tanpa SQL keyword tidak terdeteksi.
+- Ditambahkan ke ci.yml: Gate G-4-count (monitoring jumlah test ter-collect dengan BASELINE=676,
+  mencegah NEW-4 class collection error terulang).
+- Diverifikasi: test matrix 8 positives + 4 negatives → semua correct ✓.
+  ci.yml ada dan mengandung Python detection + triple-quote reference ✓.
+- Test baru: `tests/unit/test_ci_gate_gld006.py` (12 tests)
+- Tag: `# FIX GLD-006`
+
+
+
+Dokumen referensi: `audit_v1_7_3_uncovered_findings.docx` (post-implementation audit atas v1.7.3 —
+bug yang ditemukan SELAMA implementasi v1.7.3 tapi absen dari `production_readiness_assessment_v1_7_2.docx`
+asli; lihat audit §0 untuk metodologi).
+
+Total: **5 dari 7 temuan diperbaiki** (NEW-1, NEW-2, NEW-3, NEW-4, NEW-5) | **1 sudah resolved sebelum
+audit ini** (NEW-6/MP-3 — lihat entry v1.7.3) | **1 sengaja dialihkan ke audit formal terpisah** (NEW-7,
+BEA NIPA unit-mixing — root cause sudah didokumentasikan di v1.7.3 GAP-1, perbaikan penuh membutuhkan
+audit Gold layer formal yang belum pernah dilakukan, lihat "Deferred" di bawah) | **2 BLOCKING + 1 P1 HIGH
++ 1 P2 MEDIUM + 1 P3 LOW** | **13 file dimodifikasi (5 source, 8 test — termasuk 1 file test baru)** |
+**Baseline 618 passed / 4 failed / 2 collection error (30 test tidak ter-collect) → 676 passed / 0 failed
+/ 0 error** | **Kombinasi coverage modul yang dimodifikasi: 78.25%** (di atas CI gate 70%)
+
+Urutan implementasi mengikuti rekomendasi eksplisit audit §0.2 (Ringkasan Urutan Implementasi):
+NEW-1 + NEW-2 (sama-sama menyentuh `job_registry.py`, sama-sama BLOCKING) → NEW-4 (quick win) → NEW-5
+(quick win) → NEW-3 (butuh desain paling cermat, lintas market).
+
+---
+
+### NEW-1 [BLOCKING] — `src/scheduler/dependency_guard.py` + `job_registry.py` + `runner.py`
+**`python runner.py --job all` selalu `sys.exit(1)` di hari Senin–Sabtu — `DependencyGuard` exact-date matching tidak cocok dengan dependency lintas-cadence**
+
+- Root cause (diverifikasi empiris, mengikuti metodologi audit §2.3 — bukan hanya pembacaan kode):
+  `silver_validate` dan `gold_regime` (anggota `DAILY_SEQUENCE`/`PIPELINE_SEQUENCE`) hard-depend pada
+  `silver_macro`, yang cadence-nya mingguan (GD §3.3.1) dan TIDAK ada di `DAILY_SEQUENCE` — hanya di
+  `WEEKLY_SEQUENCE`, yang sendiri tidak pernah dieksekusi oleh `--job all` (`run_all()` hanya mengiterasi
+  `PIPELINE_SEQUENCE`). `DependencyGuard.is_done()` mencari sentinel `silver_macro_{run_date_PERSIS}.done`
+  — sentinel dari Minggu lalu tidak pernah cocok untuk pencarian Selasa, Rabu, dst.
+- Direproduksi persis seperti audit §2.3: seluruh `job['fn']` di-stub jadi no-op, `run_all()` dijalankan
+  lintas 7 hari berturut-turut dimulai dari sebuah hari Minggu (setelah SOP mingguan dijalankan satu kali
+  di hari itu) — sebelum fix, 4 dari 7 hari (Senin–Sabtu) crash di job ke-5 dari 13 (`silver_validate`);
+  lihat `tests/integration/test_runner_weekly_cadence.py::test_daily_sequence_completes_every_day_of_the_week`
+- Opsi yang dipertimbangkan (sesuai audit §2, Opsi A/B/C): Opsi A (staleness-window) dipilih — Opsi B
+  (jalankan `silver_macro` setiap hari) melanggar cadence mingguan by design (GD §3.3.1, biaya API FRED/BLS/BEA
+  tidak perlu); Opsi C (hapus dependency sepenuhnya) berisiko `silver_validate`/`gold_regime` jalan dengan
+  macro data yang benar-benar belum pernah ada sama sekali (tidak hanya stale)
+- Fix: `DependencyGuard.is_done_within(job_name, run_date, max_age_days)` — mencari sentinel mundur hingga
+  `max_age_days` hari. `check_dependencies()` menerima parameter opsional `stale_tolerance: dict[str, int]`
+  — dependency yang TIDAK terdaftar di dict ini tetap memakai exact-date match (`max_age_days=0`), 100%
+  backward compatible untuk seluruh job lain yang tidak diubah
+- `silver_validate` dan `gold_regime` diberi `"stale_tolerance": {"silver_macro": 7}` — 7 hari = 1 siklus
+  mingguan penuh (maksimum 6 hari mundur dari Minggu ke Sabtu berikutnya) + 1 hari buffer
+- `runner.py::run_job()` meneruskan `job.get("stale_tolerance")` ke `check_dependencies()`
+- **Catatan**: fix ini TIDAK membuat `--job all` berjalan dari instalasi kosong tanpa pernah menjalankan
+  SOP Mingguan sama sekali — itu bukan skenario yang valid (operator wajib bootstrap dengan
+  `bronze_macro_weekly` + `silver_macro` minimal sekali, sesuai GD §14.4.2). Diverifikasi eksplisit oleh
+  `test_no_prior_weekly_run_still_reports_missing_not_crash_signature` — staleness window mempersempit
+  false-negative window, bukan mematikan dependency guard
+- 8 test baru di `tests/unit/test_dependency_guard.py` (`TestIsDoneWithin`,
+  `TestCheckDependenciesStaleTolerance`): exact-match preserved saat `max_age_days=0`, sentinel ditemukan
+  dalam window 7-hari untuk tiap hari Minggu→Sabtu, sentinel di luar window tetap dianggap missing, tidak
+  pernah mencari maju ke masa depan, `max_age_days<0` raise `ValueError`, dependency lain dalam satu
+  `check_dependencies()` call tidak ikut "dilonggarkan" oleh `stale_tolerance` milik dependency lain
+- 2 test integrasi baru di `tests/integration/test_runner_weekly_cadence.py` (`TestJobAllAcrossWeek`) —
+  reproduksi empiris penuh skenario audit §2.3, lintas 7 hari, mem-verifikasi seluruh 13 job
+  `DAILY_SEQUENCE` benar-benar selesai (sentinel ada) setiap hari, bukan hanya "tidak crash"
+
+---
+
+### NEW-2 [BLOCKING] — `src/scheduler/job_registry.py`
+**`gold_screener` terkunci permanen — hard-depend pada `silver_fundamental`, yang hard-depend pada `bronze_finnhub` (stub `NotImplementedError` yang disengaja, FIX R-F04)**
+
+- `silver_fundamental.depends_on = ["bronze_finnhub"]`; `bronze_finnhub` sengaja selalu raise
+  `NotImplementedError` (belum ada implementasi nyata Finnhub earnings/quotes ingester) — akibatnya
+  `silver_fundamental` TIDAK PERNAH bisa menulis sentinel, dan `gold_screener` (yang mencantumkan
+  `silver_fundamental` di `depends_on`-nya) TIDAK PERNAH bisa lolos dependency check tanpa `--force`
+- GD §5.2.4 sendiri sudah mendesain `earnings_calendar` sebagai `LEFT JOIN` ("data boleh null") —
+  `days_to_earnings`/`near_earnings_flag`/`sentiment_score` adalah DATA field opsional (GD §0.3, Interface
+  Contract), bukan prasyarat keras untuk screener bisa jalan
+- Diverifikasi `gold/screener.py::_enrich_earnings()` SUDAH menangani `silver/fundamental/` yang
+  kosong/tidak ada secara graceful (try/except, kolom tetap NULL bila gagal) — **tidak ada perubahan
+  diperlukan di `screener.py`** untuk Opsi A; bug murni di `job_registry.py`
+- Fix (Opsi A, sesuai rekomendasi audit §3): `"silver_fundamental"` dihapus dari `gold_screener.depends_on`.
+  `silver_fundamental` tetap terdaftar penuh di `JOB_REGISTRY` (runnable manual setelah `bronze_finnhub`
+  diimplementasikan nyata — Opsi B, item roadmap terpisah, BELUM dikerjakan di sesi ini) dan tetap
+  ter-comment-out di `WEEKLY_SEQUENCE` (komentar diperbarui menjelaskan kondisi mengaktifkannya)
+- 2 test pre-existing yang gagal sejak v1.7.3 (`test_silver_fundamental_in_sequence`,
+  `test_l7_pipeline_sequence_15_or_more_steps` — lihat "Out of Scope" v1.7.3 di bawah) ternyata adalah
+  MANIFESTASI LANGSUNG dari NEW-2: keduanya meng-assert asumsi LAMA yang salah (`silver_fundamental`
+  seharusnya ada di `PIPELINE_SEQUENCE`, mendorong panjang sequence ke ≥14). Asumsi itu sendiri adalah
+  root cause NEW-2 — diupdate untuk mencerminkan kontrak yang benar (Opsi A): `silver_fundamental`
+  sengaja absen dari `DAILY_SEQUENCE` sampai `bronze_finnhub` punya implementasi nyata; panjang
+  `DAILY_SEQUENCE` yang benar saat ini adalah 13, bukan ≥14
+- 2 test baru di `tests/integration/test_job_registry_integrity.py`:
+  `test_silver_fundamental_not_required_in_daily_sequence`,
+  `test_gold_screener_not_dependent_on_silver_fundamental`
+- 2 test integrasi baru di `tests/integration/test_runner_weekly_cadence.py`
+  (`TestGoldScreenerNotLocked`): `gold_screener` selesai tanpa `silver_fundamental` pernah dijalankan;
+  `silver_fundamental` tetap bisa dijalankan standalone (membuktikan Opsi B tetap memungkinkan tanpa
+  perubahan registry lebih lanjut)
+
+---
+
+### NEW-3 [P1 HIGH] — `src/silver/ohlcv_aggregator.py` + `ohlcv_processor.py`
+**~67% Silver 4H bar untuk US stocks dan IDX ter-flag `is_clean=False` — `EXPECTED_BARS['4H']=4` flat tidak memperhitungkan bahwa blok UTC-fixed sering hanya overlap sebagian dengan jam sesi trading**
+
+- `_aggregate_4h()` mengelompokkan bar 1H ke blok UTC tetap `[00-03],[04-07],...,[20-23]` (FIX Bug 6,
+  sesi sebelumnya — pengelompokan blok sendiri sudah benar dan TIDAK diubah). Bug ada di tahap
+  validasi: `is_incomplete_bar = bar_count < EXPECTED_BARS['4H']` memakai ambang flat 4, padahal blok
+  yang beririsan sebagian dengan jam buka/tutup sesi pasar secara LEGITIMATE hanya berisi 1-3 sub-bar
+  riil — bukan data yang hilang
+- 3 opsi dipertimbangkan (sesuai audit §4): Opsi B (re-block berdasarkan sesi, bukan UTC tetap) ditolak —
+  mengubah arti `timestamp` kolom output, breaking change untuk semua downstream consumer (MTF alignment,
+  dst.) yang mengasumsikan blok UTC tetap. Opsi C (turunkan ambang ke `bar_count < 1`) ditolak — akan
+  menutupi gap intraday yang RIIL (gap sungguhan selama jam sesi aktif tidak lagi terdeteksi)
+- Fix (Opsi A, direkomendasikan audit): `EXPECTED_BARS` per blok kini DIHITUNG, bukan konstanta — jumlah
+  dari 4 jam UTC kandidat blok tersebut yang ber-overlap dengan jam sesi LOKAL bursa instrumen tersebut
+  (`MARKET_SESSION_LOCAL`, standard interval-overlap test: `h < close AND h+1 > open`)
+- Konversi UTC→lokal memakai IANA timezone database via Polars `dt.convert_time_zone` — mekanisme yang
+  SAMA dengan `OHLCVProcessor._normalize_timestamps()` — sehingga DST-aware otomatis: jam UTC mana yang
+  termasuk jam sesi bergeser sesuai musim tanpa tabel DST terpisah (diverifikasi empiris: blok UTC[12-15]
+  pada 6 Jan 2025/EST menghasilkan expected=2, pada 7 Jul 2025/EDT menghasilkan expected=3 — UTC block_hour
+  identik, hasil berbeda murni dari konversi tz yang benar)
+- Sesi lokal: `us_stocks`/`index` = NYSE/NASDAQ reguler 09:30–16:00 `America/New_York` (jam sesi resmi,
+  bukan buffer "8 jam" konservatif yang dipakai `tvdatafeed_adapter.py` untuk sizing n_bars — itu nilai
+  over-estimate untuk fetch sizing, bukan spesifikasi completeness). `idx` = 09:00–14:30 `Asia/Jakarta` —
+  REUSE persis window yang sudah ditetapkan FIX TVA-3 (`tvdatafeed_adapter.py`), bukan didefinisikan ulang
+  secara independen, untuk menjaga konsistensi internal
+- `forex`/`commodity` (`NEAR_24H_MARKETS`) TETAP pakai `EXPECTED_BARS['4H']=4` flat — sesuai audit §4
+  ("Forex/commodity yang trading mendekati 24 jam relatif tidak terdampak"), tidak diubah
+- Guard tambahan: blok dengan `expected_bars == 0` (sama sekali tidak overlap sesi — mis. blok overnight
+  penuh) tidak pernah ditandai `is_incomplete_bar` terlepas dari `bar_count`-nya
+- `aggregate_ohlcv()`/`_aggregate_4h()` menerima parameter `market` baru, default `""` — caller yang
+  TIDAK mengirim `market` (termasuk seluruh test existing di `test_ohlcv_aggregator.py` yang memanggil
+  tanpa argumen ini) mempertahankan PERSIS perilaku flat-4 lama, zero regression. Produksi
+  (`OHLCVProcessor.synthesize_4h()`, yang sudah menerima `market` di parameternya) selalu meneruskan
+  market instrumen yang sebenarnya
+- Memperbaiki kegagalan pre-existing `tests/unit/test_ohlcv_processor.py::TestSynthesize4H::test_clean_input_mostly_clean`
+  (gagal sejak v1.7.3 — lihat "Out of Scope" di bawah) tanpa mengubah test itu sendiri sama sekali —
+  fixture-nya (`market="us_stocks"`) sudah memanggil dengan benar, fix di sisi aggregator yang
+  menyelesaikannya
+- 9 test baru di `tests/unit/test_ohlcv_aggregator.py::TestSessionAwareCompleteness`, seluruh angka
+  expected_bars diverifikasi empiris terhadap implementasi nyata sebelum dijadikan assertion (bukan
+  dihitung manual lalu diasumsikan benar): perilaku default/legacy dipertahankan, overlap sesi
+  `us_stocks` menggantikan ambang flat, **gap intraday riil tetap terdeteksi** (regression guard yang
+  secara eksplisit membedakan Opsi A dari Opsi C yang ditolak), blok off-session tanpa data tidak
+  ter-flag, window sesi `idx`, fallback `forex`/`commodity`, fallback market tak dikenal, **pergeseran
+  DST untuk blok UTC yang identik**, input kosong tidak crash
+
+---
+
+### NEW-4 [P2 MEDIUM] — `tests/unit/test_source_adapter.py` + `tests/integration/test_adapter_chain.py`
+**Import `DailyBudgetLimiter` dari lokasi lama (`src.bronze.source_adapter`) — class sudah dipindah ke `src.utils.rate_limiter` di sesi sebelumnya (FIX SA-1), memutus collection 30 test di 2 file**
+
+- `from src.bronze.source_adapter import ChainedAdapter, DailyBudgetLimiter, SourceAdapter` →
+  `ImportError: cannot import name 'DailyBudgetLimiter'` saat collection — 30 test di kedua file tidak
+  pernah dijalankan sama sekali (bukan failed, melainkan collection error — perbedaan yang relevan: CI
+  yang hanya memeriksa "tidak ada failed test" tanpa memeriksa jumlah test ter-collect tidak akan
+  mendeteksi regresi ini)
+- `tests/unit/test_source_adapter.py`: import diperbaiki ke `from src.utils.rate_limiter import
+  DailyBudgetLimiter`; `monkeypatch.setattr("src.bronze.source_adapter.date", FakeDate)` di
+  `test_resets_on_new_day` juga diperbaiki ke `src.utils.rate_limiter.date` — target lama adalah no-op
+  sejak FIX SA-1 (module yang benar-benar membaca `date.today()` sudah pindah)
+- `tests/integration/test_adapter_chain.py`: `DailyBudgetLimiter` dihapus dari import top-level —
+  sudah tidak terpakai di scope modul (setiap penggunaan aktual sudah punya local import yang benar dari
+  `src.utils.rate_limiter` di dalam method masing-masing, sejak FIX SA-1)
+- Diverifikasi: 30/30 test ter-collect dan pass di kedua file pasca-fix (sebelumnya: 0 — collection error)
+
+---
+
+### NEW-5 [P3 LOW] — `tests/unit/test_alphavantage_adapter.py`
+**`test_parse_dxy` meng-assert proxy `("USD","EUR")` lama — `_parse_pair("DXY")` sekarang sengaja return `("","")` sejak FIX AV-2 (sesi sebelumnya)**
+
+- DXY adalah indeks basket tertimbang (6 mata uang), bukan satu currency pair — FIX AV-2 menghentikan
+  proxy via `FX_DAILY(from=USD,to=EUR)` karena hasilnya adalah seri yang secara material berbeda namun
+  diberi label DXY. Caller (`AlphaVantageForexAdapter.fetch`) memeriksa sentinel tuple kosong ini dan
+  skip AlphaVantage sepenuhnya untuk DXY (fallback ke adapter berikutnya, mis. yfinance `DX-Y.NYB`)
+  — perilaku ini SUDAH benar di source code, hanya test yang masih menguji perilaku lama yang sudah dihapus
+- Fix: assertion diupdate ke `("","")`, nama method diubah jadi
+  `test_parse_dxy_returns_empty_to_signal_skip` agar mencerminkan kontrak saat ini, docstring
+  menjelaskan alasan di balik FIX AV-2 untuk pembaca masa depan
+
+---
+
+### NEW-6 [SUDAH RESOLVED sebelum audit ini] — `src/silver/macro_processor.py`
+Lihat **MP-3** di entry v1.7.3 di bawah — `_detect_revisions()` `ColumnNotFoundError` silent fallback
+sudah diperbaiki dalam sesi v1.7.3, sebelum audit ini ditulis. Audit mengonfirmasi fix tersebut tetap
+valid; tidak ada tindakan tambahan di sesi ini.
+
+---
+
+### NEW-7 [DEFERRED] — `src/bronze/bea_ingester.py` (`_fetch_nipa()`)
+**BEA NIPA Table 1.1.6 unit-mixing (level vs %-change dalam satu `series_id`) — root cause sudah
+didokumentasikan eksplisit di v1.7.3 GAP-1, BUKAN bug baru**
+
+- Tetap sengaja TIDAK diberi alias regime indicator (lihat entry GAP-1 v1.7.3 di bawah: "GDP **sengaja
+  TIDAK** diberi alias BEA native `real_gdp`")
+- Resolusi penuh membutuhkan audit Bronze layer formal (LineNumber filtering per unit NIPA Table 1.1.6)
+  yang belum pernah dilakukan — Bronze dan Gold layer "tidak pernah diaudit formal" tetap menjadi item
+  roadmap terbuka, konsisten dengan keputusan GAP-5/GAP-7 di v1.7.3 (audit engagement multi-hari, bukan
+  precision fix satu sesi)
+
+---
+
+
+
+Dokumen referensi: `production_readiness_assessment_v1_7_2.docx`
+
+Total: **8 dari 10 gap diperbaiki** (GAP-1,2,3,4,6,8,9,10) | **1 bug baru ditemukan & diperbaiki** (MP-3, ditemukan saat menulis test GAP-8) | **19 file dimodifikasi, 9 file baru** | **2 P0 CRITICAL + 3 P1 HIGH + 1 P2 MEDIUM + 2 P3 LOW**
+
+**GAP-5 (Bronze formal audit) dan GAP-7 (Gold formal audit) SENGAJA TIDAK termasuk** dalam siklus ini —
+keduanya adalah audit engagement multi-hari (assessment sendiri mengalokasikan 2-3 hari per audit di
+Implementation Timeline §8), bukan code fix yang bisa diimplementasikan presisi dalam satu sesi. Lihat
+"Deferred" di akhir section ini.
+
+---
+
+### GAP-1 [P0 CRITICAL] — `src/gold/macro_regime.py`
+**`_load_indicators()` glob hanya membaca `fred_*_silver.parquet` — BLS/BEA Silver tidak pernah dibaca Gold**
+
+- F-MP-01 (v1.7.2) membuat `bls_*_silver.parquet` / `bea_*_silver.parquet` ada di Silver, tapi
+  `_load_indicators()` tidak pernah men-scan file tersebut — half-fix: bug pindah dari "data tidak sampai
+  Silver" menjadi "data sampai Silver tapi tidak pernah dibaca Gold"
+- Investigasi lebih dalam (bukan sekadar memperlebar glob) menemukan series_id TIDAK konsisten antar
+  domain: FRED CPI = `CPIAUCSL`, BLS native CPI = `CUUR0000SA0`, BEA native GDP = `real_gdp` — glob yang
+  diperlebar saja TIDAK akan menemukan data baru karena query masih mencari literal `series_id = 'CPIAUCSL'`
+- Fix: setiap indicator sekarang punya daftar `(domain, series_id)` candidate berurutan prioritas — `cpi`
+  mencoba FRED `CPIAUCSL` dulu, fallback ke BLS native `CUUR0000SA0` (unit sama — index level, aman dicampur)
+- GDP **sengaja TIDAK** diberi alias BEA native `real_gdp` — `BEAIngester._fetch_nipa()` menarik semua
+  LineNumber NIPA Table 1.1.6 tanpa filter baris, sehingga satu `(series_id, observation_date)` bisa berisi
+  multiple value dengan unit berbeda (level vs %-change). Mengalias tanpa resolusi unit berisiko mencampur
+  unit ke satu indicator regime — didokumentasikan, dialihkan ke GAP-7 (Gold formal audit)
+- DuckDB query di-parameterisasi (`$glob`, `$series_id`, `$run_date`) — sebelumnya f-string interpolation
+- 5 test baru di `tests/unit/test_macro_regime.py` (BLS fallback, FRED priority, no-BEA-alias, PIT exclusion, defaults)
+
+---
+
+### GAP-2 [P0 CRITICAL] — `tests/unit/test_quality_validator.py`
+**Regresi CI: test masih assert key lama (`ohlcv_null`, dst.) — F-QV-01/02/03 (v1.7.2) merename semua key**
+
+- `test_all_checks_in_result` meng-assert `{ohlcv_null, ohlcv_sanity, ohlcv_outlier, ohlcv_freshness,
+  ohlcv_coverage, adj_integrity, macro_pit, vix_circuit}` — set key dari SEBELUM F-QV-01
+- v1.7.2 sendiri yang merename key-key ini ke `{null_check, price_sanity, coverage_check, gap_detection,
+  outlier_detection, freshness_check, pit_integrity, adj_flag_integrity, vix_circuit}` tapi lupa update test
+- Test ini FAIL di setiap CI run sejak v1.7.2 — diverifikasi: `pytest tests/unit/test_quality_validator.py`
+  pada repo asli sebelum fix ini menghasilkan `1 failed` persis pada assertion ini
+- Fix: assertion diupdate ke 9 key terkini, termasuk `gap_detection` yang baru ada di F-QV-02
+
+---
+
+### GAP-3 [P1 HIGH] — `config/schemas/{fred,bls,bea,imf,eia}_macro.yaml` + 5 Bronze ingester
+**6 dari 11 Bronze source tidak punya Schema Registry YAML — SchemaValidator (GD §3.7) tidak pernah aktif**
+
+- Dibuat 5 YAML baru (`fred_macro.yaml`, `bls_macro.yaml`, `bea_macro.yaml`, `imf_weo.yaml`, `eia_oil.yaml`)
+  — kolom diverifikasi langsung dari row-construction code tiap ingester (bukan ditebak), termasuk
+  perbedaan tipe `observation_date` (FRED: `date`, BLS/BEA/EIA: `string`) dan kolom yang legitimately
+  nullable (mis. BEA `value` — `_fetch_nipa()` eksplisit `float(val_str) if val_str else None`)
+- `treasury_yield.yaml` dibuat sebagai dokumentasi registry — **bukan** active gate, karena
+  `TreasuryIngester` (FIX TI-1/TRES-1) tidak punya write path independen, 100% delegate ke `FREDIngester`
+  yang sudah divalidasi `fred_macro.yaml`. Mewiring SchemaValidator kedua di sana tidak akan memvalidasi
+  apapun — didokumentasikan eksplisit di file YAML-nya agar tidak ada developer masa depan yang bingung
+- SchemaValidator di-wire ke `__init__()` tiap satu dari 5 ingester (FRED, BLS, BEA, IMF, EIA) dan
+  divalidasi sebelum `write_macro()` — mismatch → quarantine, mengikuti pola persis `market_ingester.py`
+- 22 test baru di `tests/unit/test_bronze_schema_registry_gap3.py`: YAML valid, shape realistis lolos,
+  column rename/type-mismatch terdeteksi (gate benar-benar menolak), 5 ingester punya validator terpasang
+
+---
+
+### GAP-4 [P1 HIGH] — `src/silver/quality_validator.py`
+**`_check_outliers()` tidak pernah menulis `is_clean=False` ke Silver Parquet meski docstring class mengklaim begitu**
+
+- Method hanya `COUNT(*)` outlier dan log — comment di kode bahkan bilang "flagged is_clean=False in Silver"
+  padahal tidak ada write apapun. Class docstring: "Updates is_clean flag in-place" — juga tidak benar untuk method ini
+- Fix: outlier (symbol, count) hasil PASS 1 di-writeback per-symbol via `_flag_outliers_in_file()` — re-scan
+  satu file Silver 1D kecil per symbol (bukan re-scan 1.6 juta rows), DuckDB `COPY (...) TO tmp (FORMAT
+  PARQUET)` lalu `os.replace()` atomic, identik konvensi `ActiveSymbolsResolver._save()` (AS-9)
+- Row yang sudah `is_clean=False` dari check lain (mis. `price_sanity`) tidak disentuh — hanya flip True→False,
+  tidak pernah sebaliknya; symbol tanpa outlier baru tidak ditulis ulang sama sekali (no-op, no I/O)
+- Digabung implementasi dengan GAP-9 (lihat di bawah) karena keduanya menyentuh method yang sama
+- 5 test baru di `tests/unit/test_quality_validator.py` (flag tunggal benar, no-write saat clean, idempotent
+  re-run, multi-symbol scoping benar, dirty row lain tidak ter-overwrite) — diverifikasi end-to-end dengan
+  Parquet fixture asli di disk, bukan mock
+
+---
+
+### GAP-6 [P1 HIGH] — `src/silver/ohlcv_processor.py` + `src/scheduler/job_registry.py`
+**`ohlcv_processor.py` tidak punya module-level `run(run_date)` — GD §14.3.2 mensyaratkan tiap modul Silver/Gold punya ini**
+
+- Investigasi menemukan `job_registry.py` justru SUDAH punya `_silver_ohlcv()` wrapper yang bekerja penuh —
+  2-pass logic (Bronze raw TF → Silver, lalu Silver 1H → Silver 4H synthesis) di-copy-paste inline, bukan
+  delegasi ke modul. Functionally correct, tapi adalah salinan kedua dari logic yang sama
+- Risiko: persis pola "half-fix" yang menyebabkan GAP-1 — perbaikan diterapkan ke satu salinan (mis. fix
+  MI-1 wildcard glob) tapi salinan lain tidak ikut ter-update jika developer lupa kedua tempatnya
+- Fix: `run(run_date)` ditambahkan di `ohlcv_processor.py` sebagai satu-satunya implementasi (memindahkan
+  2-pass logic apa adanya, termasuk fix MI-1). `job_registry.py::_silver_ohlcv()` sekarang hanya delegasi
+  `from src.silver.ohlcv_processor import run as ohlcv_run; ohlcv_run(run_date)` — pola yang sama persis
+  dengan SEMUA wrapper job lain di file tersebut (`_silver_macro`, `_silver_fundamental`, dst.)
+- Diverifikasi: `tests/unit/test_ohlcv_processor.py` dan `tests/integration/test_job_registry_integrity.py`
+  tetap pass (kecuali 2 kegagalan pre-existing yang tidak terkait, lihat "Out of Scope" di bawah)
+
+---
+
+### GAP-8 [P2 MEDIUM] — `tests/unit/test_macro_processor.py` (BARU)
+**File test tidak ada sama sekali — F-MP-01 (process_bls/process_bea) dan F-MP-02 (REVISION_TOLERANCE) tanpa coverage**
+
+- Dibuat dengan 5 test case persis sesuai spesifikasi assessment: `test_process_bls_creates_silver_output`,
+  `test_process_bea_creates_silver_output`, `test_run_calls_bls_and_bea`,
+  `test_revision_tolerance_no_false_positive`, `test_revision_tolerance_detects_genuine`
+- **Bug baru ditemukan saat menulis test ke-5 (genuine revision):** `_detect_revisions()` selalu
+  ngeluarin `ColumnNotFoundError: revision_seq_prev` dan silently fallback ke `is_revision=False` untuk
+  SETIAP row, SETIAP kali ada prior vintage untuk dibandingkan — lihat **MP-3** di bawah
+
+---
+
+### MP-3 [BARU — ditemukan saat menulis test GAP-8] — `src/silver/macro_processor.py`
+**`_detect_revisions()`: `df.join(..., suffix="_prev")` tidak pernah menghasilkan kolom `revision_seq_prev` — exception tertelan, revision detection mati total**
+
+- `prev` (vintage sebelumnya) punya kolom `revision_seq`; `df` (data baru yang sedang diproses) BELUM
+  punya kolom `revision_seq` di titik join ini (baru dihitung setelahnya). Polars `suffix="_prev"` HANYA
+  diterapkan pada kolom yang collide nama antar kedua frame — karena tidak ada collision untuk
+  `revision_seq`, kolom tetap bernama `revision_seq` di hasil join, bukan `revision_seq_prev`
+  (`value` TIDAK kena masalah ini karena `df` juga punya kolom `value`, jadi memang collide dan ter-suffix)
+- Baris kode `pl.col("revision_seq_prev")...` setelahnya selalu raise `ColumnNotFoundError`, ditangkap oleh
+  `except Exception` generik, dan fallback ke `is_revision=False` — F-MP-02's REVISION_TOLERANCE comparison
+  **tidak pernah tereksekusi sama sekali** di production untuk symbol manapun yang punya vintage sebelumnya
+- Severity: silent — tidak crash, tidak ada di log selain `logger.warning` level yang mudah terlewat;
+  ditemukan murni karena test eksplisit menulis assertion `is_revision is True` untuk genuine revision case
+- Fix: `prev` di-rename eksplisit (`value`→`value_prev`, `revision_seq`→`revision_seq_prev`) SEBELUM join,
+  menghilangkan ketergantungan pada mekanisme auto-suffix Polars yang ambigu
+- Diverifikasi: kelima test `test_macro_processor.py` pass, termasuk genuine-revision case yang sebelumnya gagal
+
+---
+
+### GAP-9 [P3 LOW] — `src/silver/quality_validator.py`
+**`_check_outliers()`: full Silver 1D scan dua kali (CTE + JOIN) — risiko OOM di M1 8GB budget**
+
+- Query lama: CTE `stats` (scan #1, AVG/STDDEV per symbol) lalu JOIN ke seluruh dataset lagi (scan #2) —
+  untuk 643 symbol × 10Y daily (~1.6 juta rows) DuckDB memuat dataset dua kali terhadap budget 3GB (GD §10.2)
+- Fix: diganti single-pass DuckDB window function — `AVG/STDDEV OVER (PARTITION BY symbol)` dihitung di
+  scan yang sama dengan evaluasi z-score, tidak ada JOIN sama sekali
+- Koneksi diganti ke `duckdb_connection()` helper (`src.config.pipeline_config`) agar `memory_limit`/`threads`
+  diterapkan konsisten — sebelumnya `duckdb.connect()` polos tanpa budget enforcement
+- Diimplementasikan bersamaan dengan GAP-4 (writeback) karena keduanya berada di method yang sama —
+  lihat detail lengkap di entry GAP-4 di atas
+
+---
+
+### GAP-10 [P3 LOW] — `KNOWN_RISKS.md` (BARU) + `src/utils/health_reporter.py`
+**tvdatafeed: private API reverse-engineered, resiko ToS dan breakage tanpa warning — tidak ada mitigasi runtime**
+
+- `KNOWN_RISKS.md` dibuat — mendokumentasikan resiko tvdatafeed secara eksplisit (blast radius, mitigasi
+  yang sudah ada, operator playbook jika `IDX_PARTIAL_FAILURE` muncul, catatan migrasi vendor jangka panjang)
+- `health_reporter.py::_check_idx_coverage()` baru — membaca metadata `_symbol`/`_source`/`_ingested_at`
+  yang sudah ditulis tiap Bronze file (GD §3.5/§3.6, tidak ada schema baru), menghitung berapa dari 30
+  symbol IDX yang benar-benar dari `tvdatafeed` vs fallback `yfinance_jk` vs hilang total hari ini
+- Threshold `IDX_COVERAGE_ALERT_THRESHOLD = 5` (persis sesuai assessment): jika fallback+missing > 5 symbol,
+  log warning `IDX_PARTIAL_FAILURE` (match istilah IDD §6.3 SOP), set `idx_coverage_alert=True`, tampil di
+  terminal report, dan diprioritaskan di Telegram alert (tier sama dengan storage/failed-job alert)
+- 5 test baru di `tests/unit/test_health_reporter.py` (full coverage no-alert, degraded triggers alert,
+  boundary case tepat di threshold tidak alert, no-Bronze-data graceful, field selalu ada di report)
+
+---
+
+### Deferred — TIDAK termasuk siklus v1.7.3 ini
+
+| Gap | Alasan deferred |
+| --- | --- |
+| **GAP-5** (Bronze formal audit, 11 ingester modules) | Audit engagement multi-hari per assessment Implementation Timeline §8 (2-3 hari) — bukan code fix presisi. Beberapa temuan arsitektural sudah disurfaced sebagai side-effect dari GAP-1/3/4/6/8 (lihat catatan inline di kode), tapi audit formal lengkap belum dilakukan. |
+| **GAP-7** (Gold formal audit, 6 sub-layer modules) | Sama — audit engagement terpisah. GAP-1's investigasi menemukan BEA NIPA multi-row-per-period ambiguity yang eksplisit dialihkan ke sini, bukan ditebak fix-nya. |
+
+### Catatan tambahan dari sesi ini (di luar 10 GAP, ditemukan saat verifikasi regresi)
+
+Hasil `pytest tests/ -q` sebelum dan sesudah perubahan dibandingkan baris-per-baris untuk memastikan zero
+regression. 4 kegagalan berikut **sudah ada sebelum sesi ini** dan TIDAK disebabkan oleh perubahan v1.7.3 —
+dicatat di sini karena ditemukan, bukan diperbaiki (di luar scope assessment ini):
+
+> **[UPDATE v1.7.4]**: Keempat item di bawah — dan 2 collection error terkait — root-cause-investigated
+> secara formal di `audit_v1_7_3_uncovered_findings.docx` dan diperbaiki dalam sesi v1.7.4 sebagai NEW-2,
+> NEW-3, NEW-4, dan NEW-5. Lihat entry v1.7.4 di atas untuk detail lengkap masing-masing.
+
+- `tests/unit/test_source_adapter.py` + `tests/integration/test_adapter_chain.py` — collection ERROR:
+  `ImportError: cannot import name 'DailyBudgetLimiter' from src.bronze.source_adapter` — **[FIXED v1.7.4, NEW-4]**
+- `tests/integration/test_full_system.py::test_l7_pipeline_sequence_15_or_more_steps` dan
+  `tests/integration/test_job_registry_integrity.py::test_silver_fundamental_in_sequence` — keduanya
+  mengharapkan `silver_fundamental` ada di `PIPELINE_SEQUENCE` (terkait `refactor_plan_sentiment_bronze.docx`)
+  — **[FIXED v1.7.4, NEW-2 — asumsi ini ternyata adalah root cause `gold_screener` terkunci permanen]**
+- `tests/unit/test_alphavantage_adapter.py::test_parse_dxy` — `_parse_pair` sekarang sengaja menolak DXY
+  (lihat log message di kode), tapi test masih mengharapkan parsing lama — **[FIXED v1.7.4, NEW-5]**
+- `tests/unit/test_ohlcv_processor.py::TestSynthesize4H::test_clean_input_mostly_clean` — `ohlcv_aggregator`
+  menghasilkan hanya 33.3% clean 4H bar dari input 1H yang fully clean, test mengharapkan >= 80%
+  — **[FIXED v1.7.4, NEW-3]**
+
+---
+
+### Catatan coverage (`pyproject.toml` `fail_under = 70`)
+
+Kode baru di `ohlcv_processor.py` (GAP-6) dan `health_reporter.py` (GAP-10) awalnya menurunkan combined
+coverage 5 modul yang disentuh sesi ini dari **70.92% → 68.48%** — di bawah `fail_under = 70` yang sudah
+ada di `pyproject.toml` sebelum sesi ini (bukan threshold baru yang saya tambahkan). Ditambahkan test
+lanjutan: `TestRunEntryPoint` (4 test, `test_ohlcv_processor.py`) untuk `ohlcv_processor.run()` end-to-end
+dengan Bronze/Silver fixture asli di disk, dan `TestSendTelegramAlert` + 2 test tambahan
+(`test_health_reporter.py`) untuk `run()`, `_print_report()`, dan prioritas pesan `send_telegram_alert()`.
+Hasil akhir: **80.56%** combined coverage — di atas threshold CI (70%) maupun target Supplementary Design
+§10.3 (80%).
+
+---
+
+## v1.7.1 — Precision Audit: ActiveSymbolsResolver (Juni 2026)
+
+Dokumen referensi: `precision_audit_active_symbols.docx`
+
+Total: **12 temuan diperbaiki** | **3 file dimodifikasi** | **2 P0 CRITICAL + 3 P1 HIGH + 4 P2 MEDIUM + 3 NEW**
+
+---
+
+### AS-1 [P0 CRITICAL] — `src/silver/active_symbols.py`
+**DuckDB `:name` placeholder → silent NULL di WHERE clause**
+
+- Format `:name` (SQLite convention) tidak disubstitusi secara reliable di DuckDB Python API
+- Akibat: `WHERE s.timestamp >= NULL` selalu False → result set kosong → universe 643 tanpa filter
+- Fix: ganti semua `:path`, `:run_date`, `:us_dvol`, dst. → `$path`, `$run_date`, `$us_dvol`
+- Tambah smoke test eksplisit sebelum main query: `SELECT $v AS x` dengan assert hasilnya bukan NULL
+
+---
+
+### AS-2 [P0 CRITICAL] — `src/silver/active_symbols.py`
+**`except Exception` catch-all menulis output seolah resolver berhasil meski query gagal total**
+
+- Fallback `_save(loader.symbol_list(), run_date)` dipanggil untuk SEMUA jenis error termasuk SQL bugs dan OOM
+- DependencyGuard tidak mendeteksi kegagalan → Gold layer berjalan dengan 643 simbol tanpa filter likuiditas
+- Fix: pisahkan dua kondisi semantik berbeda:
+  - Silver not ready → fallback legitimate, `is_fallback=True` di output
+  - Query/runtime error → fail-fast, exception propagate ke runner.py → sentinel tidak ditulis
+
+---
+
+### AS-3 [P1 HIGH] — `src/silver/active_symbols.py`
+**`AVG(dollar_volume)` dihitung dari 45 hari kalender, bukan 20 trading day eksplisit**
+
+- Jumlah observasi per symbol tidak setara: US stocks ~31 hari, IDX ~28 hari, forex 45 hari
+- Threshold `dollar_volume_20d` tidak memiliki semantik konsisten antar pasar
+- Fix: tambahkan CTE `ranked_clean` dengan `ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY ts_date DESC)`
+- `AVG(dollar_volume) FILTER (WHERE rn <= 20)` — tepat 20 trading day terbaru
+
+---
+
+### AS-4 [P1 HIGH] — `src/silver/active_symbols.py`
+**Dirty rows (`is_clean=False`) mempengaruhi `dollar_volume_20d` dan `last_close`**
+
+- `AVG(dollar_volume)` dan `LAST(last_close)` dihitung dari semua rows termasuk outlier volume Z>4
+- Satu bar dengan volume spike dalam 45 hari dapat menaikkan `dollar_volume_20d` secara signifikan
+- Fix: pindahkan `AND s.is_clean = TRUE` ke level `ohlcv` CTE (sumber) — affects ALL downstream CTEs
+- `COUNT(*)` di CTE sekarang menghitung hanya clean rows secara konsisten
+
+---
+
+### AS-5 [P1 HIGH] — `src/silver/active_symbols.py`
+**`LIMIT 200` global memotong forex/commodity/index yang seharusnya always-in**
+
+- Forex (20) + commodity (3) + index (2) = 25 instrumen dengan `dollar_volume_20d = 0`
+- Selalu berada di posisi terbawah `ORDER BY dollar_volume_20d DESC` → dipotong jika `us_stocks + idx >= 200`
+- Fix: UNION policy — `always_in CTE` (no LIMIT) + `screened CTE` (LIMIT 175, headroom untuk 25 always-in)
+- Total maksimum tetap ~200; always-in markets dijamin masuk tanpa tergantung kondisi screened
+
+---
+
+### AS-6 [P2 MEDIUM] — `src/silver/active_symbols.py`
+**Output schema hanya `symbol + resolved_date` — tidak cukup untuk audit institutional**
+
+- Perubahan universe tidak dapat dijelaskan tanpa rerun query dari Silver data historis
+- Fix: output schema diperkaya: `market`, `dollar_volume_20d`, `clean_days`, `last_close`,
+  `eligibility_reason`, `resolved_date`, `resolver_version`, `unknown_market_count`, `is_fallback`
+- Tambah method `load_full()` untuk mengakses full DataFrame dengan semua kolom audit
+
+---
+
+### AS-7 [P2 MEDIUM] — `src/silver/active_symbols.py`
+**DuckDB connection tidak ditutup eksplisit → resource leak pada scheduler long-running**
+
+- `duckdb.connect()` tanpa context manager → connection hidup sampai GC pada M1 8GB terbatas
+- Fix: `with duckdb.connect() as con:` — connection auto-closed setelah block selesai
+
+---
+
+### AS-8 [P2 MEDIUM] — `src/silver/active_symbols.py`
+**`OUTPUT_PATH`, `memory_limit`, `threads` hardcoded — mengabaikan konfigurasi global**
+
+- `memory_limit='2GB'` berbeda dari GD §10.2 (`3GB`); `OUTPUT_PATH` mengabaikan `PIPELINE_DATA_ROOT`
+- Fix: `OUTPUT_PATH` dibaca dari `PIPELINE_DATA_ROOT` env var (fallback ke `get_config()`)
+- `memory_limit` dan `threads` dari `get_config().duckdb_memory_limit_gb` dan `.duckdb_threads`
+
+---
+
+### AS-9 [P2 MEDIUM] — `src/silver/active_symbols.py`
+**`write_parquet()` langsung ke path final → partial write risk jika crash saat write**
+
+- File corrupt dengan nama final tersisa di disk → downstream job gagal dengan Parquet read error
+- Fix: tulis ke `tempfile.NamedTemporaryFile` di direktori yang sama, lalu `shutil.move()` atomic
+- Cleanup `tmp_path.unlink(missing_ok=True)` di except block untuk mencegah orphaned `.tmp` files
+
+---
+
+### AS-10 [NEW] — `src/silver/active_symbols.py`
+**Simbol unknown market hilang diam-diam dari universe tanpa log apapun**
+
+- Simbol dalam Silver OHLCV yang tidak ada di InstrumentLoader mendapat `market=NULL` dari LEFT JOIN
+- NULL symbols tidak masuk kondisi manapun → dikecualikan tanpa log atau audit trail
+- Fix: `m.market IS NOT NULL` guard di `ohlcv` CTE; `_audit_unknown_markets()` method
+- Log WARNING dengan daftar orphan symbols; `unknown_market_count` disimpan di output metadata
+
+---
+
+### AS-11 [NEW] — `src/silver/active_symbols.py`
+**`hive_partitioning=True` berisiko conflict dengan kolom data Silver (kolom duplikat silent)**
+
+- Silver partition key `symbol=AAPL/` dengan `hive_partitioning=True` dapat overwrite kolom data `symbol`
+- Menghasilkan data salah secara silent — bukan error (Supp. Design v1.1 G2 catatan)
+- Fix: `hive_partitioning=false` di query — konsisten dengan konvensi Silver layer
+
+---
+
+### AS-12 [NEW] — `src/silver/active_symbols.py`
+**Section 7 dokumen basis (sketch query) tidak lengkap — implementasi verbatim salah**
+
+- Section 7 sketch: tidak ada WHERE threshold, tidak ada UNION policy, tidak ada LIMIT
+- Implementasi sketch Section 7 menghasilkan 643 simbol tanpa screening
+- Fix: query final dari audit Section 8 diimplementasikan — mencakup semua perbaikan AS-1..AS-10
+
+---
+
+*Tests: `tests/unit/test_active_symbols.py` dan `tests/integration/test_active_symbols_integration.py` diperbarui untuk mencakup semua 12 temuan.*
+
+*Semua perubahan mengikuti prinsip Layer Independence (GD §17.2) dan Interface Contract (GD §17.6).*
+
+---
+
+## v1.7 — Precision Audit Fixes (June 2026)
+
+Dokumen referensi: `precision_audit_bronze_silver_v1_6.docx`
+
+Total: **11 bug diperbaiki** | **11 file dimodifikasi** | **3 CRITICAL + 5 HIGH + 3 MEDIUM**
+
+32 bug sebelumnya (v1.4–v1.6) terkonfirmasi verified dalam audit dan tidak berubah di v1.7.
+
+---
+
+### QV-1 [CRITICAL] — `src/silver/quality_validator.py`
+**`class QualityValidator:` tidak pernah dideklarasikan — NameError saat runtime**
+
+- `QualityGateError` body tidak ditutup — method `__init__` QualityValidator masuk ke dalam `QualityGateError`, overwrite `__init__(failed_checks)` dengan `__init__()` tanpa argumen
+- `QualityValidator` tidak pernah terdefinisi → `run()` crash dengan NameError setiap kali `silver_validate` dijalankan
+- Fix: tambahkan `class QualityValidator:` sebagai class terpisah, tutup `QualityGateError` dengan benar
+
+---
+
+### EIA-4 [CRITICAL] — `src/bronze/eia_ingester.py`
+**`_build_last_known_cache()` key mismatch → incremental fetch tidak pernah aktif**
+
+- Cache dikunci oleh `series_id` (e.g. `'PET.WCRSTUS1.W'`) tetapi lookup menggunakan `spec['name']` (e.g. `'us_crude_stocks'`)
+- `last_known_cache.get(spec['name'])` selalu return `None` → setiap Rabu fetch 5-year full history
+- Fix: ganti `last_known_cache.get(spec['name'])` → `last_known_cache.get(spec['id'])`
+
+---
+
+### MI-1 [CRITICAL] — `src/scheduler/job_registry.py`
+**Pass 1 `_silver_ohlcv()` hardcode `source=yfinance/` → IDX, forex, Polygon data tidak pernah masuk Silver**
+
+- Pattern `BRONZE_OHLCV_PATH / inst.market / f'source=yfinance/symbol={inst.symbol}/**/*.parquet'` hanya match `YFinanceAdapter`
+- IDX (tvdatafeed, source=tvdatafeed/), forex (source=yfinance_forex/), US fallback (source=polygon/) semua missed
+- Fix: ganti dengan wildcard `** / f'symbol={inst.symbol}' / '**' / '*.parquet'` yang mencakup semua source
+
+---
+
+### FH-3 [HIGH] — `src/bronze/finnhub_ingester.py`
+**`get_days_to_earnings()` glob masih path lama `earnings_calendar/finnhub/` → `days_to_earnings` selalu None**
+
+- FH-1 membenarkan write path ke Hive `earnings_calendar/source=finnhub/...` tetapi read glob masih `earnings_calendar/finnhub/...`
+- Glob tidak pernah match → Gold Screener `days_to_earnings` dan `near_earnings_flag` selalu None
+- Fix: ganti glob ke wildcard `earnings_calendar / '**' / '*.parquet'` tanpa asumsi source= prefix
+
+---
+
+### MP-1 [HIGH] — `src/silver/macro_processor.py`
+**`process_treasury()` membaca `data/bronze/bond/treasury/` (path kosong) → Treasury Silver selalu no-op**
+
+- `TreasuryIngester` mendelegasi ke `FREDIngester` yang menulis ke `data/bronze/macro/fred/monetary_policy/`
+- `process_treasury()` membaca `bond/treasury/` yang tidak pernah ditulis siapapun
+- Data Treasury (DGS series, T10Y2Y) sudah diproses oleh `process_fred()` — tidak ada data loss
+- Fix: `process_treasury()` dikonversi ke no-op dengan `logger.debug()`; hapus `_process_domain()` call yang berujung ke path kosong
+
+---
+
+### YF-1 [HIGH] — `src/bronze/yfinance_adapter.py`
+**`'4H': '1h'` dead code di `_INTERVAL_MAP` setelah v1.5 refactoring**
+
+- Bronze tidak lagi fetch 4H setelah v1.5 (GD §3.1, §17.7); 4H disintesis dari Silver 1H
+- Entry `'4H': '1h'` adalah silent mislabeling risk: jika dipanggil, fetch 1H data berlabel 4H tanpa error
+- Fix: hapus `'4H'` dari `_INTERVAL_MAP`; tambahkan explicit `ValueError` guard di `fetch()` dengan pesan actionable
+
+---
+
+### SA-1 [HIGH] — `src/bronze/source_adapter.py`
+**`DailyBudgetLimiter` duplikat (tidak thread-safe) dan `AV_LIMITER` dead code**
+
+- `source_adapter.py` mendefinisikan `DailyBudgetLimiter` tanpa `threading.Lock` — tidak thread-safe
+- `rate_limiter.py` sudah punya implementasi thread-safe yang digunakan `alphavantage_adapter.py` via `SourceLimiters.alphavantage`
+- `AV_LIMITER = DailyBudgetLimiter(25)` tidak pernah diimport atau digunakan di manapun
+- Fix: hapus `DailyBudgetLimiter` class dan `AV_LIMITER` dari `source_adapter.py`; konsolidasikan ke `rate_limiter.py`
+
+---
+
+### FF-1 [HIGH] — `src/silver/fundamental_processor.py`
+**f-string SQL injection di `get_days_to_earnings()` — inkonsisten dengan FH-2/IMF-2 pattern**
+
+- `WHERE symbol = '{symbol}' AND run_date = '{run_date}'` — f-string langsung di SQL
+- Risk jika symbol mengandung karakter khusus; inconsistent dengan pola parameterized yang sudah ada
+- Fix: ganti f-string dengan DuckDB `?` placeholder binding: `con.execute("... WHERE symbol = ?", [pattern, symbol, str(run_date)])`
+
+---
+
+### POL-6 [MEDIUM] — `src/bronze/polygon_adapter.py`
+**`import pandas as pd` di dalam loop body — overhead lookup tiap iterasi, sulit di-mock**
+
+- Dua `import pandas as pd` di dalam `fetch()` body: satu di loop, satu di return statement
+- Python men-cache module tapi dict lookup overhead tiap call; lebih penting: sulit di-mock untuk testing
+- Fix: pindahkan ke module-level top-of-file import (setelah `import polars as pl`)
+
+---
+
+### TI-1 [MEDIUM] — `src/bronze/treasury_ingester.py`
+**Unnecessary inheritance dari `BronzeIngester`**
+
+- `TreasuryIngester(BronzeIngester)` tidak pernah memanggil `self.write()` atau `self.write_macro()` langsung
+- Semua write dilakukan oleh `FREDIngester` yang di-delegate; inheritance menambahkan method yang tidak digunakan
+- Fix: ganti `class TreasuryIngester(BronzeIngester):` → `class TreasuryIngester:` (plain class)
+
+---
+
+### OP-1 [MEDIUM] — `src/silver/ohlcv_processor.py`
+**Sort condition `'symbol' in df.columns` selalu False setelah `_normalize_columns()`**
+
+- `_normalize_columns()` drop kolom `_symbol` dan rename — setelah pipe, outer `df` masih pre-pipe schema
+- Conditional `if 'symbol' in df.columns` selalu False → `sort(['symbol','timestamp'])` tidak pernah dieksekusi
+- `process_symbol()` selalu single-symbol — sort by `['timestamp']` saja sudah benar dan tidak misleading
+- Fix: hapus conditional, gunakan `sort(['timestamp'])` langsung
+
+---
+
+*Semua perubahan mengikuti prinsip Separation of Concerns (GD §0), Layer Independence (GD §17.2), dan Interface Contract (GD §17.6).*
+
+*Grand Design v1.2 > Supplementary Design v1.1 > IDD v1.0 — hierarki tetap berlaku.*
+
+---
+
+
+
+Dokumen referensi: `audit_perbaikan_market_data_infrastructure_v1_1.docx`
+
+Total: **13 file dimodifikasi**, **28 bug/gap diperbaiki**
+
+---
+
+### B-F01 [CRITICAL] — `src/bronze/market_ingester.py`
+**`_run_symbol()`: variabel `source` tidak terdefinisi → NameError runtime**
+
+- Tambah method `_primary_source_for(inst)` yang menentukan primary source per asset class
+- `_run_symbol()` menggunakan `primary_src` dari method baru — bukan variabel `source` yang tidak ada
+- Signature `_fetch()` dibersihkan (hapus parameter `source` yang tidak digunakan)
+
+---
+
+### B-F02 [HIGH] — `src/bronze/market_ingester.py` + `src/silver/ohlcv_processor.py`
+**`data_source` di Silver hardcode `'yfinance'` — tidak mencerminkan adapter aktual**
+
+- `_run_symbol()`: baca `actual_source` dari `df["_source"][0]` setelah ChainedAdapter fetch
+- `_normalize_columns()`: TIDAK drop `_source` — capture sebelum drop Bronze metadata
+- `_add_metadata()`: terima parameter `actual_source`; gunakan sebagai `data_source` kolom
+
+---
+
+### B-F07 [MEDIUM] — `src/bronze/market_ingester.py`
+**`ForexDayCache.save()` tidak pernah dipanggil setelah primary fetch sukses**
+
+- `_run_symbol()`: panggil `ForexDayCache().save()` setelah primary fetch forex berhasil
+- Wrapped dalam try/except agar cache failure tidak menghentikan ingestion
+
+---
+
+### S-F01 [CRITICAL] — `src/silver/quality_validator.py`
+**Critical check failures hanya di-log sebagai warning — Gold layer tidak terblokir**
+
+- Tambah `QualityGateError(RuntimeError)` exception class
+- Definisikan `CRITICAL_CHECKS` dan `WARNING_CHECKS` set secara eksplisit
+- `run()`: raise `QualityGateError` jika critical check gagal → DependencyGuard tidak menulis `.done` sentinel → Gold layer otomatis terblokir
+
+---
+
+### S-F02 [CRITICAL] — `src/silver/macro_processor.py` + `src/silver/fundamental_processor.py`
+**Data macro dan earnings tidak difilter `release_date <= run_date` → lookahead bias**
+
+- `macro_processor._process_domain()`: filter `release_date <= run_date` sebelum write Silver; fallback ke `observation_date` jika kolom release_date tidak ada
+- `fundamental_processor._process_earnings()`: filter `fetched_date <= run_date` sebelum dedup
+
+---
+
+### S-F03 [HIGH] — `src/silver/ohlcv_processor.py`
+**Tidak ada `.sort()` sebelum `_add_derived_fields()` → shift/ewm pada data tidak terurut**
+
+- `process_symbol()`: tambah `.sort(["symbol", "timestamp"])` dalam chain sebelum `_add_derived_fields()`
+
+---
+
+### S-F04 [HIGH] — `src/silver/ohlcv_processor.py`
+**`staleness` di-drop di `_normalize_columns()` sebelum `_flag_is_clean()` membutuhkannya**
+
+- `_normalize_columns()`: TIDAK drop `staleness` — hanya drop Bronze audit metadata
+- `_add_metadata()`: drop `staleness` DI SINI, setelah `_flag_is_clean()` selesai
+
+---
+
+### G-F01 [CRITICAL] — `src/gold/screener.py`
+**`dollar_volume_20d` dibaca dari `sector_regime_weights.parquet` yang tidak memiliki kolom itu**
+
+- Tambah CTE `active` yang membaca dari `data/silver/active_symbols/active_{date}.parquet`
+- LEFT JOIN `active a ON m.symbol = a.symbol` menggantikan `s.dollar_volume_20d`
+- WHERE clause diupdate ke `COALESCE(a.dollar_volume_20d, 1e9)`
+
+---
+
+### G-F03 [HIGH] — `src/gold/mtf_alignment.py`
+**ATR diambil dari TF pertama yang punya `atr_14` — bukan 1H**
+
+- Ganti `next(df for df in tf_dfs if "atr_14" in df.columns)` dengan eksplisit filter `df["timeframe"][0] == "1H"`
+- Fallback ke TF apapun dengan log warning jika 1H tidak tersedia
+
+---
+
+### G-F04 [HIGH] — `src/gold/mtf_alignment.py`
+**`reward_risk_ratio = 1.5*ATR / 0.5*ATR = 3.0` selalu konstan**
+
+- Ganti dengan RRR berbasis level harga aktual: `(1.5*ATR) / (1.25*ATR)` — entry -0.25*ATR dari close, stop -1.5*ATR dari close
+- Formula sekarang mencerminkan actual risk distance, bukan ATR ratio
+
+---
+
+### G-F06 [HIGH] — `src/gold/hmm_regime.py`
+**`StandardScaler` tidak di-fit dan tidak di-persist → klasifikasi dengan skala berbeda saat inference**
+
+- `fit()`: fit `StandardScaler` pada training data; `fit_transform` digunakan untuk training
+- `_save_model()`: persist `{"model": ..., "scaler": ...}` sebagai dict dalam satu pickle file
+- `_load_model()`: restore scaler; backward-compat untuk format lama (model-only pickle)
+- `classify()`: apply `scaler.transform()` sebelum `model.predict()`
+- `__init__()`: inisialisasi `self._scaler = None`
+
+---
+
+### GD-F01 [HIGH] — `src/gold/technical_signals.py`
+**VIX Spike Guard membaca dari Silver macro FRED (delay hari) bukan Silver OHLCV (harian)**
+
+- Primary: baca VIX close dari `data/silver/market_ohlcv/index/**/symbol=VIX/**/*_1D_silver.parquet`
+- Fallback: Silver macro FRED `VIXCLS` jika OHLCV tidak tersedia, dengan debug log
+
+---
+
+### GD-F02 [HIGH] — `src/gold/screener.py`
+**Tidak ada Data Freshness Gate (GD §15.1) sebelum screener berjalan**
+
+- Tambah `_check_data_freshness(run_date)` — dipanggil di awal `run()`
+- Query Silver 1D: hitung distinct symbols dengan `is_clean=TRUE` dalam 3 hari terakhir
+- Raise `RuntimeError` jika coverage < 95% dari 643 instrumen
+- Skip gate dengan warning jika Silver belum ada (phase awal)
+
+---
+
+### GD-F03 [HIGH] — `src/gold/correlation_matrix.py`
+**Tidak ada warning jika `active_symbols` > 250 (batas aman RAM M1 8GB)**
+
+- Tambah `MAX_SYMBOLS_RAM_SAFE = 250` guard di `compute_correlation_matrix()`
+- Log warning dengan detail matrix size dan rekomendasi tighten threshold
+
+---
+
+### GD-F04 [HIGH] — `src/scheduler/job_registry.py`
+**`silver_active_symbols` ada di registry tapi dependency chain tidak konsisten dengan IDD §7**
+
+- Dependency sudah benar di JOB_REGISTRY entry; diperkuat via DAILY_SEQUENCE order
+
+---
+
+### GD-F08 [MEDIUM] — `src/bronze/base_ingester.py`
+**GD §3.1 Idempotency: `write()` selalu menulis file baru tanpa cek existing**
+
+- `write()`: scan `path.glob(f"{symbol}_raw_{date_prefix}*.parquet")` sebelum tulis
+- Jika file hari yang sama sudah ada → return `None` (skip), log debug
+- Return type diubah ke `Optional[Path]`
+
+---
+
+### R-F02 [HIGH] — `src/runner.py`
+**`run_all(force=True)` tidak berpengaruh — loop memanggil `run_job(force=False)` hardcoded**
+
+- `run_all()`: pass `force=force` ke setiap `run_job()` dalam loop
+
+---
+
+### R-F03 [HIGH] — `src/scheduler/job_registry.py`
+**`PIPELINE_SEQUENCE` tunggal mencampur daily dan weekly jobs → `silver_macro` gagal dependency setiap hari**
+
+- Pisahkan `DAILY_SEQUENCE` (daily cadence) dan `WEEKLY_SEQUENCE` (Minggu + daily)
+- `silver_macro` HANYA ada di `WEEKLY_SEQUENCE`
+- `PIPELINE_SEQUENCE = DAILY_SEQUENCE` (backward-compat alias)
+- `runner.py`: import `DAILY_SEQUENCE` dan `WEEKLY_SEQUENCE`
+
+---
+
+### R-F04 [HIGH] — `src/scheduler/job_registry.py`
+**`_bronze_finnhub()` stub hanya `logger.info()` — silent success tanpa data**
+
+- Ubah stub ke `raise NotImplementedError(...)` dengan pesan actionable
+- Dependency guard tidak menulis sentinel → `silver_fundamental` tidak akan jalan
+
+---
+
+*Semua perubahan mengikuti prinsip Separation of Concerns (GD §0), Layer Independence (GD §17.2), dan Interface Contract (GD §17.6).*
+
+*Grand Design v1.2 > Supplementary Design v1.1 > IDD v1.0 — hierarki tetap berlaku.*

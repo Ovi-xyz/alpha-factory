@@ -1,0 +1,98 @@
+[tool.poetry]
+name = "alpha-factory"
+version = "1.11.0"
+description = "Data Platform — Bronze/Silver/Gold Medallion Architecture"
+authors = ["Ovi"]
+packages = [
+    { include = "src" }
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.13"
+polars = {extras=["all"], version=">=0.20"}
+duckdb = ">=1.0"
+pyarrow = ">=14.0"
+yfinance = ">=0.2.36"
+# ADD Decision A (GMI_Decision_Document_v3.docx, 2026-07-17): tvdatafeed does
+# not exist on PyPI under any version (confirmed via PyPI JSON API: 404 at
+# https://pypi.org/pypi/tvdatafeed/json, and via a live pip resolution
+# attempt). It was correctly absent from pyproject.toml, but that left it
+# ONLY declared as a broken PyPI spec in environment.yml's pip: block, which
+# poisoned that block's entire atomic install (PyYAML, pytest, everything
+# else in the same block failed alongside it — see alpha-factory_logs.txt).
+# Re-declared here as a git dependency — the one path already confirmed to
+# work (manual workaround: pip install git+https://github.com/rongardF/tvdatafeed.git).
+tvdatafeed = {git = "https://github.com/rongardF/tvdatafeed.git"}
+pandas = ">=2.0"
+# FIX ADR-020 (GMI_Decision_Document_v2.docx, 2026-07-11): pandas-ta -> pandas-ta-classic.
+# PyPI removed pandas-ta's entire 0.3.x line (incl. the stated floor 0.3.14);
+# only two Python-3.12-only prerelease builds remain (0.4.67b0, 0.4.71b0), and
+# even on 3.12 the bare >=0.3.14 constraint fails to resolve since pip excludes
+# prereleases from an explicit floor by default. pandas-ta-classic is a
+# maintained continuation of the same abandoned 0.3.x lineage with genuine
+# stable releases (up to 0.6.52) — Python floor held at >=3.11, not bumped.
+pandas-ta-classic = ">=0.3.14"
+finnhub-python = "*"
+polygon-api-client = "*"
+fredapi = "*"
+loguru = "*"
+pydantic = ">=2.0"
+pyyaml = "*"
+tenacity = "*"
+python-dotenv = "*"
+hmmlearn = "*"
+scikit-learn = "*"
+# ADD ADR-021 (GMI_Decision_Document_v2.docx): promoted from ad hoc
+# sandbox-only installs to hard dependencies. Unconditionally required by
+# GMI Wave 1 Cycle 4 (CrossAssetEngine): CorrelationModule (Ledoit-Wolf
+# shrinkage, hierarchical clustering), LeadLagModule (Granger causality +
+# BH-FDR), ForecastModule (VAR). Declaring them now — after ADR-020 settled
+# the Python floor — avoids pinning blind and discovering a wheel-
+# availability gap later, the same failure mode this thread diagnosed for
+# pandas-ta.
+scipy = "*"
+statsmodels = "*"
+httpx = "*"
+requests = "*"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+pytest-cov = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths       = ["tests"]
+python_files    = ["test_*.py"]
+python_classes  = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short -q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore::UserWarning:polars",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit   = [
+    "src/backtest/*",         # Requires live data
+    "src/scheduler/pipeline_scheduler.py",  # APScheduler optional
+    "*/conftest.py",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass$",
+    "logger\\.debug",
+]
+show_missing  = true
+skip_covered  = false
+fail_under    = 70     # Minimum 70% coverage to pass CI

@@ -1,0 +1,57 @@
+# config/schemas/finnhub_quote.yaml — RISK-4 remediation
+# Bronze Schema Registry entry (GD §3.7) for FinnhubIngester._ingest_symbol()
+# (quote portion). Field shapes verified against Finnhub's documented
+# /quote endpoint response (2026-07): c=current price, d=change,
+# dp=percent change, h=high price OF THE DAY, l=low price of the day,
+# o=open price, pc=previous close, t=Unix timestamp (seconds).
+#
+# UPD Decision Doc v2 §5 (2026-07-11): high_52w/low_52w RENAMED to
+# day_high/day_low. Finnhub's h/l fields are the CURRENT TRADING DAY's
+# high/low, not a 52-week range — the old names were a pre-existing
+# misnomer. GMI_Decision_Document_v2.docx's stated rationale for renaming
+# now ("zero current consumers, zero migration cost") was verified FALSE
+# on direct code inspection during implementation: fundamental_processor.py
+# ::process_quotes() reads these columns from Bronze and writes them
+# straight through into Silver quotes_{date}.parquet — updated in the same
+# change as this rename (see that file's SQL SELECT).
+#
+# Finnhub quirk (documented behavior, not a bug in this ingester): an
+# invalid/delisted/unlisted symbol returns all-zero numeric fields (0.0),
+# not a missing-key or null response — nullable=true below is a defensive
+# stance for schema stability, not an expectation that these are usually
+# null in practice.
+version: "2026-07-11"
+source: finnhub
+domain: fundamental_quote
+expected_columns:
+  - name: symbol
+    type: string
+    nullable: false
+  - name: current_price
+    type: float64
+    nullable: true
+  - name: change
+    type: float64
+    nullable: true
+  - name: pct_change
+    type: float64
+    nullable: true
+  - name: day_high      # RENAMED from high_52w — Finnhub field 'h', current trading day's high
+    type: float64
+    nullable: true
+  - name: day_low       # RENAMED from low_52w — Finnhub field 'l', current trading day's low
+    type: float64
+    nullable: true
+  - name: open
+    type: float64
+    nullable: true
+  - name: prev_close
+    type: float64
+    nullable: true
+  - name: timestamp
+    type: int64
+    nullable: true
+  - name: fetched_date
+    type: string
+    nullable: false
+on_mismatch: quarantine   # GD §3.7 — mismatch -> quarantine, never silent-fail

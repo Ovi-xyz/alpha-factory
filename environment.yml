@@ -1,0 +1,35 @@
+# environment.yml — conda environment untuk M1 ARM64
+#
+# UPD Decision A (GMI_Decision_Document_v3.docx, 2026-07-17): conda's role
+# narrowed to what it already did in practice — interpreter + isolated
+# shell. It no longer declares any Python package directly.
+#
+# Root cause this fixes: conda resolves its whole `pip:` block as ONE
+# atomic pip call. The old block pinned tvdatafeed>=2.0, which does not
+# exist on PyPI under any version (confirmed 404) — that single bad spec
+# poisoned the entire block, so PyYAML, pytest, and everything else in it
+# silently failed to install too (see alpha-factory_logs.txt: "Pip
+# subprocess error... failed / CondaEnvException: Pip failed"). The block
+# also carried alpha-vantage, confirmed unused anywhere in src/ (only the
+# hand-rolled AlphaVantageForexAdapter — requests/httpx based — exists;
+# the third-party `alpha_vantage` PyPI package itself is never imported).
+#
+# Poetry + poetry.lock is now the single source of truth for the full
+# Python dependency graph, for CI and local dev alike (Decision A). The
+# conda-forge "ARM64 native builds" rationale was not actually being
+# exercised by this file — every real package already flowed through the
+# embedded pip: block via PyPI wheels, not conda-forge builds.
+#
+# Setup:
+#   conda env create -f environment.yml
+#   conda activate alpha-factory
+#   poetry install --with dev
+
+name: alpha-factory
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip

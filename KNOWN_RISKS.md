@@ -1,0 +1,774 @@
+# Known Risks
+
+This document tracks risks that are accepted/understood by design rather
+than bugs to be fixed. Each entry states the risk, its blast radius, the
+mitigation currently in place, and what an operator should do if it
+materializes.
+
+---
+
+## RISK-1: tvdatafeed is an unofficial, reverse-engineered API
+
+**Status:** Accepted risk, partially mitigated. Tracked under Production
+Readiness Assessment v1.7.2, **GAP-10** (P3 LOW).
+
+**GD Reference:** GD §9.1 (IDX30 Primary Source), §3.3.2 (Market OHLCV Sources).
+
+### What the risk is
+
+[`tvdatafeed`](https://github.com/StreamAlpha/tvdatafeed) is a third-party
+Python library that talks to TradingView's **private WebSocket API** —
+the same one TradingView's own web/desktop charting client uses
+internally. It is not a published, supported, or rate-limit-documented
+API. Using it:
+
+- Likely violates TradingView's Terms of Service (reverse-engineered
+  access to a private endpoint, not a public developer API).
+- Can **break without warning** if TradingView changes their WebSocket
+  protocol, auth flow, or rate limiting — there is no deprecation notice,
+  changelog, or SLA, because this was never a published integration.
+- Depends on a TradingView account (`TV_USERNAME` / `TV_PASSWORD` in
+  `.env`) that could be rate-limited, flagged, or suspended at
+  TradingView's discretion.
+
+### Blast radius
+
+`tvdatafeed` is the **primary source for IDX30** (30 of 643 instruments,
+GD §9.1) — Indonesian large-cap equities. No other free-tier source in
+the GD §3.4 Data Source Configuration Matrix covers IDX with comparable
+depth:
+
+- **Fallback today:** `YFinanceJKAdapter` (`.JK` suffix) via
+  `ChainedAdapter([TvDatafeedAdapter(), YFinanceJKAdapter()])`
+  (`src/bronze/market_ingester.py`). Coverage is **lower** — some IDX30
+  constituents are thinly covered or entirely absent on yfinance's
+  Indonesian listings.
+- If both `tvdatafeed` AND the yfinance `.JK` fallback fail for a symbol
+  on a given day, that symbol simply has no Bronze OHLCV for that day —
+  it silently drops out of Silver/Gold for that date (existing
+  `ChainedAdapter` behavior, GD §3.5), not a crash, but a coverage gap.
+- A full IDX30 outage degrades: `silver_ohlcv` (idx market subset),
+  `gold_signals` (idx timeframes), `gold_mtf`, `gold_screener` (IDX
+  candidates drop out of ranking), and `gold_correlation` (one fewer
+  asset class in the correlation matrix).
+- Does **not** affect US stocks, forex, commodities, or macro data —
+  those are sourced independently per GD §3.4.
+
+### Mitigation in place
+
+1. **Session resilience** (IDD §6, pre-existing): `TvDatafeedSessionManager`
+   (`src/bronze/tvdatafeed_session.py`) auto-reconnects, retries with
+   exponential backoff, and runs a lightweight health check (`BBCA` 1D
+   bar) before trusting a session. `force_reconnect()` is triggered on
+   empty results, since `tvdatafeed` often fails silently (empty
+   `DataFrame`, not an exception).
+2. **Automatic fallback** (GD §3.5, pre-existing): `ChainedAdapter`
+   transparently falls through to `YFinanceJKAdapter` per-symbol if
+   `tvdatafeed` fails, no manual intervention required.
+3. **Runtime coverage alert (FIX GAP-10, this fix):**
+   `src/utils/health_reporter.py::_check_idx_coverage()` runs as part of
+   the daily `health_report` job. It reads the `_source` / `_symbol`
+   metadata every Bronze write already carries and compares, for each of
+   the 30 IDX symbols, whether today's data came from `tvdatafeed`,
+   fell back to `yfinance_jk`, or is missing entirely. If **more than 5**
+   symbols are degraded (fallback + missing) in a single run, it:
+   - logs a `WARNING` with the literal marker `IDX_PARTIAL_FAILURE`
+     (matching the IDD §6.3 SOP note), the exact counts, and the
+     coverage percentage;
+   - sets `idx_coverage_alert: True` in the health report dict;
+   - prints an IDX coverage line in the terminal health report
+     (`_print_report`);
+   - takes priority in the optional Telegram alert
+     (`send_telegram_alert`) over the generic success message, same tier
+     as the storage and failed-job-count alerts.
+   - `IDX_COVERAGE_ALERT_THRESHOLD = 5` is a module constant in
+     `health_reporter.py` if the threshold needs tuning.
+
+### What this does NOT do
+
+This is a **detection and alerting** mitigation, not a structural fix —
+it does not reduce the underlying probability that TradingView breaks
+`tvdatafeed` access. If that happens, the operator will know the same
+day (via the health report / Telegram alert) instead of discovering a
+silent multi-week IDX data gap later, but IDX coverage will still be
+degraded until either TradingView access is restored or a migration
+(below) happens.
+
+### Operator playbook if `IDX_PARTIAL_FAILURE` fires
+
+1. Check `data/health/pipeline_runs.db` / the terminal health report for
+   the exact `idx_fallback_count` / `idx_missing_count` split.
+2. If `TvDatafeedSessionManager.is_available` is `False`, check whether
+   `TV_USERNAME` / `TV_PASSWORD` are still valid and whether TradingView
+   has flagged/locked the account.
+3. If the account is fine but `tvdatafeed` itself is broken (protocol
+   change), check the upstream repo
+   (`github.com/StreamAlpha/tvdatafeed`) for a fix/fork before assuming
+   a multi-week outage.
+4. Pipeline continues running on the `yfinance_jk` fallback in the
+   meantime — no manual action is required to keep the pipeline moving,
+   only to restore full IDX30 coverage.
+
+### Long-term migration path (not yet implemented)
+
+The assessment's GAP-10 mitigation #3 suggested evaluating a paid/official
+IDX data vendor as a structural fix, since neither Polygon.io nor any
+other source already in the GD §3.4 matrix covers Indonesian equities.
+Candidates worth evaluating before committing engineering time (not
+evaluated in depth here — this is a roadmap note, not a vendor decision):
+
+- **IDX (Indonesia Stock Exchange) official market data feed** — the
+  authoritative source, but typically enterprise-priced and requires a
+  local entity / broker relationship.
+- **Local Indonesian data vendors** (e.g. RTI Business, Stockbit API,
+  various RDT-class feeds) — variable pricing and API quality, would
+  need individual evaluation against GD §3.4's free-tier-first
+  philosophy.
+- **Refinitiv / Bloomberg** — comprehensive but priced well outside this
+  project's free-tier infrastructure budget (GD §1, MacBook Air M1
+  single-operator design).
+
+Any migration here is a **new SourceAdapter implementation**
+(`src/bronze/source_adapter.py`), not an architecture change — per GD
+§17.9's upgrade-path guarantee, swapping `tvdatafeed` for a different
+primary IDX adapter requires no change to Silver, Gold, or the
+Scheduler, as long as the new adapter's output matches the existing
+Bronze OHLCV schema contract (`config/schemas/yfinance_ohlcv.yaml`-style).
+
+---
+
+## RISK-2: DuckDB rejects glob patterns with multiple `**` wildcards — RESOLVED (audited)
+
+**Status:** ✅ **AUDITED — no further instances found.** Originally logged
+as "unaudited elsewhere" during GMI Wave 1 Cycle 3; closed during the
+Bronze+Silver formal audit that immediately followed Cycle 3 (per the
+project's own precedent — see R-4 audit trigger below).
+
+**GD Reference:** GD §17.7 (DuckDB SQL conventions). Discovered during GMI
+Wave 1 Cycle 3 (Task 9.1); resolved during the Cycle 3→4 transition audit.
+
+### What the risk was
+
+`_get_latest_vix()` contained a glob string with **two** `**` wildcards in
+one path. DuckDB's `read_parquet()` rejects this outright
+(`IO Error: Cannot use multiple '**' in one path`), confirmed to predate
+GMI Wave 1 entirely — masked since the function was first written by a
+blanket `except Exception: pass`. Full detail preserved in CHANGELOG.md
+v1.8.0 (GMI-GLD-001).
+
+### Audit performed to close this
+
+1. Comprehensive grep across the **entire** `src/` tree (not the narrower
+   Bronze/Silver-only check done during Cycle 3) for every occurrence of
+   `**` in a string literal — 60+ hits reviewed individually.
+2. Every genuine double-`**`-in-one-string case identified and its read
+   mechanism checked directly: the only two beyond the already-fixed
+   `_get_latest_vix()` are in `ohlcv_processor.py`'s Bronze→Silver PASS 1
+   loop (Layer 1's pre-existing loop, and Cycle 3's new `run_context()`,
+   which deliberately mirrors it) — both use `pl.scan_parquet()`
+   (**Polars**), not DuckDB. Confirmed empirically that Polars tolerates
+   the identical double-`**` string DuckDB rejects — this is a
+   library-specific limitation, not a universal glob-syntax error.
+3. `quality_validator.py` (the largest DuckDB-based consumer of Silver
+   OHLCV globs, 8 call sites) checked specifically: every glob is a
+   **single** `**` — safe per the same empirical DuckDB probe. Its own
+   36 tests were re-run directly and confirmed passing, corroborating
+   these patterns genuinely execute against real fixture data, not just
+   "present in code that happens to never run."
+4. All other `read_parquet($glob...)` call sites across
+   `pit_data.py`, `correlation_matrix.py`, `screener.py`, `eia_ingester.py`,
+   `fred_ingester.py`, `imf_ingester.py`, `finnhub_ingester.py`,
+   `inc_fetch.py`, `fundamental_processor.py`, `macro_processor.py`,
+   `global_rates_processor.py`, `sentiment_processor.py`,
+   `delta_reprocessor.py`, `health_reporter.py`, `active_symbols.py`,
+   `pipeline_dashboard.py` — all use a single `**` per pattern.
+
+### Conclusion
+
+The double-`**`/DuckDB defect class was an **isolated incident**, not a
+systemic pattern — one occurrence, now fixed, with test coverage
+(`test_technical_signals_vix_path.py`) that would catch a regression.
+
+### Residual limitation (honest, not a blocker)
+
+A grep-based audit, even a careful one, cannot prove the *absence* of a
+dynamically-constructed glob that assembles a double-`**` pattern at
+runtime through string concatenation across multiple variables in a way
+no static search would surface. None was found, and the codebase's own
+convention (build the glob as one `str(Path(...) / "**" / ... )`
+expression, always visible at the call site) makes this an unlikely
+failure mode — but "no static search found one" is evidence, not proof.
+If a similarly silent, `except: pass`-masked failure surfaces again in
+the future, this defect class should be the first thing checked.
+
+---
+
+## RISK-3: Pre-existing f-string SQL in `sector_rotation.py` / `views.py` — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED.** Both violations resolved; a permanent,
+AST-based, whole-`src/`-tree regression guard added
+(`TestNoFStringSQLAnywhereInSrc` in `test_fstring_sql_absence.py`) so this
+class of gap — "audited piecemeal, file by file, with each audit's scope
+narrower than the codebase" — cannot recur silently.
+
+**GD Reference:** GD §17.7 (f-string SQL anti-pattern, hard constraint).
+CI/CD Ops Guide v1.7.4, Gate G-2.
+
+### What the risk was, and why the prior audit (GLD-003) missed it
+
+```
+src/gold/sector_rotation.py:193:  f"SELECT regime FROM read_parquet('{regime_path}')"
+src/gold/views.py:182,196:        f"SELECT COUNT(*) FROM {view_name} LIMIT 1"
+```
+
+Two compounding causes, both confirmed by reading the prior audit's own
+test file: (1) `test_fstring_sql_absence.py`'s docstrings **explicitly**
+scoped GLD-003 to specific files, admitting `quality_validator.py`,
+`macro_processor.py`, and most Bronze ingesters were never checked, "to be
+addressed in a formal Silver audit" that never happened; (2) the
+scanner function itself (`_scan_fstring_sql_violations`) only matched
+**triple-quote** f-strings (`f"""`/`f'''`) — both violations use
+single-quote f-strings (`f"..."`), which would not have been caught even
+if the files had been in scope.
+
+### Fix applied
+
+- `sector_rotation.py:193` — straightforward value interpolation, fixed
+  to `$name` parameterized binding (`FIX GMI-AUD-001`).
+- `views.py:182,196` — `view_name` is a SQL **identifier** (a view name),
+  not a value. No SQL engine can bind an identifier via `$name`/`?`
+  parameter substitution — parameterization is defined for values only.
+  The correct fix is a validated, quoted-identifier helper
+  (`_quoted_identifier()`, `FIX GMI-AUD-002`): regex-validates the name
+  against `^[A-Za-z_][A-Za-z0-9_]*$`, wraps it in double-quotes, raises
+  `ValueError` on anything else, and is applied via plain string
+  concatenation (not an f-string). `view_name` in this codebase always
+  originates from iterating the module's own hardcoded `VIEW_DEFINITIONS`
+  dict — never external input — so the guard is defense-in-depth against
+  future refactoring, not a response to a live injection path.
+- **Broader, structural fix**: replaced the old triple-quote-only,
+  targeted-files-only scanner with an AST-based scanner
+  (`_scan_fstring_sql_violations_ast`) that inspects the literal text of
+  every `ast.JoinedStr` node — precise (checks only the f-string's own
+  content, not a character-window that can sweep in unrelated nearby
+  code) and now runs across the **entire** `src/` tree, permanently,
+  covering every file this class of finding previously slipped past.
+  Validated against 7 individually-confirmed false-positive candidates
+  (log messages sitting near genuine parameterized SQL) before being
+  trusted — it correctly ignores all seven.
+
+### Verification
+
+19 new tests added (`test_sector_rotation.py::TestGetActiveRegimeParameterizedQuery`,
+new `test_views.py`, `test_fstring_sql_absence.py::TestNoFStringSQLAnywhereInSrc`).
+Full suite: 1055 passed, 0 failed (up from 1036 pre-audit). CI Gate G-2
+(`grep -rn 'f"SELECT...'`) re-run manually: clean.
+
+---
+
+## RISK-4: `finnhub_ingester.py` writes to Bronze with zero schema validation — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED.** Both write paths (`_ingest_earnings_calendar`,
+`_ingest_symbol`) now gate through `SchemaValidator` before `self.write()`,
+against two new schema YAML files grounded in Finnhub's publicly
+documented API field names and nullability (verified via web search
+against Finnhub's official docs and community SDK type definitions —
+this sandbox still has no live network access to Finnhub itself, but
+that blocker was for *response data*, not documentation, and the schema
+only needs the latter).
+
+**GD Reference:** GD §3.1, §3.7 (unchanged from original entry).
+
+### What was blocking this, and how it was resolved
+
+The original entry correctly identified the real blocker: designing a
+schema from the ingester's own field list alone (`symbol`,
+`earnings_date`, `eps_estimate`, ... ) without verifying against Finnhub's
+actual API contract "risks encoding assumptions as fact." Rather than
+guess, Finnhub's documented `/quote` and `/calendar/earnings` response
+shapes were looked up directly (field names, types, and — critically —
+which fields are nullable) and used as the schema source of truth:
+`config/schemas/finnhub_quote.yaml`, `config/schemas/finnhub_earnings_calendar.yaml`.
+
+### A second fragility found and fixed in the same pass
+
+Designing the schema against real documentation surfaced a problem a
+naive schema-plus-validator wiring would NOT have caught: this ingester
+fetches a 90-day **forward** earnings window, so `eps_actual` is
+genuinely `None` for essentially every row in real operation — the
+*normal* case, not an anomaly. Letting Polars infer column dtypes from
+raw API dict values means an all-`None` column infers Polars' `Null`
+dtype, not `Float64` — which would fail an exact-match schema check on
+the single most common case. A related fragility: `revenueEstimate` can
+arrive as a whole-number JSON integer (no decimal point) or a float
+depending on the value, so an all-integer batch would infer `Int64`
+against a `Float64` schema declaration. Both write paths now explicitly
+`.cast(pl.Float64, strict=False)` / `.cast(pl.Int64, strict=False)` every
+column immediately after DataFrame construction, before validation —
+this makes the schema contract stable regardless of what values happen
+to be present in a given fetch, rather than merely "usually correct."
+
+### What was intentionally NOT touched
+
+`_bronze_finnhub`'s `NotImplementedError` block (job_registry.py) is
+unchanged — this fix hardens `FinnhubIngester` for when that block is
+eventually lifted ("Finnhub Integration" roadmap item), it does not lift
+it.
+
+**UPD v1.10.0:** the `high_52w`/`low_52w` column-naming misnomer mentioned
+below (fixed at the time as "out of scope, no current consumer") was
+revisited in v1.10.0 per `GMI_Decision_Document_v2.docx` §5 and renamed to
+`day_high`/`day_low`. Its stated rationale ("zero current consumers, zero
+migration cost") was verified **false** during that rename:
+`src/silver/fundamental_processor.py::process_quotes()` is a real, live
+consumer that reads these exact columns from Bronze and writes them
+through to Silver unchanged — both the Bronze producer and the Silver
+consumer were updated together. See CHANGELOG.md v1.10.0 for full detail.
+
+### Blast radius — still currently dormant, same as before
+
+Unchanged from the original entry: `_bronze_finnhub`'s unconditional
+`NotImplementedError` means this code path is not reachable through the
+normal pipeline today. The difference is that when it IS lifted, it will
+now validate its own output instead of writing unchecked.
+
+### Verification
+
+40 new tests added across `tests/unit/test_finnhub_ingester.py` (16 —
+first test file this module ever had) and `tests/unit/test_pandas_indicators.py`
+(10, unrelated discovery — see new entry below) plus others from the same
+session. Full suite: 1131 passed, 0 failed.
+
+---
+
+## RISK-5 (NEW): `add_adx()` crashed on every real invocation — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED.** Discovered empirically while adding the first-
+ever test coverage for `technical_signals.py` / `pandas_indicators.py` —
+neither had any prior test file. This was a live, P0, production-breaking
+defect confirmed present in the pristine repo before this session's
+changes (byte-identical diff check against the untouched extraction).
+
+**GD Reference:** GD §5.2.2 (Technical Signal Store schema — `adx`,
+`di_plus`, `di_minus` columns).
+
+### What the risk was
+
+`src/gold/indicators/pandas_indicators.py::add_adx()` renamed pandas-ta's
+output columns via `if lc.startswith("adx"): col_map[c] = "adx"`. The
+installed pandas-ta version (0.4.71b0) returns **four** columns from
+`ta.adx()`, not three: `['ADX_14', 'ADXR_14_2', 'DMP_14', 'DMN_14']`.
+`ADXR` (Average Directional Index **Rating**, a smoothed variant this
+pipeline never asked for) also starts with the substring `"adx"`, so
+`col_map` mapped **both** `ADX_14` and `ADXR_14_2` to the single target
+name `"adx"` — producing a pandas DataFrame with a duplicate column name.
+`pl.from_pandas()` correctly rejects this
+(`ValueError: Pandas dataframe contains non-unique indices and/or column
+names`), meaning **every** real call to `add_adx()` — i.e. every real
+invocation of `gold_signals`, and everything downstream of it
+(`gold_mtf`, `gold_screener`) — raised. Confirmed via direct isolated
+reproduction against the real installed library, not a hypothetical.
+
+### Why this was invisible
+
+`pandas_indicators.py` (`add_adx`, `add_bbands`) had **zero** test
+coverage anywhere in the repo — confirmed via a full grep of `tests/`
+finding no reference to either function under any name, in any file, at
+any point in this project's history. `technical_signals.py`'s own
+`_process_timeframe()`/`run()` had similarly never been tested beyond one
+narrow path fix (`test_technical_signals_vix_path.py`, itself added only
+for the `_get_latest_vix()` bug). No integration or smoke test exercised
+the real Gold indicator pipeline against real `pandas-ta` output.
+
+### Fix
+
+Changed the match from `lc.startswith("adx")` to `lc.startswith("adx_")`
+— matches `ADX_14` (immediately followed by the length-suffix
+underscore) while correctly excluding `ADXR_14_2` (immediately followed
+by `r`, not `_`). `add_bbands()` was audited against the same real
+`pandas-ta` output as part of this investigation and confirmed to have
+**no** analogous collision (`BBB_`/`BBP_` columns match none of the
+upper/mid/lower target patterns) — no change needed there.
+
+### Verification
+
+New `tests/unit/test_pandas_indicators.py` (10 tests, first ever for
+this file) includes a direct regression guard
+(`test_adxr_is_not_silently_used_as_adx`) that would catch this exact
+collision recurring even if a future pandas-ta version adds yet another
+ADX-prefixed column — it computes ADX/ADXR independently via pandas-ta
+and asserts the wrapper's `adx` column matches ADX, not ADXR, rather than
+only checking "no crash." Full suite: 1131 passed, 0 failed.
+
+---
+
+## RISK-6 (NEW): Layer 1 Silver quality/signal checks silently scanned Layer 2 rows — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED** (originally, v1.9.0 — `quality_validator.py`,
+`technical_signals.py`) **— then FOUND TO BE INCOMPLETE and further FIXED
+(v1.10.0 — 6 additional instances)** via CI Gate G-8
+(`GMI_Decision_Document_v2.docx` ADR-022), which was added specifically
+because this defect class had already been found by manual code-reading
+once and the project had no static guard against a recurrence. It found
+one immediately: `pit_data.py`, `correlation_matrix.py`, `screener.py`,
+`views.py`, `delta_reprocessor.py`, `pipeline_dashboard.py` all had the
+identical unfiltered `market_ohlcv/**/...` glob pattern, undiscovered by
+the v1.9.0 audit because that audit's own scope was "the two consumers
+found via the code-reading path that thread happened to follow" (its own
+stated limitation, Checkpoint v3 §11.3) — not an exhaustive one.
+
+**GD Reference:** GD §13.1 (Data Quality Checks), §15.2 (System Health
+Thresholds — coverage/freshness gates); Architecture v2.0 §5.2 (gold_signals
+scope); Architecture Extension v1.0 ADR-003 (VIX/DXY/SPX reclassified out
+of Layer 1 specifically because indicator computation on them is not
+meaningful).
+
+### What the risk was
+
+`quality_validator.py`'s checks and `technical_signals.py`'s Silver read
+both globbed `data/silver/market_ohlcv/**/*.parquet` with **no market
+filter**. Since GMI Cycle 3 added Layer 2 context OHLCV under the same
+root (`market_ohlcv/context/...`), every one of these globs was silently
+also scanning Layer 2 rows. Confirmed to cause three separate, concrete
+problems (see `src/utils/silver_scope.py` module docstring for the full
+empirical reproduction, now also captured as permanent regression tests):
+
+1. `quality_validator.py::_check_coverage` — Layer 2 symbols inflated
+   `COUNT(DISTINCT symbol)` against a Layer-1-only denominator
+   (`get_loader().count()`), letting coverage% mask a real Layer 1 drop
+   below the 95% gate.
+2. `quality_validator.py::_check_freshness` — a single fresh Layer 2
+   anchor (e.g. VIX) hid pipeline-wide Layer 1 staleness, since
+   `MAX(timestamp)` spanned both layers combined.
+3. `technical_signals.py::_process_timeframe` — RSI/MACD/ADX/BBands were
+   being computed for VIX, DXY, 13 global indices, 25 ETFs, and 8
+   commodity context anchors as if they were tradeable candidates,
+   directly contradicting ADR-003's own stated rationale for
+   reclassifying VIX/DXY out of Layer 1 in the first place.
+
+### Fix
+
+New shared utility `src/utils/silver_scope.py` (`layer1_globs()`,
+`context_glob()`) derives the Layer 1 market list from `InstrumentLoader`
+rather than a hardcoded/unfiltered glob, and is now used by both
+`quality_validator.py` (5 existing checks re-scoped) and
+`technical_signals.py` (Silver read re-scoped). A full parallel Layer 2
+check suite (`_check_context_*`, 6 checks) was added to
+`quality_validator.py` at **WARNING** level — deliberately not CRITICAL,
+since no Gold-layer consumer of Layer 2 Silver OHLCV exists yet
+(CrossAssetEngine is Cycle 4, not yet built); blocking the entire Gold
+layer over a Layer 2 anchor's data hiccup today would over-couple an
+unrelated future consumer's readiness to Layer 1's gate. `technical_signals.py`
+also gained the Architecture v2.0 §5.2 `active_ohlcv` filter
+(`ActiveSymbolsResolver.load_ohlcv()`) that had never been implemented,
+with graceful fallback to the full Layer-1-scoped universe when
+unavailable.
+
+### Verification
+
+Both masking bugs reproduced as permanent regression tests (not just
+fixed and trusted) — `test_quality_validator.py::TestQVL2MaskingBugsFixed`
+and `test_technical_signals.py::TestProcessTimeframeLayer1Scoping`. New
+`test_silver_scope.py` (11 tests) covers the shared utility directly,
+including a guard against ever reintroducing a double-`**` glob (the
+RISK-2 defect class). Full suite: 1131 passed, 0 failed.
+
+### v1.10.0 — Six additional instances found and fixed (Gate G-8)
+
+Severity varied materially across the six:
+
+- **`screener.py::_check_data_freshness`** — **P1, genuine correctness
+  bug**, the same masking-bug shape as the original `_check_coverage`
+  finding: a freshness GATE whose entire purpose is blocking the
+  screener on stale Layer 1 data could be silently satisfied by fresh
+  Layer 2 anchors.
+- **`views.py`** — **highest blast radius**: these three DuckDB views are
+  the documented Interface Contract (GD §0.4) for the Trading Engine, an
+  external consumer this pipeline cannot audit or coordinate with. A
+  Trading Engine querying "give me OHLCV" had no way to know VIX/DXY/an
+  ETF could appear as if tradeable — precisely what ADR-003 reclassified
+  them out of Layer 1 to prevent. The first fix attempt for this file was
+  itself wrong (baked a fixed 4-market SQL list at Python import time,
+  which broke immediately against any environment without data in all 4
+  markets simultaneously — DuckDB's `read_parquet()` list argument raises
+  for the whole query if even one entry matches zero files) — corrected
+  to resolve the glob list fresh at connection-creation time.
+- **`pit_data.py`, `correlation_matrix.py`, `delta_reprocessor.py`** —
+  lower severity: each already applied an explicit per-symbol or
+  `active_symbols`-filtered `WHERE` clause downstream, so Layer 2 rows
+  were being scanned unnecessarily but not silently miscounted in an
+  aggregate. Still fixed for consistency and to close Gate G-8 cleanly.
+- **`pipeline_dashboard.py`** — lowest severity, a display-only
+  diagnostic; split into separate Layer 1 / Layer 2 rows as a genuine
+  accuracy improvement for the operator, not just gate compliance.
+
+Full detail, including the corrected views.py design and all new tests,
+is in CHANGELOG.md v1.10.0. Full suite after all six fixes plus the new
+Gate G-8 scanner and its own tests: 1188 passed, 0 failed.
+
+---
+
+## RISK-7 (NEW): pandas-ta's entire 0.3.x line removed from PyPI — RESOLVED (migrated to pandas-ta-classic)
+
+**Status:** ✅ **FIXED** via migration to `pandas-ta-classic`
+(`GMI_Decision_Document_v2.docx` ADR-020, v1.10.0). Recorded here as a
+permanent historical note per that ADR's own requirement — this is
+exactly the kind of "silent upstream break with no changelog or SLA"
+this document exists to track (see RISK-1's framing for the same
+category of risk applied to a different dependency).
+
+### What happened
+
+At some point before July 2026, PyPI removed the *entire* `pandas-ta`
+0.3.x release line — including `0.3.14`, the version this project's
+`pyproject.toml`/`environment.yml` had declared as the floor since the
+original Grand Design. Only two releases remained on the index,
+`0.4.67b0` and `0.4.71b0`, both explicitly prerelease-tagged and both
+`requires_python >=3.12`. This broke CI's dependency-install step
+entirely — not a test failure, a resolution failure, meaning nothing
+downstream could even be verified.
+
+This was a **double barrier**, not a single Python-version mismatch:
+confirmed empirically that even on Python 3.12, the exact declared
+constraint (`pandas-ta>=0.3.14`) still failed to resolve, because `pip`
+excludes prerelease versions from an explicit `>=` floor specifier by
+default. Only a bare unconstrained install, `--pre`, or a prerelease-
+tagged floor (e.g. `>=0.4.67b0`) would have resolved it.
+
+### Why this matters beyond "CI was red"
+
+Neither `KNOWN_RISKS.md` (this file, before this entry) nor
+`CHANGELOG.md` mentioned this anywhere prior to its discovery — it was
+found only when a live CI failure log was supplied directly and
+diagnosed from first principles (direct PyPI JSON API queries against
+`https://pypi.org/pypi/pandas-ta/json`), not from any existing
+documentation. A `pyproject.toml`/`environment.yml` dependency pin is
+only as durable as its upstream's continued existence on PyPI — this is
+the first time that assumption broke for this project, and is unlikely
+to be the last for *some* dependency eventually.
+
+### Fix
+
+Migrated to `pandas-ta-classic`, a community-maintained continuation of
+the exact same abandoned 0.3.x lineage (`0.3.14b1` → ... → `0.6.52`),
+with genuine stable releases and a Python floor (`>=3.9`/`>=3.10`)
+compatible with this project's stated `>=3.11` floor — which was **held
+at 3.11**, not bumped to 3.12, specifically to avoid quietly falsifying
+the project's own "3.11+" claim everywhere it's written (a distinct,
+smaller version of the same "stated vs. actual" gap this migration was
+fixing in the first place). Verified directly (not assumed): the
+installed `pandas-ta-classic` 0.6.52's `ta.adx()` emits
+`['ADX_14', 'DMP_14', 'DMN_14']` — no `ADXR` column at all, meaning the
+RISK-5 collision below cannot occur in this fork; `ta.bbands()` emits the
+same column ordering the existing wrapper already assumes.
+
+### What to watch for
+
+`pyproject.toml`/`environment.yml` and `poetry.lock` (new in v1.10.0)
+now all reference `pandas-ta-classic`, not `pandas-ta`. Do not reintroduce
+`pandas-ta` as a dependency without re-verifying its PyPI state first —
+this exact failure mode (declared floor version silently vanishes from
+the index) has now happened once for this project and should not be
+assumed impossible for any other pinned dependency either.
+
+---
+
+## RISK-8 (NEW): `atomic_write_parquet` never imported in `fundamental_processor.py` — RESOLVED (fixed, FIX FP-AIO-001)
+
+**Status:** ✅ **FIXED.** Discovered, like RISK-5 before it, as a side
+effect of writing the first-ever real-data (non-empty) test for a
+function that had previously only ever been tested against the
+graceful-no-data path.
+
+**GD Reference:** Supplementary Design G2 (atomic write pattern
+requirement); GD §3.1 (Bronze immutability — the pattern this guards).
+
+### What the risk was
+
+`src/silver/fundamental_processor.py` calls `atomic_write_parquet()` at
+two sites (`process_earnings()`, `process_quotes()`) — the standard
+tempfile+`os.replace()` atomic-write pattern used throughout Silver/Gold
+— but **never imports it**. Every other module using this function
+(`technical_signals.py`, `mtf_alignment.py`, `correlation_matrix.py`,
+`screener.py`, `sector_rotation.py`, `macro_regime.py`,
+`schema_validator.py`, `forex_cache.py`, `base_ingester.py`,
+`backtest/engine.py`) correctly imports it from `src.utils.atomic_io`;
+this file simply omitted the import. Every real (non-empty) invocation of
+either method raised `NameError` — confirmed via direct reproduction
+before writing the fix.
+
+### Why this was invisible
+
+Both methods already had test coverage — `test_process_earnings_graceful_no_bronze`
+and `test_process_quotes_graceful_no_bronze` — but both exercise only the
+"no Bronze data found" path, which returns early *before* reaching the
+`atomic_write_parquet()` call. Neither method had ever been tested with
+real, non-empty data, in this project's history. Identical root-cause
+shape to RISK-5 (`add_adx()`): a real invocation path with test coverage
+that never actually reaches the code doing the real work.
+
+### Fix
+
+`from src.utils.atomic_io import atomic_write_parquet` added to the
+module's import block.
+
+### Verification
+
+Two new tests — `test_process_quotes_reads_day_high_day_low` and
+`test_process_earnings_writes_real_data` — are the first-ever tests for
+either method against real, non-empty Bronze fixture data, closing the
+exact test gap that let this hide. Full suite: 1188 passed, 0 failed.
+
+---
+
+`active_symbols.py` (2 call sites), `context_anchors.py` (1 call site —
+MOVED GMI-CTX-001 from active_symbols.py's former `resolve_context()`,
+which was one of the original 3; the extraction redistributed this note's
+count, it did not create or remove a call site), and
+`global_rates_processor.py` (1 call site) implement the atomic
+tempfile+`os.replace` write pattern **by hand**, duplicating (correctly —
+verified atomic) rather than calling the shared `atomic_write_parquet()`
+utility in `atomic_io.py`. Still 4 sites total. Not a correctness bug —
+each site was individually checked and is genuinely POSIX-atomic — but a
+future change to the shared utility (e.g. a bug fix or added logging)
+would need manual replication across these 4 sites to stay in sync. Worth
+consolidating during a future Silver-layer pass; not urgent enough to
+touch now.
+
+---
+
+## RISK-9 (NEW): Repo had no `.gitignore` — runtime artifacts and a binary pickle were tracked in git — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED.** Discovered during a routine pre-implementation
+audit of the live repo (fresh clone from `github.com/Ovi-xyz/alpha-factory`),
+not while working on any specific ADR — general security hygiene check.
+
+**GD Reference:** None directly — this is repo hygiene, not a pipeline
+architecture concern. Closest precedent: GD §3.1 immutability (Bronze
+append-only) is about pipeline data lineage, not source-control hygiene,
+but the same "don't let mutable runtime state masquerade as a versioned
+artifact" instinct applies.
+
+### What the risk was
+
+The repository had **no `.gitignore` at any point in its 3-commit
+history** (confirmed via `git log --all --name-only --diff-filter=A`).
+Two categories of file were tracked as a result:
+
+1. Five `.DS_Store` files (macOS Finder metadata) — cosmetic, no security
+   implication, just noise.
+2. Three genuine runtime artifacts under `data/health/`:
+   `hmm_regime_model.pkl` (a pickled `sklearn` `StandardScaler` +
+   `GaussianHMM`), `pipeline_runs.db` and `progress.db` (SQLite databases
+   written by `PipelineLogger`/`ProgressCheckpoint` on every pipeline
+   run).
+
+An empirical secret scan (`git log -p --all -- .env`, plus a regex sweep
+for `api_key=`/`secret=`/`password=`/`token=` patterns across every
+tracked file in every commit) found **zero credentials or secrets** —
+this is not a leaked-secret incident. The concrete risk is narrower but
+still real: a binary pickle in version control is a standing
+deserialization risk (`pickle.load()`/`joblib.load()` can execute
+arbitrary code if the file is ever swapped or tampered with — it doesn't
+get the same line-by-line code review every `.py` change does), and it
+was already observably drifting: loading the committed
+`hmm_regime_model.pkl` under this session's `scikit-learn` version
+produced `InconsistentVersionWarning: Trying to unpickle estimator
+StandardScaler from version 1.8.0 when using version 1.9.0`. The two
+SQLite files are pure runtime state — every local `pytest` run mutates
+them, so the "correct" committed content is not even a well-defined
+concept.
+
+### Fix
+
+- `.gitignore` added (repo's first) — covers secrets (`.env` + variants,
+  `*.pem`/`*.key`), Python/Poetry caches, `data/` (all pipeline runtime
+  output — GD §7 estimates ~73-117 GB total, far too large for version
+  control regardless of the tracking question, and it's regenerable by
+  design), and OS/editor metadata.
+- The 5 `.DS_Store` files and 3 `data/health/*` artifacts were removed
+  from tracking via `git rm --cached` (files remain on disk locally —
+  this is untrack-going-forward, not deletion).
+- **Deliberately NOT a history rewrite** (`git filter-repo` / `BFG` /
+  force-push): rewriting history is the correct remedy when a genuine
+  secret was committed, since removal-only leaves it recoverable from any
+  clone's reflog/object store. Here, the empirical scan confirmed no
+  secret was ever present, so a rewrite would only add risk (force-push
+  disruption, invalidated collaborator clones) for zero actual benefit.
+
+### Verification
+
+`git check-ignore -q <path>` exit-code-verified for both directions post-fix:
+new files under `data/` are now correctly ignored (exit 0), while
+`poetry.lock`, `.env.example`, and every tracked config/source file
+remain un-ignored (exit 1). Full suite re-run from a state with the
+runtime artifacts deleted entirely (simulating a fresh clone): 1188
+passed, 0 failed — confirms nothing in the pipeline actually depends on
+these files pre-existing (each module creates its own directory tree via
+`mkdir(parents=True, exist_ok=True)` on first write).
+
+---
+
+## RISK-10 (NEW): Architecture v2.1 Addendum's own commodity taxonomy tables disagree with each other — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED.** Found empirically while implementing Decision B
+Step 1 (GMI_Decision_Document_v3.docx) — specifically, by a new test
+(`test_no_orphaned_commodity_subcategory`) that failed with a `KeyError`
+against the very weight matrix being built from the same source
+document.
+
+**GD Reference:** Architecture v2.1 Addendum §7.1 (commodity_subcategory
+enum definition) and §8.2 (REGIME_SECTOR_WEIGHTS key-name table) — both
+in the same document, describing the same 5-way taxonomy, disagreeing
+with each other.
+
+### What the risk was
+
+Addendum §7.1 defines `commodity_subcategory`'s valid enum values as:
+`energy`, `precious_metals`, `base_metals`, `agricultural`, `bulks`.
+Addendum §8.2's own REGIME_SECTOR_WEIGHTS key-rename table lists the
+five replacement keys as: `commodity_energy`, `commodity_precious`,
+`commodity_base_metals`, `commodity_agricultural`, `commodity_bulks`.
+Four of five keys are the mechanical `f"commodity_{subcategory}"` formula
+applied literally; the fifth (`commodity_precious`) is not —
+`precious_metals` mechanically produces `commodity_precious_metals`, not
+`commodity_precious`. This is an internal inconsistency within a single
+document, not a discrepancy between two different documents in the
+authority hierarchy.
+
+Left unfixed, this would have caused a silent, not a loud, failure:
+`sector_rotation.run()`'s lookup is `weights.get(key, 1.0)` — a missing
+key falls back to a neutral 1.0 weight rather than raising. AU and AG
+(the two `precious_metals` Layer 1 instruments) would have silently
+received neutral weighting in every regime, including RISK_OFF where the
+correct weight (1.4, precious-metals-as-safe-haven overweight) is one of
+the more consequential values in the entire matrix.
+
+### Fix
+
+Resolved in favor of the mechanical formula: `commodity_precious` renamed
+to `commodity_precious_metals` throughout `REGIME_SECTOR_WEIGHTS` (all 5
+regimes). This was chosen over the alternative (change §7.1's enum value
+instead) because 4 of 5 keys already follow the formula exactly — making
+the formula the internally-consistent choice — and because the enum value
+(`commodity_subcategory` in `instruments.yaml`) is the more
+consumer-facing contract of the two, better left stable.
+
+### Verification
+
+New permanent regression guard —
+`test_subcategory_to_weight_key_map_matches_sector_rotation_keys`
+(`test_validate_instruments.py`) — independently cross-checks
+`validate_instruments.py`'s own `COMMODITY_SUBCATEGORY_TO_WEIGHT_KEY` map
+against `sector_rotation.py`'s live `REGIME_SECTOR_WEIGHTS` keys across
+all 5 regimes, specifically designed to catch this exact class of
+cross-module naming drift again if it recurs. Full suite: 1204 passed, 0
+failed.
+
+---
+
+*Last updated: GMI Decision Document v3 implementation (Decision A +
+Decision B Step 1), July 2026.
+Prior entry: GMI Decision Documents v1 & v2 implementation, July 2026.
+Earlier: Bronze+Silver formal audit following GMI Wave 1 Cycle 3, July 2026.
+Earlier still: Production Readiness Assessment v1.7.2 remediation, June 2026.*

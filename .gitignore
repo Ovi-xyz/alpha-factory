@@ -1,0 +1,95 @@
+# .gitignore — Data Platform (Alpha Factory)
+#
+# ADD (2026-07-17, GMI_Decision_Document_v3.docx implementation thread):
+# repo sebelumnya TIDAK memiliki .gitignore sama sekali. Audit empiris
+# (git log --all --name-only --diff-filter=A) menemukan 5 file .DS_Store
+# dan 3 runtime artifact (data/health/*.pkl, *.db) sudah ter-commit di
+# ketiga commit yang ada. TIDAK ditemukan secret/API key/credential apapun
+# di working tree ATAU history manapun (git log -p --all -- .env kosong;
+# regex scan untuk api_key=/secret=/password=/token= di semua tracked
+# file: nihil). Remediasi di bawah karena itu adalah "stop tracking going
+# forward" (git rm --cached, riwayat commit tetap utuh) — BUKAN git
+# history rewrite. Rewrite baru dibutuhkan kalau secret ASLI pernah
+# ter-commit, yang terbukti tidak terjadi di repo ini.
+
+# ── Secrets — JANGAN PERNAH commit .env asli ──────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+*_credentials.json
+service-account*.json
+
+# ── Python bytecode & cache ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ── Packaging / build artifacts ───────────────────────────────────────────────
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Poetry ─────────────────────────────────────────────────────────────────────
+# poetry.lock TIDAK di-ignore — single source of truth dependency graph
+# (Decision A, GMI_Decision_Document_v3.docx). Wajib tetap di-commit.
+
+# ── Testing / coverage / lint caches ───────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+pytest_output.txt
+changed_files.txt
+
+# ── Pipeline runtime data ──────────────────────────────────────────────────────
+# GD §3.1: Bronze/Silver/Gold output hidup di disk, bukan di git — volume
+# terlalu besar untuk version control (Grand Design §7 estimasi total
+# ~73-117 GB) dan bersifat mutable/regenerable at runtime. Setiap modul
+# menulis via mkdir(parents=True, exist_ok=True) + atomic write saat first
+# run — tidak ada kode yang bergantung pada file-file ini pre-exist di repo.
+#
+# UPD (2026-07-17): sebelumnya data/health/pipeline_runs.db, progress.db,
+# dan hmm_regime_model.pkl SUDAH ter-commit. Di-untrack sengaja: dikonfirmasi
+# empiris bahwa satu kali test run lokal langsung memodifikasi kedua file
+# .db itu, dan hmm_regime_model.pkl SUDAH memicu
+# "InconsistentVersionWarning: Trying to unpickle estimator StandardScaler
+# from version X when using version Y" saat test suite dijalankan — gejala
+# nyata dari commit sebuah pickle binary yang drift dari environment yang
+# meng-generate-nya. Terlepas dari drift itu, binary pickle blob apapun di
+# source control adalah risiko deserialization tersendiri: pickle.load()/
+# joblib.load() bisa mengeksekusi kode arbitrary jika file pernah tertukar
+# atau dimodifikasi pihak lain — tidak diaudit-ulang setiap PR seperti kode
+# Python biasa.
+data/
+
+# ── OS / editor metadata ────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.log

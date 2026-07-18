@@ -1,0 +1,25 @@
+# pipeline.yaml — Pipeline configuration
+version: "1.2"
+
+# Coverage thresholds (GD §13.2)
+coverage:
+  min_symbol_pct: 95        # Stop screener if < 95% symbols fresh
+  forex_null_alert: 5       # Alert if > 5 forex pairs null
+
+# DuckDB settings (GD §5.3 + §10.2)
+duckdb:
+  memory_limit_gb: 3
+  threads: 4
+
+# ProgressCheckpoint thresholds (G6)
+checkpoint:
+  min_coverage_pct: 95
+
+# Data paths
+paths:
+  bronze: data/bronze
+  silver: data/silver
+  gold:   data/gold
+  health: data/health
+  quarantine: data/quarantine
+  sentinels:  data/.sentinels

@@ -1,0 +1,15 @@
+# G3 §9.2 Supplementary Design: _tz_hint formal Bronze schema extension
+version: "1.0"
+extends: bronze_ohlcv
+extension_columns:
+  - name: _tz_hint
+    type: string
+    nullable: true
+    description: >
+      Timezone string dari source jika tersedia.
+      Contoh: 'America/New_York' (yfinance US stocks),
+              'Asia/Jakarta' (tvdatafeed IDX),
+              null jika source tidak menyediakan tz info.
+    scope: Bronze only — TIDAK diteruskan ke Silver.
+    silver_handling: OHLCVProcessor menggunakan _tz_hint untuk
+                     konversi ke UTC. Kolom di-drop setelah konversi.

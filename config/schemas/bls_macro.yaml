@@ -1,0 +1,63 @@
+# config/schemas/bls_macro.yaml — Bronze Schema Registry (GD §3.7)
+#
+# GAP-3 fix (Production Readiness Assessment v1.7.2).
+#
+# Producer : src/bronze/bls_ingester.py (BLSIngester._fetch_batch)
+# Consumer : src/silver/macro_processor.py (MacroProcessor.process_bls)
+# Cadence  : Monthly (G5: CPI day 10-15, NFP first Friday)
+#
+# IMPORTANT — this schema covers ONLY the native BLS API fetch path
+# (_fetch_batch, used when BLS_API_KEY is set). When BLS_API_KEY is absent,
+# BLSIngester._run_via_fred_mirror() delegates entirely to FREDIngester,
+# which writes under the FRED domain and is validated by fred_macro.yaml
+# instead — no Bronze data is ever written to data/bronze/macro/bls/ in
+# that fallback path, so there is nothing for this schema to validate then.
+#
+# Columns reflect _fetch_batch()'s row dict construction BEFORE
+# BronzeIngester.write_macro() appends _source / _ingested_at / _series_id
+# metadata.
+#
+# Field notes:
+#   observation_date — built as an f-string ("YYYY-MM-01"), NOT cast to a
+#                       date type before pl.DataFrame(rows) — stays string.
+#                       Differs from FRED's native Date column; Silver
+#                       MacroProcessor's PIT filter casts both with
+#                       CAST(... AS DATE) so this is handled downstream.
+#   value             — nullable: true. BLS_RELEASE_LAG_DAYS template note
+#                        (assessment GAP-3 fix spec): BLS sometimes
+#                        republishes 0 or a null value during revisions.
+#   period            — BLS period code ("M01".."M12", "Q1".."Q4", "A01").
+#                        FIX BLS-1: only this field (not periodName) is used
+#                        to build observation_date, so it is load-bearing —
+#                        not nullable.
+#   year              — int64, always present (item["year"] from API).
+
+version: "2026-06"
+source: bls
+domain: macro
+on_mismatch: quarantine
+
+expected_columns:
+  - name: series_id
+    type: string
+    nullable: false
+
+  - name: observation_date
+    type: string
+    nullable: false
+
+  - name: value
+    type: float64
+    nullable: true   # BLS kadang release 0 atau null untuk revisi
+
+  - name: period
+    type: string
+    nullable: false   # FIX BLS-1: load-bearing for observation_date construction
+
+  - name: year
+    type: int64
+    nullable: false
+
+  - name: release_date
+    type: string
+    nullable: false   # FIX BLS-2: RELEASE_LAG_DAYS proxy, always computed

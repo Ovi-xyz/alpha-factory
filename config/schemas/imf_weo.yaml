@@ -1,0 +1,58 @@
+# config/schemas/imf_weo.yaml — Bronze Schema Registry (GD §3.7)
+#
+# GAP-3 fix (Production Readiness Assessment v1.7.2).
+#
+# Producer : src/bronze/imf_ingester.py (IMFIngester._fetch_indicator)
+# Consumer : (none today — IMF WEO is ingested but not yet read by any
+#            Silver/Gold module; get_latest_value() is a standalone utility.
+#            This schema still closes the GD §3.7 gate so a future IMF
+#            consumer inherits quarantine protection from day one, and so
+#            a silent IMF datamapper API change doesn't go unnoticed in the
+#            interim.)
+# Cadence  : Semi-annual (April + October WEO release)
+#
+# Columns reflect _fetch_indicator()'s row dict construction BEFORE
+# BronzeIngester.write_macro() appends _source / _ingested_at / _series_id
+# metadata.
+#
+# Field notes:
+#   series_id    — IMF indicator code (e.g. "NGDP_RPCH"), NOT the
+#                  human-friendly name (spec["name"], e.g. "gdp_growth")
+#                  used only for the write_macro() Bronze metadata column.
+#   value        — nullable: false here because _fetch_indicator() already
+#                  filters `if value is None: continue` before appending —
+#                  a null value never reaches the row dict.
+#   release_date — NOT nullable: FIX IMF-3's _imf_weo_release_date() always
+#                  returns a date (falls back to run_date if no WEO
+#                  publication date has passed yet).
+#   source       — literal "imf_weo" set unconditionally in every row.
+
+version: "2026-06"
+source: imf
+domain: macro
+on_mismatch: quarantine
+
+expected_columns:
+  - name: series_id
+    type: string
+    nullable: false
+
+  - name: country
+    type: string
+    nullable: false
+
+  - name: observation_date
+    type: string
+    nullable: false
+
+  - name: value
+    type: float64
+    nullable: false   # FIX: _fetch_indicator() already drops None values
+
+  - name: release_date
+    type: string
+    nullable: false   # FIX IMF-3: WEO publication-date proxy, always computed
+
+  - name: source
+    type: string
+    nullable: false   # literal "imf_weo"

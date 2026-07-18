@@ -1,0 +1,52 @@
+# config/schemas/eia_oil.yaml — Bronze Schema Registry (GD §3.7)
+#
+# GAP-3 fix (Production Readiness Assessment v1.7.2).
+#
+# Producer : src/bronze/eia_ingester.py (EIAIngester._fetch_series + run())
+# Consumer : src/silver/macro_processor.py (MacroProcessor.process_eia)
+# Cadence  : Weekly Wednesday (G5: run_on_weekdays=[2])
+#
+# Columns reflect _fetch_series()'s row dict PLUS the two columns run()
+# appends via with_columns() (series_name, unit) before write_macro() is
+# called — both are present on every Bronze EIA file.
+#
+# Field notes:
+#   series_id   — the RAW EIA series id (e.g. "PET.WCRSTUS1.W"), NOT the
+#                 human-friendly spec["name"] (e.g. "us_crude_stocks") used
+#                 only for the write_macro() Bronze metadata column. Keep
+#                 this distinction in mind if this schema is ever extended.
+#   value       — nullable: false. _fetch_series() already does
+#                 `if value is None: continue` before appending a row.
+#   release_date — EIA-3: deliberately NOT a RELEASE_LAG_DAYS proxy like
+#                 FRED/BLS/BEA — PET.* series release same-day (Wednesday
+#                 10:30am ET), so run_date IS the correct release_date here.
+
+version: "2026-06"
+source: eia
+domain: commodity
+on_mismatch: quarantine
+
+expected_columns:
+  - name: observation_date
+    type: string
+    nullable: false
+
+  - name: value
+    type: float64
+    nullable: false   # FIX: _fetch_series() already drops None values
+
+  - name: series_id
+    type: string
+    nullable: false   # raw EIA series id, e.g. "PET.WCRSTUS1.W"
+
+  - name: release_date
+    type: string
+    nullable: false   # EIA-3: run_date is an accurate same-day proxy
+
+  - name: series_name
+    type: string
+    nullable: false   # appended in EIAIngester.run() before write_macro()
+
+  - name: unit
+    type: string
+    nullable: false   # appended in EIAIngester.run() before write_macro()

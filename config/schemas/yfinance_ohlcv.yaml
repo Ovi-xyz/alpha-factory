@@ -1,0 +1,21 @@
+# config/schemas/yfinance_ohlcv.yaml — Bronze Schema Registry (GD §3.7)
+version: "2024-01"
+source: yfinance
+on_mismatch: quarantine
+
+expected_columns:
+  - name: open
+    type: float64
+    nullable: false
+  - name: high
+    type: float64
+    nullable: false
+  - name: low
+    type: float64
+    nullable: false
+  - name: close
+    type: float64
+    nullable: false
+  - name: volume
+    type: int64
+    nullable: true   # some instruments have null volume (indices)

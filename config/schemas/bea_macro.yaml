@@ -1,0 +1,61 @@
+# config/schemas/bea_macro.yaml — Bronze Schema Registry (GD §3.7)
+#
+# GAP-3 fix (Production Readiness Assessment v1.7.2).
+#
+# Producer : src/bronze/bea_ingester.py (BEAIngester._fetch_nipa)
+# Consumer : src/silver/macro_processor.py (MacroProcessor.process_bea)
+# Cadence  : Quarterly (G5: run_on_months=[1,4,7,10], last week)
+#
+# Same fallback caveat as BLS: when BEA_API_KEY is absent,
+# BEAIngester._run_via_fred_mirror() delegates to FREDIngester (validated
+# by fred_macro.yaml) and nothing is written to data/bronze/macro/bea/.
+# This schema only governs the native NIPA fetch path (_fetch_nipa).
+#
+# KNOWN DATA-QUALITY NOTE (surfaced while fixing GAP-1, not yet remediated —
+# tracked for the Gold layer formal audit, GAP-7): _fetch_nipa() pulls every
+# LineNumber row of a NIPA table (e.g. Table 1.1.6 Real GDP) with no row
+# filter, so a single (series_id, observation_date) pair can have multiple
+# rows with different `unit` / `line_description` and NOT comparable
+# `value` magnitudes (e.g. a %-change row next to a $-level row). This
+# schema validates column shape only — it intentionally does NOT attempt to
+# constrain `value` to one unit, since BEA's API genuinely returns mixed
+# rows by design here.
+#
+# Field notes:
+#   value — nullable: true. _fetch_nipa() explicitly does
+#           `float(val_str) if val_str else None` — BEA's DataValue field
+#           can be an empty string for suppressed/withheld cells.
+
+version: "2026-06"
+source: bea
+domain: macro
+on_mismatch: quarantine
+
+expected_columns:
+  - name: series_id
+    type: string
+    nullable: false
+
+  - name: table_name
+    type: string
+    nullable: false
+
+  - name: line_description
+    type: string
+    nullable: false   # BEA always returns this field, even if empty string
+
+  - name: observation_date
+    type: string
+    nullable: false
+
+  - name: value
+    type: float64
+    nullable: true   # FIX BEA: DataValue can be "" for suppressed cells
+
+  - name: unit
+    type: string
+    nullable: false
+
+  - name: release_date
+    type: string
+    nullable: false   # FIX BEA-2: RELEASE_LAG_DAYS proxy, always computed
