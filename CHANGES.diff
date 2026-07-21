@@ -1,0 +1,193 @@
+--- a/CHANGELOG.md (v1.11.0)
++++ b/CHANGELOG.md (v1.11.1)
+@@ -1,5 +1,107 @@
+ # CHANGELOG — Data Platform
+ 
++## v1.11.1 — ADR-026: Poetry/Conda Environment Reuse Guard (Juli 2026)
++
++Dokumen referensi: `ADR-026_poetry_conda_environment.md`
++
++Total: **1 gap ditutup** (Poetry-conda env reuse tidak pernah diverifikasi
++secara eksplisit) + **1 bug ditemukan dan diperbaiki di dalam ADR-026
++sendiri** (script `--pre` flag tidak pernah di-declare di argparse,
++padahal dipanggil eksplisit oleh Makefile pada ADR yang sama) | **1214
++passed / 0 failed / 0 error** (Δ +10 dari v1.11.0 — 1204). Tooling/docs
++only — tidak ada perubahan di `src/`, tidak ada perubahan CI.
++
++Konteks: `ADR-026_poetry_conda_environment.md` berstatus **"decided, not
++implemented"** pada saat penulisan. Setiap klaim dalam dokumen tersebut
++diverifikasi ulang secara empiris terhadap live repository (fresh clone
++dari `github.com/Ovi-xyz/alpha-factory`, commit `0048382`, single
++squashed commit tanpa tag) sebelum diimplementasikan: commit history,
++`pyproject.toml` version, absennya `poetry.toml`, `Makefile` yang
++menjalankan `python`/`pytest` bare (tanpa prefix `poetry run`), dan kedua
++bug `README.md` (conda branch berhenti di `conda activate` tanpa chain ke
++`poetry install --with dev`; `poetry shell` dikonfirmasi mati di Poetry
++2.4.1 — direproduksi langsung: *"Since Poetry (2.0.0), the shell command
++is not installed by default"*).
++
++Mekanisme inti ADR ini — bahwa Poetry secara default (`virtualenvs.create
++= true`, tidak dimodifikasi di manapun di repo ini) sudah mendeteksi dan
++reuse conda env aktif via `CONDA_PREFIX`, bukan membuat virtualenv
++terpisah — diverifikasi langsung: `poetry env info --path` di dalam
++`CONDA_PREFIX` yang disimulasikan mengembalikan path `CONDA_PREFIX`
++tersebut, bukan cache dir Poetry sendiri.
++
++### ADD ADR-026 [scripts/check_poetry_env.py] — Diagnostic pre/post check
++
++Script baru, stdlib-only (`--pre` regex-parse `environment.yml`'s
++`name:` field, bukan `import yaml`, karena `--pre` harus jalan SEBELUM
++PyYAML terinstall). Dua mode:
++
++- `--pre`: assert conda env dengan nama persis sesuai `environment.yml`
++  sedang aktif (`CONDA_PREFIX` basename check).
++- `--post`: assert `poetry env info --path` persis sama dengan
++  `CONDA_PREFIX` aktif — mendeteksi jika Poetry diam-diam membuat
++  virtualenv terpisah alih-alih reuse env yang aktif.
++
++Diverifikasi empiris untuk seluruh state space: no env aktif (`--pre`
++FAIL), env aktif dengan nama salah (`--pre` FAIL), env aktif dengan nama
++benar (`--pre` PASS), Poetry reuse env aktif (`--post` PASS), dan skenario
++kegagalan sebenarnya — tidak ada env aktif, Poetry fallback ke cache
++dir-nya sendiri (`--post` FAIL dengan pesan yang tepat).
++
++### ADD ADR-026 [poetry.toml] — Pin default eksplisit
++
++`[virtualenvs] create = true` — tidak mengubah perilaku hari ini (Poetry
++2.4.1 sudah default ke ini), murni asuransi terhadap Poetry mengubah
++default ini di versi mayor berikutnya (`prefer-active-python` sendiri
++baru menjadi default di 2.0).
++
++### UPD ADR-026 [Makefile] — Wire guard ke setup/install, tambah target `doctor`
++
++`check_poetry_env.py --pre` sebelum `poetry install --with dev`,
++`--post` sesudahnya, di kedua target `setup` dan `install`. Target baru
++`doctor` menjalankan keduanya tanpa reinstall — untuk verifikasi cepat
++setelah `conda activate` di shell baru.
++
++### FIX ADR-026 [scripts/check_poetry_env.py] — `--pre` tidak ter-declare di argparse
++
++**Ditemukan secara empiris, bukan dari membaca ulang dokumen** — pola
++yang sama dengan inkonsistensi `commodity_precious` vs
++`commodity_precious_metals` yang ditemukan saat implementasi v1.11.0
++(lihat entry di bawah). Spesifikasi script ADR-026 hanya men-declare
++`--post` di argparse (`--pre` dimaksudkan sebagai default saat tidak ada
++flag), tapi spesifikasi `Makefile` di ADR yang SAMA memanggil script
++tersebut dengan `--pre` eksplisit. Menjalankan `make setup` pada
++percobaan pertama akan gagal: `error: unrecognized arguments: --pre`.
++
++Diperbaiki dengan men-declare `--pre` sebagai flag eksplisit
++(`action="store_true"`) — perilaku tidak berubah (masih default ke
++pre-check jika kedua flag absen), tapi sekarang self-documenting dan
++valid dipanggil eksplisit dari `Makefile`.
++
++### ADD [tests/unit/test_check_poetry_env.py] — 10 test baru
++
++Mengikuti konvensi test `scripts/` yang sudah ada
++(`test_check_glob_scope.py`, `test_preflight_scripts.py`): import modul
++langsung via `sys.path` insertion, `monkeypatch` untuk `CONDA_PREFIX` dan
++`subprocess.run`. Termasuk `TestArgparseSurface` — guard permanen untuk
++kelas bug yang sama persis dengan FIX di atas (memanggil `main()` dengan
++`sys.argv` yang mensimulasikan pemanggilan dari `Makefile`).
++
++### Verifikasi
++
++Full suite: **1214 passed, 0 failed** (baseline 1204 + 10 baru,
++`tests/COUNT_BASELINE.txt` diperbarui). Gate G-1 (ast.parse, 150 file, 0
++error), Gate G-2 (f-string SQL, 0 pelanggaran), Gate G-3
++(`validate_instruments.py`, 699 symbols, exit 0), Gate G-8 (glob-scope, 0
++pelanggaran) — semua PASS, tidak berubah dari v1.11.0. Coverage tetap
++65.60% (pre-existing, `src/` tidak tersentuh perubahan ini — konfirmasi
++independen bahwa scope perubahan murni tooling/docs).
++
++Version bump: 1.11.0 → **1.11.1** (PATCH — tooling/docs fix, tidak ada
++API atau schema change, per konvensi versioning proyek ini).
++
++---
++
+ ## v1.11.0 — GMI Decision Document v3 Implementation: Dependency Architecture, Security Hardening, Commodity Taxonomy (Juli 2026)
+ 
+ Dokumen referensi: `GMI_Decision_Document_v3.docx` (Decision A, Decision B
+--- a/Makefile (v1.11.0)
++++ b/Makefile (v1.11.1)
+@@ -3,7 +3,7 @@
+ 
+ .PHONY: help setup migrate validate test test-unit test-int coverage \
+         lint run-daily run-weekly status reset-all dashboard delta-check \
+-        clean install docs
++        clean install docs doctor
+ 
+ PYTHON   := python
+ PYTEST   := python -m pytest
+@@ -19,6 +19,7 @@
+ 	@echo "SETUP"
+ 	@echo "  make setup          Create conda env (interpreter only) + poetry install + copy .env.example"
+ 	@echo "  make install        Install dependencies via Poetry (poetry install --with dev)"
++	@echo "  make doctor         ADR-026: verify Poetry installed into the active conda env"
+ 	@echo "  make migrate        Run instruments migration (once)"
+ 	@echo "  make validate       Validate instruments.yaml (699 symbols)"
+ 	@echo ""
+@@ -53,8 +54,10 @@
+ 	@echo "Creating conda environment (interpreter + isolated shell only)..."
+ 	conda env create -f environment.yml || conda env update -f environment.yml
+ 	@echo ""
++	@$(PYTHON) scripts/check_poetry_env.py --pre
+ 	@echo "Installing dependencies via Poetry..."
+ 	poetry install --with dev
++	@$(PYTHON) scripts/check_poetry_env.py --post
+ 	@echo ""
+ 	@echo "Copying .env template..."
+ 	@test -f .env || cp .env.example .env
+@@ -66,7 +69,16 @@
+ # still said `pandas-ta` (not `-classic`, ADR-020) and was missing scipy /
+ # statsmodels (ADR-021) and tvdatafeed entirely.
+ install:
++	@$(PYTHON) scripts/check_poetry_env.py --pre
+ 	poetry install --with dev
++	@$(PYTHON) scripts/check_poetry_env.py --post
++
++# ADD ADR-026 — standalone diagnostic: run both checks without reinstalling.
++# Useful after `conda activate` in a fresh shell to confirm Poetry is still
++# pointed at the right place before running anything else.
++doctor:
++	@$(PYTHON) scripts/check_poetry_env.py --pre
++	@$(PYTHON) scripts/check_poetry_env.py --post
+ 
+ migrate:
+ 	@echo "Migrating instruments_raw.py → config/instruments.yaml..."
+--- a/README.md (v1.11.0)
++++ b/README.md (v1.11.1)
+@@ -68,13 +68,14 @@
+ ```bash
+ cd alpha-factory
+ 
+-# conda (ARM64-native, recommended for M1)
++# conda (ARM64-native, recommended for M1) — both steps required
+ conda env create -f environment.yml
+ conda activate alpha-factory
++poetry install --with dev
+ 
+-# — or — poetry
+-poetry install
+-poetry shell
++# — or — poetry only (no conda; creates its own virtualenv)
++poetry install --with dev
++poetry env activate   # prints the activation command — eval/source it
+ 
+ cp .env.example .env
+ # Edit .env: FRED_API_KEY, FINNHUB_API_KEY, POLYGON_API_KEY, TV_USERNAME, etc.
+--- a/pyproject.toml (v1.11.0)
++++ b/pyproject.toml (v1.11.1)
+@@ -1,6 +1,6 @@
+ [tool.poetry]
+ name = "alpha-factory"
+-version = "1.11.0"
++version = "1.11.1"
+ description = "Data Platform — Bronze/Silver/Gold Medallion Architecture"
+ authors = ["Ovi"]
+ packages = [
+--- a/tests/COUNT_BASELINE.txt (v1.11.0)
++++ b/tests/COUNT_BASELINE.txt (v1.11.1)
+@@ -1 +1 @@
+-1204
++1214

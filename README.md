@@ -68,13 +68,14 @@ candidates, and computing RSI/MACD on VIX is not meaningful.
 ```bash
 cd alpha-factory
 
-# conda (ARM64-native, recommended for M1)
+# conda (ARM64-native, recommended for M1) — both steps required
 conda env create -f environment.yml
 conda activate alpha-factory
+poetry install --with dev
 
-# — or — poetry
-poetry install
-poetry shell
+# — or — poetry only (no conda; creates its own virtualenv)
+poetry install --with dev
+poetry env activate   # prints the activation command — eval/source it
 
 cp .env.example .env
 # Edit .env: FRED_API_KEY, FINNHUB_API_KEY, POLYGON_API_KEY, TV_USERNAME, etc.

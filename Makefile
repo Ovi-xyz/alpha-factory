@@ -3,7 +3,7 @@
 
 .PHONY: help setup migrate validate test test-unit test-int coverage \
         lint run-daily run-weekly status reset-all dashboard delta-check \
-        clean install docs
+        clean install docs doctor
 
 PYTHON   := python
 PYTEST   := python -m pytest
@@ -19,6 +19,7 @@ help:
 	@echo "SETUP"
 	@echo "  make setup          Create conda env (interpreter only) + poetry install + copy .env.example"
 	@echo "  make install        Install dependencies via Poetry (poetry install --with dev)"
+	@echo "  make doctor         ADR-026: verify Poetry installed into the active conda env"
 	@echo "  make migrate        Run instruments migration (once)"
 	@echo "  make validate       Validate instruments.yaml (699 symbols)"
 	@echo ""
@@ -53,8 +54,10 @@ setup:
 	@echo "Creating conda environment (interpreter + isolated shell only)..."
 	conda env create -f environment.yml || conda env update -f environment.yml
 	@echo ""
+	@$(PYTHON) scripts/check_poetry_env.py --pre
 	@echo "Installing dependencies via Poetry..."
 	poetry install --with dev
+	@$(PYTHON) scripts/check_poetry_env.py --post
 	@echo ""
 	@echo "Copying .env template..."
 	@test -f .env || cp .env.example .env
@@ -66,7 +69,16 @@ setup:
 # still said `pandas-ta` (not `-classic`, ADR-020) and was missing scipy /
 # statsmodels (ADR-021) and tvdatafeed entirely.
 install:
+	@$(PYTHON) scripts/check_poetry_env.py --pre
 	poetry install --with dev
+	@$(PYTHON) scripts/check_poetry_env.py --post
+
+# ADD ADR-026 — standalone diagnostic: run both checks without reinstalling.
+# Useful after `conda activate` in a fresh shell to confirm Poetry is still
+# pointed at the right place before running anything else.
+doctor:
+	@$(PYTHON) scripts/check_poetry_env.py --pre
+	@$(PYTHON) scripts/check_poetry_env.py --post
 
 migrate:
 	@echo "Migrating instruments_raw.py → config/instruments.yaml..."

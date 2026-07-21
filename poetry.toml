@@ -1,0 +1,3 @@
+# ADD ADR-026 — pins today's default explicitly; see scripts/check_poetry_env.py
+[virtualenvs]
+create = true
