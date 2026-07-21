@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.11.1"
+version = "1.11.2"
 description = "Data Platform — Bronze/Silver/Gold Medallion Architecture"
 authors = ["Ovi"]
 packages = [

@@ -1,18 +1,46 @@
 """
-migrate_instruments.py — G7 Supplementary Design v1.1
+migrate_instruments.py — G7 Supplementary Design v1.1  [ARCHIVED — DO NOT RUN]
 Konversi src/config/instruments_raw.py -> config/instruments.yaml
 Jalankan SATU KALI sebelum coding dimulai.
 
-Usage: python scripts/migrate_instruments.py
+ARCHIVED (v1.11.2, GMI_Decision_Document_v3 Priority 3 / Checkpoint v6 §8.3):
+config/instruments.yaml has evolved far past what this script produces —
+it reads only the original 643-instrument flat structure from
+src/config/instruments_raw.py (Grand Design v1.2 era: 4 markets, no Layer 2,
+no context.*, no domain scores) and would OVERWRITE the current 699-instrument
+hierarchical instruments.yaml (Layer 1 + Layer 2, 22 subcategories,
+commodity_role/commodity_subcategory, _meta.contributes_to blocks) with that
+stale structure. Kept for historical reference only. See scripts/archive/README.md.
+
+Usage: python scripts/migrate_instruments.py   [DISABLED — see guard below]
 """
 
 import sys
 import os
+
+# ADD (v1.11.2) — hard guard, unconditional. This script's body runs its
+# destructive config/instruments.yaml write at MODULE IMPORT TIME (no
+# `if __name__ == "__main__":` gate ever existed here) — even `import`ing
+# this module from a stray script or misconfigured test-collector would
+# silently corrupt the live, hand-maintained instruments.yaml. Halting here,
+# before sys.path is even touched, closes that hole completely. This is a
+# deliberate one-line removal if a genuine historical rebuild is ever
+# needed — not a bypass flag, so it can't be silently disabled.
+raise SystemExit(
+    "migrate_instruments.py is ARCHIVED and will not run.\n"
+    "It targets the pre-v1.4 instruments.yaml schema (superseded July 2026)\n"
+    "and would corrupt the current config/instruments.yaml if executed.\n"
+    "See scripts/archive/README.md for context and safe alternatives."
+)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from pathlib import Path
 import yaml
-from src.config.instruments_raw import (
+# NOTE: this import is unreachable — the SystemExit guard above fires first.
+# Path updated for internal consistency: instruments_raw.py moved alongside
+# this file in v1.11.2 (was src/config/instruments_raw.py).
+from instruments_raw import (
     US_STOCKS_BY_SECTOR,
     IDX_STOCKS,
     COMMODITY,

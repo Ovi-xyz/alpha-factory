@@ -2,8 +2,10 @@
 validate_instruments.py — G7 Supplementary Design v1.1
                            + GMI Wave 1 (Architecture Extension v1.0 §8.3,
                              Data Source & Rates Adjustment v1.0 §11.2)
-Validasi config/instruments.yaml setelah migrasi.
-Jalankan setelah migrate_instruments.py / build_instruments_v14.py.
+Validasi config/instruments.yaml — file ini sekarang hand-maintained langsung
+(bukan hasil generate). migrate_instruments.py dan build_instruments_v14.py
+diarsipkan v1.11.2 — keduanya target schema yang sudah superseded dan akan
+merusak instruments.yaml saat ini jika dijalankan. Lihat scripts/archive/README.md.
 
 Usage: python scripts/validate_instruments.py
 Exit code 0 = PASSED, 1 = FAILED

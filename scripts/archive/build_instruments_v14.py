@@ -13,12 +13,40 @@ Perubahan:
   8. EXPECTED_TOTAL: 643 → 692
 
 Jalankan SATU KALI:
-  python scripts/build_instruments_v14.py
+  python scripts/build_instruments_v14.py   [DISABLED — see guard below]
+
+ARCHIVED (v1.11.2, GMI_Decision_Document_v3 Priority 3 / Checkpoint v6 §8.3):
+SRC and DST below are THE SAME PATH — config/instruments.yaml. This script
+was a one-time in-place transform from the pre-v1.4 flat structure to the
+v1.4 hierarchical structure. instruments.yaml is now at v1.5 (699
+instruments, disaggregated commodity taxonomy, domain-score routing) —
+re-running this script would read the CURRENT file, silently discard every
+post-v1.4 change (commodity_role/commodity_subcategory, the 5 disaggregated
+REGIME_SECTOR_WEIGHTS keys' upstream config, 79+ hand-written ADR-rationale
+comments per Checkpoint v5 §5.1), and overwrite it with stale v1.4 output.
+Of the two archived scripts this is the more dangerous one: it has no
+external input to diff against — SRC IS DST. Kept for historical reference
+only. See scripts/archive/README.md.
 """
 
 from __future__ import annotations
 import sys, os
 from pathlib import Path
+
+# ADD (v1.11.2) — hard guard, unconditional. Runs at import time (no
+# `__main__` gate existed here either — see migrate_instruments.py's
+# identical finding). This script reads AND writes config/instruments.yaml
+# at the SAME path with no diff/backup step; simply importing this module
+# would silently overwrite the live, hand-maintained instrument universe
+# with a 4-version-old snapshot. One-line removal if a genuine historical
+# rebuild is ever needed — not a bypass flag.
+raise SystemExit(
+    "build_instruments_v14.py is ARCHIVED and will not run.\n"
+    "SRC and DST are the same file (config/instruments.yaml) — running this\n"
+    "against the current v1.5 schema would silently discard everything added\n"
+    "since the v1.4 migration (commodity taxonomy, domain-score routing, etc).\n"
+    "See scripts/archive/README.md for context and safe alternatives."
+)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import yaml

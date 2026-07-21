@@ -1,3 +1,11 @@
+# instruments_raw.py — [ARCHIVED, v1.11.2]
+# Original Grand Design v1.2 instrument constants (643 instruments, flat
+# 4-market structure, no Layer 2). Superseded by config/instruments.yaml
+# (now hand-maintained directly, v1.5, 699 instruments, hierarchical).
+# Relocated from src/config/instruments_raw.py — its only consumer,
+# migrate_instruments.py, is archived and guarded in this same directory.
+# Kept for historical reference only. See scripts/archive/README.md.
+
 US_STOCKS_BY_SECTOR = {
 
     # ── 1. TECHNOLOGY ──────────────────────────────────────────────────────

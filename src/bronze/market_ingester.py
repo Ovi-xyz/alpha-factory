@@ -40,6 +40,14 @@ DEFAULT_TIMEFRAMES = ["1D", "1W", "1M"]
 # Bronze hanya fetch raw data dari source. 4H bukan raw source data — synthetic.
 INTRADAY_TIMEFRAMES = ["5m", "15m", "1H"]
 
+# ADD (hardcode-avoidance pass, v1.11.2): named constant — sebelumnya literal
+# `0.6` diduplikasi persis di dua lokasi (Layer 1 loop + Layer 2/context loop),
+# masing-masing dengan komentar terpisah yang menjelaskan alasan yang sama
+# ("~2000 req/hr yfinance = ~1.8 req/sec"). Satu named constant menghilangkan
+# risiko kedua lokasi diam-diam divergen di masa depan (mis. salah satu diubah
+# saat rate limit yfinance berubah, yang lain tidak).
+YFINANCE_THROTTLE_SECONDS = 0.6  # ~2000 req/hr yfinance = ~1.8 req/sec — shared budget Layer 1 & Layer 2
+
 
 class MarketOHLCVIngester(BronzeIngester):
     """
@@ -104,8 +112,8 @@ class MarketOHLCVIngester(BronzeIngester):
                         f"[MarketIngester] FAILED {inst.symbol}/{tf}: {e}"
                     )
                 finally:
-                    # Throttle: ~2000 req/hr yfinance = ~1.8 req/sec
-                    time.sleep(0.6)
+                    # ADD (hardcode-avoidance v1.11.2): named constant, was literal 0.6
+                    time.sleep(YFINANCE_THROTTLE_SECONDS)
 
             summary = checkpoint.summary()
             logger.info(
@@ -319,9 +327,9 @@ class MarketOHLCVIngester(BronzeIngester):
                         f"[MarketIngester] CONTEXT FAILED {inst.symbol}/{tf}: {e}"
                     )
                 finally:
-                    # Throttle sama dengan Layer 1 — shared SourceLimiters.yfinance
-                    # budget antara Layer 1 dan Layer 2 (~2000 req/hr conservative)
-                    time.sleep(0.6)
+                    # ADD (hardcode-avoidance v1.11.2): named constant, was literal 0.6.
+                    # Shared budget with Layer 1 — same constant, single source of truth.
+                    time.sleep(YFINANCE_THROTTLE_SECONDS)
 
             summary = checkpoint.summary()
             logger.info(f"[MarketIngester] CONTEXT TF={tf} done | {summary}")

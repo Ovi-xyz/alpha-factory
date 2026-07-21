@@ -171,6 +171,17 @@ class TvDatafeedSessionManager:
                         " — will retry"
                     )
                     self._tv = None
+                    # FIX TVS-2: apply the same exponential backoff as the exception
+                    # path below. Previously this branch fell through to the next
+                    # loop iteration with NO sleep — 3 back-to-back TvDatafeed()
+                    # constructor calls with zero delay whenever login succeeds but
+                    # the lightweight health-check bar fetch fails (e.g. transient
+                    # 1-bar API hiccup), unlike the exception path a few lines below
+                    # which already backs off. Found empirically while writing test
+                    # coverage for this method (see test_tvdatafeed_session.py::
+                    # TestConnect::test_health_check_failure_backs_off_between_attempts) —
+                    # not from re-reading the docstring, which never mentioned it.
+                    time.sleep(RETRY_BACKOFF_BASE ** attempt)
 
             except Exception as e:
                 logger.warning(

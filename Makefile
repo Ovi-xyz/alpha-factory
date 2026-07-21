@@ -20,7 +20,7 @@ help:
 	@echo "  make setup          Create conda env (interpreter only) + poetry install + copy .env.example"
 	@echo "  make install        Install dependencies via Poetry (poetry install --with dev)"
 	@echo "  make doctor         ADR-026: verify Poetry installed into the active conda env"
-	@echo "  make migrate        Run instruments migration (once)"
+	@echo "  make migrate        ARCHIVED — fails with pointer to scripts/archive/README.md"
 	@echo "  make validate       Validate instruments.yaml (699 symbols)"
 	@echo ""
 	@echo "TESTING"
@@ -80,9 +80,15 @@ doctor:
 	@$(PYTHON) scripts/check_poetry_env.py --pre
 	@$(PYTHON) scripts/check_poetry_env.py --post
 
+# ARCHIVED (v1.11.2): migrate_instruments.py targeted the pre-v1.4
+# instruments.yaml schema and would corrupt the current v1.5 file — see
+# scripts/archive/README.md. Target kept (not deleted) so anyone still
+# running `make migrate` from muscle memory gets a clear explanation
+# instead of "No rule to make target" or, worse, silent data loss.
 migrate:
-	@echo "Migrating instruments_raw.py → config/instruments.yaml..."
-	$(PYTHON) scripts/migrate_instruments.py
+	@echo "migrate_instruments.py is ARCHIVED — see scripts/archive/README.md"
+	@echo "It would corrupt the current config/instruments.yaml (v1.5, 699 symbols)."
+	@exit 1
 
 validate:
 	@echo "Validating instruments.yaml..."

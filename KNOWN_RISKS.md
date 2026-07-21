@@ -767,8 +767,90 @@ failed.
 
 ---
 
-*Last updated: GMI Decision Document v3 implementation (Decision A +
+## RISK-11 (NEW): Two migration scripts executed a destructive `config/instruments.yaml` write at *import time*, with zero guard — RESOLVED (archived)
+
+**Status:** ✅ **FIXED.** Discovered while assessing
+`scripts/migrate_instruments.py` and `scripts/build_instruments_v14.py` for
+archival per `GMI_Decision_Document_v3.docx` Priority 3 / Checkpoint v6 §8
+item 3 — not from re-reading either script's docstring, which never
+mentioned the actual severity.
+
+**GD Reference:** GD §17.7 (anti-patterns) in spirit — not a Bronze/Silver/
+Gold layer violation, but the same "silent corruption instead of a loud
+failure" failure mode the anti-pattern list exists to prevent.
+
+### What the risk was
+
+Neither script had an `if __name__ == "__main__":` guard. Both executed
+their write to `config/instruments.yaml` as **top-level module code** —
+meaning a bare `import scripts.migrate_instruments` (e.g. from a stray
+script, a misconfigured test auto-collector, or an IDE's "organize
+imports") would silently trigger the full destructive rewrite, with no
+`python scripts/...` invocation ever needed.
+
+- `migrate_instruments.py` read the *original* Grand Design v1.2 flat
+  structure (`src/config/instruments_raw.py` — 643 instruments, 4 markets,
+  no Layer 2) and would overwrite the current v1.5 hierarchical
+  `instruments.yaml` (699 instruments, `context.*`, domain-score
+  `_meta.contributes_to` routing) with that 4-version-old shape.
+- `build_instruments_v14.py` was worse: `SRC` and `DST` were **the same
+  path** (`config/instruments.yaml`). It was a one-time v1.2→v1.4 in-place
+  transform; instruments.yaml is now at v1.5. Re-running it would read the
+  *current* file and silently discard everything added since v1.4 —
+  `commodity_role`/`commodity_subcategory`, the 5 disaggregated
+  `REGIME_SECTOR_WEIGHTS` keys' upstream config, and 79+ hand-written
+  ADR-rationale comments (Checkpoint v5 §5.1) — with no backup step and no
+  external input to diff against.
+
+Blast radius if triggered: total loss of the hand-maintained instrument
+universe config, silently, with the only symptom being `validate_instruments.py`
+(Gate G-3) failing on the *next* CI run — by which point `git blame` on
+`instruments.yaml` would point at whatever unrelated commit happened to
+run first, not the actual cause.
+
+### Fix
+
+- Both scripts moved to `scripts/archive/` (`git mv`, history preserved).
+- A hard, unconditional `raise SystemExit(...)` inserted as the first
+  executable statement of each file — before `sys.path.insert`, before any
+  import — so the guard fires on **both** direct execution and plain
+  `import`, closing the actual hole (not just the `python script.py` path).
+- `src/config/instruments_raw.py` (the pure-data file `migrate_instruments.py`
+  read from — zero functions/classes, 700 lines, and after this fix its
+  *only* remaining reference in the entire codebase) relocated alongside
+  it to `scripts/archive/instruments_raw.py`. This also removes it from
+  `[tool.coverage.run] source = ["src"]` scope, so it stops permanently
+  diluting the `src/` coverage metric for code that will never run again —
+  no `omit` config entry needed.
+- `Makefile`'s `migrate` target kept (not deleted) but now fails loudly
+  with a pointer to `scripts/archive/README.md`, so `make migrate` from
+  muscle memory gets a clear explanation instead of either "No rule to
+  make target" or silent data loss.
+- `README.md` project-structure tree and `scripts/validate_instruments.py`'s
+  header comment updated to stop pointing at the now-archived scripts.
+- `scripts/archive/README.md` (new) documents the full root cause and
+  explicitly states what a genuine future rebuild would require — a fresh
+  migration against the *current* schema with a diff-and-sign-off step,
+  not resurrecting either archived script.
+
+### Verification
+
+`tests/unit/test_archived_migration_scripts.py` (new, 11 tests) — a
+permanent regression guard run in an isolated subprocess (not the test
+runner's own process, since the original bug was specifically an
+import-time side effect a same-process `import` wouldn't faithfully
+reproduce): confirms the guard fires on direct execution AND bare import
+for both scripts, confirms `config/instruments.yaml`'s content and mtime
+are byte-identical before/after both invocation paths, and confirms
+`make migrate` exits non-zero with an explanation. Full suite: 1300
+passed, 0 failed.
+
+---
+
+*Last updated: v1.11.2 — Post-ADR-026 hardening (coverage gap closure,
+dead-script archival, hardcode fixes), July 2026.
+Prior entry: GMI Decision Document v3 implementation (Decision A +
 Decision B Step 1), July 2026.
-Prior entry: GMI Decision Documents v1 & v2 implementation, July 2026.
-Earlier: Bronze+Silver formal audit following GMI Wave 1 Cycle 3, July 2026.
-Earlier still: Production Readiness Assessment v1.7.2 remediation, June 2026.*
+Earlier: GMI Decision Documents v1 & v2 implementation, July 2026.
+Earlier still: Bronze+Silver formal audit following GMI Wave 1 Cycle 3, July 2026.
+Earliest: Production Readiness Assessment v1.7.2 remediation, June 2026.*

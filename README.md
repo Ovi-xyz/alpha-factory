@@ -310,9 +310,14 @@ alpha-factory/
 │   └── schemas/                    # Bronze schema registry (12 YAML files)
 │
 ├── scripts/
-│   ├── migrate_instruments.py
 │   ├── validate_instruments.py     # Gate G-3 + domain-score weight-sum guard
 │   ├── check_glob_scope.py         # Gate G-8 (NEW v1.10.0)
+│   ├── check_poetry_env.py         # ADR-026 — poetry/conda env-reuse guard
+│   ├── archive/                    # v1.11.2 — disabled, historical reference only
+│   │   ├── migrate_instruments.py  # superseded pre-v1.4 schema; see archive/README.md
+│   │   ├── build_instruments_v14.py# SRC==DST one-time transform; see archive/README.md
+│   │   ├── instruments_raw.py      # relocated from src/config/ — orphaned data, sole consumer archived
+│   │   └── README.md
 │   └── preflight/                  # NEW v1.10.0 — authored, network-execution deferred
 │       ├── check_yfinance_tickers.py
 │       ├── check_bis_cbpol_d.py

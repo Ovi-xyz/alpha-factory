@@ -1,5 +1,128 @@
 # CHANGELOG — Data Platform
 
+## v1.11.2 — Post-ADR-026 Hardening: Coverage Gap Closure, Dead-Script Archival, Hardcode Fixes (Juli 2026)
+
+Dokumen referensi: `GMI_Decision_Document_v3.docx` §4 Next Steps (item "Decision
+B step 1... Coverage gap... Archive stale migration scripts" — carried
+forward via `GMI_Implementation_Checkpoint_v6.docx` §8 sebagai priority
+queue untuk thread berikutnya), dijalankan sebagai satu pass empirik
+sebelum GMI Wave 1 Cycle 4 dimulai.
+
+Total: **1 gap ditutup penuh** (coverage 0% pada 3 file Bronze) + **1 risk
+serius ditemukan dan diperbaiki** (dua script migrasi destruktif, RISK-11)
++ **2 hardcode/robustness fix kecil** (throttle constant duplikat, TVS-2
+backoff gap) | **1300 passed / 0 failed / 0 error** (Δ +86 dari v1.11.1 —
+1214). Tidak ada perubahan schema, tidak ada perubahan API publik — semua
+PATCH-level.
+
+Konteks: repository live main dikonfirmasi masih di commit `0048382`
+(v1.11.0) via `git ls-remote` — ADR-026 belum pernah di-push (sesuai
+peringatan eksplisit Checkpoint v6 §6). Thread ini dimulai dari fresh
+clone, menerapkan diff ADR-026 yang sudah diverifikasi (paket
+`adr-026-changed-files_v1_11_0-to-v1_11_1.zip`, 1214 passed dikonfirmasi
+ulang), lalu melanjutkan ke item-item completion-gap di atasnya.
+
+### ADD [tests/unit/test_treasury_ingester.py] — Coverage 0% → 100%
+
+`src/bronze/treasury_ingester.py` (27 statements) — delegate tipis ke
+`FREDIngester` untuk yield curve harian (input utama macro regime GD
+§8.1). 12 test baru: early-exit tanpa `FRED_API_KEY`, delegasi dengan
+`series_filter` yang benar, exception dari delegate ditangkap bukan
+di-propagate, serta invariant arsitektural FIX TI-1 (tidak inherit
+`BronzeIngester` — tidak pernah menulis Bronze secara langsung, GD §17.3).
+
+### ADD [tests/unit/test_tvdatafeed_session.py] — Coverage 0% → 96%
+
+`src/bronze/tvdatafeed_session.py` (99 statements) — session manager IDX
+primer (IDD §6). 35 test baru mencakup singleton lifecycle, cooldown FIX
+TVS-1, retry/backoff, dan health-check gating. Empat baris tersisa yang
+tidak tercover (44-47) adalah `try/except ImportError` untuk `tvDatafeed`
+itu sendiri — genuinely sulit ditest secara meaningful tanpa memanipulasi
+`sys.modules` sebelum import pertama; diterima sebagai gap kecil yang
+wajar untuk optional-dependency shim.
+
+### FIX TVS-2 [src/bronze/tvdatafeed_session.py] — Health-check-failure branch tidak punya backoff
+
+**Ditemukan saat menulis test, bukan dari membaca ulang docstring** — pola
+yang sama persis dengan `commodity_precious` (v1.11.0) dan `--pre`
+argparse (v1.11.1): kedua bug sebelumnya juga ditemukan lewat eksekusi,
+bukan review dokumen. `_connect()`'s exception branch sudah punya
+`time.sleep(RETRY_BACKOFF_BASE ** attempt)`, tapi branch health-check-gagal
+(login sukses, tapi fetch 1-bar kesehatan gagal) jatuh ke iterasi
+berikutnya tanpa sleep sama sekali — tiga percobaan `TvDatafeed()`
+beruntun tanpa delay setiap kali login sukses tapi health check gagal.
+Diperbaiki: branch tersebut sekarang memanggil backoff yang sama.
+Regression guard:
+`test_tvdatafeed_session.py::TestConnect::test_health_check_failure_backs_off_between_attempts`.
+
+### ADD [tests/unit/test_tvdatafeed_adapter.py] — Coverage 0% → 100%
+
+`src/bronze/tvdatafeed_adapter.py` (60 statements) — `SourceAdapter` IDX
+primer (GD §3.5). 28 test baru: kontrak `SourceAdapter`, FIX TVA-1
+(`_null_count` instance-level, bukan class-level — dua instance tidak
+boleh berbagi state kegagalan), semua jalur `fetch()` (early-exit, empty
+result + `force_reconnect()`, sukses + normalisasi kolom, exception
+session/auth-keyword vs non-session), `_estimate_n_bars` termasuk FIX
+TVA-3 (jam sesi IDX 5.5 jam/hari, bukan 8 jam US), dan `_check_null_alert`
+boundary di `IDX_NULL_ALERT_THRESHOLD`.
+
+### RISK-11 [scripts/migrate_instruments.py, scripts/build_instruments_v14.py] — Archive dua script migrasi destruktif — lihat KNOWN_RISKS.md
+
+Ditemukan saat menilai kedua script untuk archival (Decision Document v3
+Priority 3): **keduanya mengeksekusi write destruktif ke
+`config/instruments.yaml` pada IMPORT TIME** — tidak ada
+`if __name__ == "__main__":` guard di manapun, jadi bahkan `import` biasa
+(bukan hanya eksekusi langsung) sudah cukup memicu overwrite. Root cause,
+blast radius, dan verifikasi lengkap di `KNOWN_RISKS.md` RISK-11 — tidak
+diduplikasi di sini.
+
+Fix: kedua script dipindah (`git mv`, histori git terjaga) ke
+`scripts/archive/` dengan guard `raise SystemExit(...)` tanpa syarat
+sebagai baris pertama file (sebelum `sys.path.insert`, sebelum import
+apapun). `src/config/instruments_raw.py` (data murni, satu-satunya
+konsumen adalah `migrate_instruments.py` yang kini diarsipkan) ikut
+dipindah ke `scripts/archive/instruments_raw.py` — sekaligus menghapusnya
+dari cakupan `[tool.coverage.run] source = ["src"]`, tanpa perlu entry
+`omit` baru. `Makefile`'s target `migrate` dipertahankan (tidak dihapus)
+tapi sekarang gagal dengan pesan jelas menunjuk `scripts/archive/README.md`.
+`README.md` project-structure tree dan header komentar
+`scripts/validate_instruments.py` diperbarui. Test regression baru:
+`tests/unit/test_archived_migration_scripts.py` (11 test, dijalankan di
+subprocess terisolasi karena bug aslinya adalah side-effect saat import).
+
+### FIX [src/bronze/market_ingester.py] — Magic number `0.6` diduplikasi di dua lokasi
+
+`time.sleep(0.6)` muncul identik di Layer 1 loop dan Layer 2/context loop,
+masing-masing dengan komentar terpisah menjelaskan alasan yang sama.
+Diekstrak menjadi satu named constant `YFINANCE_THROTTLE_SECONDS = 0.6` —
+menghilangkan risiko kedua lokasi diam-diam divergen jika rate limit
+yfinance berubah di masa depan dan hanya satu lokasi yang diupdate. Tidak
+ada test yang hardcode nilai literal `0.6` secara langsung (dikonfirmasi
+via grep sebelum perubahan), jadi tidak ada test yang perlu diupdate.
+
+### Coverage — 65.60% → 69.65% (+4.05pp)
+
+Baseline pre-thread 65.60% dikonfirmasi ulang secara empiris (bukan
+diasumsikan dari checkpoint sebelumnya) sebelum perubahan apapun. Setelah
+menutup gap 0% pada tiga file di atas: **69.65%**, masih 0.35pp di bawah
+gate CI 70%. File-file berikutnya dengan coverage rendah (`bls_ingester.py`
+28%, `imf_ingester.py` 27%, `eia_ingester.py` 24%, `fred_ingester.py` 31%,
+`mtf_alignment.py` 20%, `screener.py` 31%, `pipeline_dashboard.py` 29%)
+**sengaja tidak disentuh** pada pass ini — semuanya lebih besar/kompleks
+dari tiga file yang sudah diidentifikasi eksplisit sebagai starting point
+oleh Checkpoint v6, dan memilih yang mana untuk dikerjakan berikutnya
+adalah keputusan prioritas baru yang belum pernah dibuat di dokumen
+manapun. Bukan diselesaikan diam-diam dengan pilihan ad-hoc.
+
+### Diverifikasi
+
+Full suite: **1300 passed / 0 failed / 0 error** — baik di working copy
+maupun independent fresh extraction (own venv, own `poetry install --with
+dev`, tidak ada shared state). Semua CI gate (G-1 syntax 154 file 0 error,
+G-2 f-string SQL 0 violation, G-3 `validate_instruments.py` exit 0 — 699
+symbols, G-8 glob-scope 0 violation) lulus. `tests/COUNT_BASELINE.txt`
+diupdate 1214 → 1300.
+
 ## v1.11.1 — ADR-026: Poetry/Conda Environment Reuse Guard (Juli 2026)
 
 Dokumen referensi: `ADR-026_poetry_conda_environment.md`
