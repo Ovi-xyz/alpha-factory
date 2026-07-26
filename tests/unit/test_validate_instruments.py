@@ -6,15 +6,19 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scripts.validate_instruments import validate
+from scripts.validate_instruments import validate, validate_split
 
 
 class TestValidateInstruments:
 
     def test_valid_file_passes(self):
         """IDD §10.2: valid file → exit code 0, total == 643."""
-        # Use the actual generated instruments.yaml
-        assert validate("config/instruments.yaml") is True
+        # UPD Decision B Step 2 (GMI_Decision_Document_v5.docx): the real
+        # file is now split into instruments_identity.yaml +
+        # instruments_taxonomy.yaml — validate_split() is the real-file
+        # entry point post-split (validate() is legacy, single-combined-
+        # file only, used by every synthetic fixture below unchanged).
+        assert validate_split() is True
 
     def test_symbol_with_dot_fails(self, tmp_path):
         """IDD §10.2: symbol dengan titik → error + exit code 1."""
@@ -145,7 +149,8 @@ class TestValidateInstrumentsLayer2:
         """Real instruments.yaml v1.5 must pass with 699 total — updated
         ground truth post ADR-013/014/019 (GMI_Decision_Document_v1.docx)
         and ADR-023/024 (GMI_Decision_Document_v2.docx)."""
-        assert validate("config/instruments.yaml") is True
+        # UPD Decision B Step 2: split file, validate_split() not validate().
+        assert validate_split() is True
 
     def test_reclassified_symbol_in_layer1_fails(self, tmp_path):
         """ADR-003: SPX/VIX/DXY must NOT remain in Layer 1 us_stocks/index/forex."""
@@ -369,8 +374,14 @@ class TestCommodityTaxonomyValidation:
         from scripts.validate_instruments import (
             VALID_COMMODITY_ROLES, VALID_COMMODITY_SUBCATEGORIES,
         )
+        from src.config.yaml_split_merge import merge_split_trees
 
-        data = _yaml.safe_load(Path("config/instruments.yaml").read_text())
+        # UPD Decision B Step 2: real file is now split; merge positionally
+        # (same utility InstrumentLoader/validate_split() use) before
+        # walking it the same way this test always has.
+        identity = _yaml.safe_load(Path("config/instruments_identity.yaml").read_text())
+        taxonomy = _yaml.safe_load(Path("config/instruments_taxonomy.yaml").read_text())
+        data = merge_split_trees(identity, taxonomy)
 
         l1_commodities = data["commodity"]["Gold/Silver/Oil"]
         assert len(l1_commodities) == 3
@@ -429,8 +440,12 @@ class TestDomainScoreWeightSumValidation:
         import yaml as _yaml
         from collections import defaultdict
         from scripts.validate_instruments import _validate_domain_score_weights
+        from src.config.yaml_split_merge import merge_split_trees
 
-        data = _yaml.safe_load(Path("config/instruments.yaml").read_text())
+        # UPD Decision B Step 2: real file is now split; merge positionally.
+        identity = _yaml.safe_load(Path("config/instruments_identity.yaml").read_text())
+        taxonomy = _yaml.safe_load(Path("config/instruments_taxonomy.yaml").read_text())
+        data = merge_split_trees(identity, taxonomy)
         errors: list[str] = []
         _validate_domain_score_weights(data, errors)
         assert errors == [], f"Domain score weight-sum violations: {errors}"
@@ -522,3 +537,135 @@ class TestDomainScoreWeightSumValidation:
         }
         path = Path(self._write_full_yaml(tmp_path, ctx))
         assert validate(str(path)) is False
+
+
+class TestValidateSplit:
+    """NEW (Decision B Step 2-3, GMI_Decision_Document_v5.docx §2.1-§2.2) —
+    validate_split(), the real production entry point, and its interaction
+    with the shared merge utility + jsonschema layer. Uses small, self-
+    contained synthetic fixtures (not _minimal_valid_context()'s 20-
+    subcategory skeleton) since these tests target the split/merge/schema
+    plumbing specifically, not the full rule set already covered elsewhere
+    in this file via validate()/validate_data()."""
+
+    def _write(self, tmp_path, name: str, content: dict) -> str:
+        path = tmp_path / name
+        path.write_text(yaml.dump(content))
+        return str(path)
+
+    def test_real_split_files_pass_via_default_paths(self):
+        """No-arg call reads the real config/instruments_identity.yaml +
+        config/instruments_taxonomy.yaml — the same invocation ci.yml
+        Gate G-3 uses (`python scripts/validate_instruments.py`)."""
+        assert validate_split() is True
+
+    def test_explicit_paths_are_honored(self, tmp_path):
+        identity = {
+            "version": "1.0", "last_updated": "2026-01-01",
+            "us_stocks": {}, "idx_stocks": {}, "commodity": {}, "forex": {},
+            "index": [], "context": {},
+        }
+        taxonomy = {
+            "version": "1.0", "last_updated": "2026-01-01",
+            "us_stocks": {}, "idx_stocks": {}, "commodity": {}, "forex": {},
+            "index": [], "context": {},
+        }
+        id_path = self._write(tmp_path, "id.yaml", identity)
+        tax_path = self._write(tmp_path, "tax.yaml", taxonomy)
+        # This will fail the EXPECTED_TOTAL check (0 symbols) — the point
+        # here is only that the explicit paths were actually read, not
+        # silently ignored in favor of the real config/ defaults.
+        result = validate_split(identity_path=id_path, taxonomy_path=tax_path)
+        assert result is False
+
+    def test_merge_misalignment_between_files_raises_not_silently_fails(self, tmp_path):
+        """A misaligned split (different symbol at the same list index) is
+        not a normal validation finding — merge_split_trees() raises, and
+        validate_split() deliberately does not swallow that exception."""
+        identity = {
+            "version": "1.0", "last_updated": "2026-01-01",
+            "us_stocks": {"Technology": [{"symbol": "AAPL"}]},
+            "idx_stocks": {}, "commodity": {}, "forex": {}, "index": [],
+            "context": {},
+        }
+        taxonomy = {
+            "version": "1.0", "last_updated": "2026-01-01",
+            # Wrong symbol at the same index — files edited out of sync.
+            "us_stocks": {"Technology": [{"symbol": "MSFT"}]},
+            "idx_stocks": {}, "commodity": {}, "forex": {}, "index": [],
+            "context": {},
+        }
+        id_path = self._write(tmp_path, "id.yaml", identity)
+        tax_path = self._write(tmp_path, "tax.yaml", taxonomy)
+        with pytest.raises(ValueError, match="anchor key 'symbol' mismatch"):
+            validate_split(identity_path=id_path, taxonomy_path=tax_path)
+
+
+class TestJsonSchemaLayer:
+    """NEW (Decision B Step 3) — the jsonschema structural layer added
+    alongside the hand-written checks. Confirms it has real teeth (catches
+    a genuine type error the hand-written Python duck-typing wouldn't
+    necessarily flag) and that the 3 schema documents themselves are
+    valid Draft 7 schemas."""
+
+    def _write(self, tmp_path, name: str, content: dict) -> str:
+        path = tmp_path / name
+        path.write_text(yaml.dump(content))
+        return str(path)
+
+    def test_all_three_schema_files_are_valid_draft7(self):
+        import jsonschema
+        schemas_dir = Path("config/schemas/instruments")
+        for name in (
+            "identity.schema.yaml", "taxonomy.schema.yaml",
+            "regime_sector_weights.schema.yaml",
+        ):
+            schema = yaml.safe_load((schemas_dir / name).read_text())
+            jsonschema.Draft7Validator.check_schema(schema)  # raises if invalid
+
+    def test_wrong_type_on_context_available_is_caught(self, tmp_path):
+        """context_available written as the string 'true' instead of a
+        real boolean — exactly the class of bug jsonschema exists to
+        catch that plain dict access wouldn't necessarily flag (Python
+        would happily treat the string 'true' as truthy without erroring
+        anywhere in the hand-written checks)."""
+        identity = {
+            "version": "1.0", "last_updated": "2026-01-01",
+            "us_stocks": {}, "idx_stocks": {}, "commodity": {}, "forex": {},
+            "index": [], "context": {
+                "dollar": {"instruments": [{"symbol": "DXY", "yfinance_symbol": "DX-Y.NYB"}]},
+            },
+        }
+        taxonomy = {
+            "version": "1.0", "last_updated": "2026-01-01",
+            "us_stocks": {}, "idx_stocks": {}, "commodity": {}, "forex": {},
+            "index": [], "context": {
+                "dollar": {
+                    "_meta": {"subcategory_id": "context_dollar", "contributes_to": []},
+                    "instruments": [{"symbol": "DXY", "context_available": "true"}],
+                },
+            },
+        }
+        id_path = self._write(tmp_path, "id.yaml", identity)
+        tax_path = self._write(tmp_path, "tax.yaml", taxonomy)
+        assert validate_split(identity_path=id_path, taxonomy_path=tax_path) is False
+
+    def test_invalid_commodity_role_enum_is_caught(self, tmp_path):
+        identity = {
+            "version": "1.0", "last_updated": "2026-01-01",
+            "us_stocks": {}, "idx_stocks": {},
+            "commodity": {"Gold/Silver/Oil": [{"symbol": "AU", "yfinance_symbol": "GC=F"}]},
+            "forex": {}, "index": [], "context": {},
+        }
+        taxonomy = {
+            "version": "1.0", "last_updated": "2026-01-01",
+            "us_stocks": {}, "idx_stocks": {},
+            "commodity": {"Gold/Silver/Oil": [
+                {"symbol": "AU", "commodity_role": "not_a_valid_role",
+                 "commodity_subcategory": "precious_metals"},
+            ]},
+            "forex": {}, "index": [], "context": {},
+        }
+        id_path = self._write(tmp_path, "id.yaml", identity)
+        tax_path = self._write(tmp_path, "tax.yaml", taxonomy)
+        assert validate_split(identity_path=id_path, taxonomy_path=tax_path) is False

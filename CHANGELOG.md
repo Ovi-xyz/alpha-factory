@@ -1,6 +1,226 @@
 # CHANGELOG — Data Platform
 
-## v1.11.2 — Post-ADR-026 Hardening: Coverage Gap Closure, Dead-Script Archival, Hardcode Fixes (Juli 2026)
+## v1.12.0 — Decision B: instruments.yaml Split + JSON Schema Layer; Decision D: Gate G-6 Trigger Fix (Juli 2026)
+
+Dokumen referensi: `GMI_Decision_Document_v5.docx` §2 (Decision B Steps 2-3,
+file-split mechanics + schema mechanism) dan §4 (Decision D, Gate G-6
+trigger). Kedua keputusan sudah "decided, nothing implemented" di v5 —
+thread ini adalah implementasi pass-nya, dimulai dari fresh clone
+(dikonfirmasi ulang: commit `9f7eab3` di atas `ac3daaa` di atas `0048382`,
+v1.11.2, 1300 passed, coverage 69.65% — exact match ke akun Decision
+Document v5, tidak ada drift yang ditemukan).
+
+Total: **instruments.yaml (1629 baris) dipecah menjadi 3 file** + **jsonschema
+layer baru** (3 schema, 1 dependency dipromosikan dari transitive) +
+**Gate G-6 CI trigger diperbaiki** + **29 test baru** | **1329 passed / 0
+failed / 0 error** (Δ +29 dari v1.11.2 — 1300) | **coverage 69.65% → 70.36%
+— Gate G-6 LULUS untuk pertama kalinya sejak gate ini ada**, dicapai lewat
+coverage bertarget pada branch `instrument_loader.py` yang baru relevan
+akibat perubahan constructor, bukan lewat penurunan threshold atau
+pengecualian file. MINOR bump (1.11.2 → 1.12.0): shape on-disk
+`config/instruments.yaml` berubah (file itu tidak ada lagi), tapi
+`InstrumentLoader`'s API publik dan `Instrument` dataclass — kontrak yang
+sebenarnya dikonsumsi 17 modul lain — tidak berubah sama sekali.
+
+### ADR-027 [config/instruments_identity.yaml, config/instruments_taxonomy.yaml, src/config/yaml_split_merge.py] — Field-Classification Table untuk Decision B Split
+
+**Status**: FINAL. **Decision**: `config/instruments.yaml` dipecah menjadi
+`instruments_identity.yaml` (sourcing/identitas: `symbol`, `raw_symbol`,
+`yfinance_symbol`, `tvfeed_symbol`, `timezone`, `base_currency`,
+`proxy_instrument`) dan `instruments_taxonomy.yaml` (klasifikasi/routing/
+skor: `layer`, `context_category`, `context_group`, `context_available`,
+`include_in_forecast`, `proxy_for`, `proxy_correlation_expected`,
+`reclassified_from`, `deferred_reason`, `planned_wave`, `reliability_flag`,
+`exclude_from_lead_lag_leader`, `commodity_role`, `commodity_subcategory`,
+`requires_fx_normalization`, `notes`, `structural_break`, plus seluruh
+blok `_meta`). Join positional/structural (path + index list sama = satu
+instrumen) — BUKAN flat-list-plus-key-eksplisit, sesuai keputusan Decision
+Document v5 §2.1. `symbol` sengaja diulang di kedua file sebagai anchor
+self-checking, bukan pelanggaran field-disjointness.
+
+**Context**: tabel klasifikasi field TIDAK ditentukan field-by-field di
+dokumen manapun sebelum thread ini — Decision Document v5 menetapkan
+STRATEGI (positional join, dua file per concern) tapi bukan pemetaan
+per-field. Tabel di atas diturunkan empiris dari
+`_CONTEXT_CONSUMED_KEYS`/`Instrument` dataclass yang live di
+`instrument_loader.py` dan grep lengkap terhadap setiap key yang benar-benar
+dipakai di file real (23 key unik ditemukan, bukan superset spekulatif dari
+dokumen arsitektur) — bukan dari asumsi dokumen.
+
+**Rationale**: setiap field diklasifikasikan dengan pertanyaan tunggal:
+"apakah ini menjawab APA/DI MANA mengambil data (identity), atau BAGAIMANA
+mengklasifikasikan/merutekannya (taxonomy)?" `proxy_instrument` (simbol mana
+yang dipakai) masuk identity meski berdekatan konsep dengan `proxy_for`
+(benchmark apa yang direpresentasikan, taxonomy) dan
+`proxy_correlation_expected` (metadata kualitas, taxonomy) — garis batasnya
+konsisten dengan `tvfeed_symbol`/`yfinance_symbol` yang juga soal "di mana
+ambil data". `notes` diklasifikasikan taxonomy (audit-trail/rationale,
+sejenis dengan `reclassified_from`/`deferred_reason`), bukan identity.
+
+**Verifikasi**: setiap keputusan split diverifikasi lewat reconstruction
+diff — `merge_split_trees(identity, taxonomy)` terhadap kedua file hasil
+split harus SAMA PERSIS (dict equality, bukan visual spot-check) dengan
+`instruments.yaml` v1.5 asli sebelum split dijalankan. Dijalankan dua kali:
+sekali sesaat setelah split structural, sekali lagi setelah 15 blok komentar
+ADR-rationale asli dikembalikan ke `instruments_taxonomy.yaml` (100% dari
+15 blok itu anchor ke field taxonomy-side — tidak ada yang perlu dipecah
+lintas file). Kedua kali: identik.
+
+**Consequences**: `InstrumentLoader.__init__` sekarang baca dan merge dua
+file — `_load_layer1()`/`_load_layer2()`/`_load_subcategory_meta()`/semua
+`_build_*()` TIDAK BERUBAH SAMA SEKALI (menerima dict merged yang identik
+dengan yang dulu di-parse dari satu file). `YAML_PATH` dihapus (bukan
+alias) — grep sebelum perubahan mengkonfirmasi tidak ada caller manapun
+yang pernah pass `yaml_path=` custom.
+
+**Rejected**: flat-list-plus-explicit-symbol-key join (Decision Document
+v5 sudah menolak ini — menambah failure mode baru: rename di satu file
+tanpa mirror di file lain, silent). Horizontal-by-layer split (2 file:
+layer1.yaml + layer2.yaml) — tidak menyelesaikan debt aslinya ("empat
+concern satu file"), garis batasnya di sumbu yang salah.
+
+### ADD [config/regime_sector_weights.yaml, src/gold/sector_rotation.py] — REGIME_SECTOR_WEIGHTS Dieksternalisasi
+
+Dict literal 147-baris di `sector_rotation.py` (5 regime × 20 key)
+dipindah ke `config/regime_sector_weights.yaml`, dimuat via
+`yaml.safe_load()` saat module import ke variabel bernama sama
+(`REGIME_SECTOR_WEIGHTS`, tipe `dict`) — `test_sector_rotation.py` yang
+mengimpor nama ini langsung TIDAK PERLU DIUBAH (17 test, 0 perubahan).
+Nilai diekstrak via `ast.literal_eval()` terhadap module live, bukan
+ditranskrip ulang manual — menghindari kelas bug yang sama persis dengan
+RISK-10 (`commodity_precious_metals` vs `commodity_precious`, v1.11.0).
+Diverifikasi: dict hasil load YAML `==` dict literal Python asli
+(`assert` langsung, bukan spot-check per-key).
+
+### ADD [config/schemas/instruments/identity.schema.yaml, taxonomy.schema.yaml, regime_sector_weights.schema.yaml] — JSON Schema Layer (Decision B Step 3)
+
+Library `jsonschema` (sudah resolve transitive sejak v1.11.2, nol import
+langsung sebelum ini) dipromosikan ke direct dependency eksplisit di
+`pyproject.toml`. Tiga schema Draft-7, ditulis YAML mengikuti konvensi
+Bronze schema registry yang sudah ada (`config/schemas/*.yaml`, 13 file).
+`InstrumentLoader` sendiri TIDAK menyentuh `jsonschema` — independensinya
+dari `validate_instruments.py` dipertahankan (header
+`validate_instruments.py` sendiri menyatakan independensi ini disengaja,
+membela Gate G-3).
+
+**Ditemukan empiris saat pengujian pertama terhadap data real** (bukan
+disengaja/direncanakan): schema awal untuk `yfinance_symbol` terlalu
+ketat (`type: string`) — real data punya `yfinance_symbol: null` eksplisit
+untuk CPO/RUBBER/TIN (tvdatafeed-only, deferred Wave 2), by design bukan
+data hilang. Schema diperbaiki (`type: ["string", "null"]`) setelah
+verifikasi langsung ke data. Dikonfirmasi schema punya "gigi" sungguhan:
+uji korupsi sengaja (`context_available` sebagai string `"true"` alih-alih
+boolean; `commodity_subcategory` dengan enum tidak valid) — keduanya
+tertangkap setelah `context` diberi schema struktural penuh (draft pertama
+memakai `additionalProperties: true` untuk `context` yang ternyata membuat
+1 dari 2 korupsi lolos tanpa terdeteksi — diperbaiki dengan `$defs`
+recursive sebelum dianggap selesai).
+
+Cakupan schema dibatasi sengaja ke structural/type/enum check — invariant
+lintas-file (jumlah total 699, weight sum = 1.00, symbol lockstep antar
+file) TETAP hand-written di `validate_instruments.py`, persis sesuai
+keputusan Decision Document v5 §2.2 ("a schema was never going to express
+these cleanly").
+
+### UPD [scripts/validate_instruments.py] — validate_data() / validate() / validate_split()
+
+`validate()` lama dipecah: `validate_data(data, extra_errors=None)` berisi
+seluruh rule set hand-written (tidak berubah logic-nya), `validate(path)`
+dipertahankan APA ADANYA sebagai entry point single-combined-file legacy
+(~40 fixture sintetis di `test_validate_instruments.py` — ZERO perubahan),
+`validate_split(identity_path=None, taxonomy_path=None)` adalah entry
+point produksi real baru: jsonschema-check kedua file split secara
+terpisah, merge positional via `yaml_split_merge` (implementasi yang SAMA
+dipakai `InstrumentLoader` — bukan dua yang bisa diam-diam berbeda), lalu
+`validate_data()` pada hasil merge. `if __name__ == "__main__":` sekarang
+memanggil `validate_split()` — invocation CI Gate G-3
+(`poetry run python scripts/validate_instruments.py`) tidak perlu berubah
+sama sekali, hanya perilaku internalnya. `merge_split_trees()` yang raise
+`ValueError` pada misalignment struktural SENGAJA tidak ditangkap di
+`validate_split()` — file yang tidak selaras bukan temuan validasi biasa
+untuk dilaporkan dan dilanjutkan, itu berarti kedua file bukan pasangan
+yang koheren sama sekali.
+
+### FIX [tests/unit/test_validate_instruments.py, tests/unit/test_archived_migration_scripts.py, src/config/pipeline_config.py] — Referensi ke config/instruments.yaml Lama
+
+4 titik di `test_validate_instruments.py` yang point langsung ke
+`"config/instruments.yaml"` (file yang sekarang tidak ada) diperbaiki ke
+`validate_split()` / merge dua file split — 2 di antaranya adalah
+reproduksi audit real (`test_real_file_all_14_commodity_instruments_...`,
+`test_real_file_all_domain_scores_sum_to_one`), harus tetap membaca data
+real, bukan disintesis. `test_archived_migration_scripts.py`'s
+`INSTRUMENTS_YAML` constant (RISK-11 guard) diperluas jadi
+`GUARDED_CONFIG_FILES` — memeriksa ketiga file config baru, bukan satu,
+karena split menambah permukaan yang perlu dijaga dari
+migrate_instruments.py/build_instruments_v14.py yang diarsipkan.
+`pipeline_config.py`'s field `instruments_yaml` (Path constant yang
+grep-dikonfirmasi tidak pernah benar-benar dibaca `InstrumentLoader` —
+murni dokumentasi) diganti `instruments_identity_yaml` +
+`instruments_taxonomy_yaml` supaya tidak jadi referensi basi ke file yang
+sudah dihapus.
+
+### UPD [.github/workflows/ci.yml] — Decision D: Gate G-6 Trigger
+
+`if: github.event_name == 'pull_request'` → juga fire di
+`push` ke `main`. Dikonfirmasi via GitHub Actions API (Decision Document
+v5) bahwa G-6 tidak pernah benar-benar jalan di 3 commit live manapun —
+repo ini tidak punya langkah PR (tidak ada push access, model zip-apply),
+jadi kondisi PR-only secara struktural tidak pernah tercapai meski tabel
+Gate Hierarchy di CI/CD Ops Guide v1.7.4 menyatakan "PR only | Ya |
+blocking". Sekarang angka coverage sungguhan tampil di setiap landing
+nyata di `main`.
+
+### ADD — 29 Test Baru
+
+`tests/unit/test_yaml_split_merge.py` (17, BARU) — util merge diuji
+isolasi dengan fixture sintetis kecil: happy path, deteksi korupsi
+(anchor mismatch, length mismatch, field overlap, conflicting scalar —
+semua `raise ValueError` dengan pesan jelas), None-handling, non-mutating
+input. `TestValidateSplit` + `TestJsonSchemaLayer` (6, di
+`test_validate_instruments.py`) — `validate_split()` dengan path eksplisit,
+propagasi `ValueError` pada file yang tidak selaras (bukan silent-fail),
+2 uji korupsi jsonschema. `TestInstrumentLoaderCoverageGaps` (6, di
+`test_instrument_loader.py`) — properti `is_idx`/`is_forex`/`hive_key`,
+`get()` dengan `market=` yang tidak match, `by_sector()`, `symbol_list()`
+dengan filter, `_build_index()` (dead code terhadap data real sejak
+ADR-003 — SPX/VIX/DXY sudah direklasifikasi keluar dari `index:` Layer 1;
+dites lewat fixture sintetis via constructor override yang baru), dan
+guard defensif `isinstance()` di `_load_layer2()`/`_load_subcategory_meta()`
+untuk blok context yang malformed.
+
+### UPD [pyproject.toml] — Version + Dependency
+
+`jsonschema = ">=4.0"` dipromosikan explicit direct dependency (dulu
+resolve transitive saja, nol import). `pydantic` DIFLAG (bukan dihapus)
+— treatment yang sama dengan alpha-vantage sebelum benar-benar di-drop
+(Decision A / Checkpoint v5): masih nol usage di `src/`/`scripts/`
+(dikonfirmasi grep ulang), penghapusan sengaja tidak dibundel ke
+perubahan schema yang tidak berhubungan — keputusan itu milik siapapun
+yang mengkonfirmasi tidak ada penggunaan lain yang direncanakan, bukan
+sesuatu untuk diputuskan sepihak di sini. Version `1.11.2` → `1.12.0`.
+`poetry lock` + `poetry install --with dev` dijalankan ulang, resolve
+bersih.
+
+### Diverifikasi
+
+- Full suite (`poetry run pytest tests/ -q`): **1329 passed, 0 failed, 0
+  error** (working copy dan independent fresh extraction — lihat MANIFEST).
+- Coverage (`--cov=src --cov-fail-under=70`): **70.36%** — Gate G-6 LULUS,
+  pertama kali sejak gate ini eksis di CI. `src/config/yaml_split_merge.py`
+  baru: 100%. `src/gold/sector_rotation.py`: 100%. `src/config/
+  pipeline_config.py`: 100%. `src/config/instrument_loader.py`: 93%
+  (naik dari cakupan sebelumnya lewat 6 test baru bertarget).
+- Gate G-3 (`python scripts/validate_instruments.py`, invocation identik
+  CI): `VALIDATION PASSED — 699 symbols (Layer 1=640, Layer 2=59), no
+  errors.`
+- Reconstruction diff (`merge_split_trees(identity, taxonomy) ==
+  instruments.yaml` asli): identik, dijalankan sebelum dan sesudah
+  reinsersi 15 blok komentar.
+- Jsonschema teruji punya gigi sungguhan terhadap data korup sintetis
+  (bukan vacuously permissive) sebelum dianggap selesai.
+- `tests/COUNT_BASELINE.txt`: `1300` → `1329`.
+
+
 
 Dokumen referensi: `GMI_Decision_Document_v3.docx` §4 Next Steps (item "Decision
 B step 1... Coverage gap... Archive stale migration scripts" — carried

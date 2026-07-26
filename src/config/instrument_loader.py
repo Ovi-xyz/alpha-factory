@@ -50,6 +50,8 @@ from typing import Optional
 
 import yaml
 
+from src.config.yaml_split_merge import merge_split_trees
+
 
 # ── Instrument Dataclass ──────────────────────────────────────────────────────
 
@@ -178,7 +180,16 @@ class InstrumentLoader:
     (trading universe vs always-on macro anchors — GD §0.2).
     """
 
-    YAML_PATH: Path = Path("config/instruments.yaml")
+    # ADD GMI Decision Document v5 §2.1 (Decision B Step 2, 2026-07-22):
+    # single instruments.yaml (v1.5, 1629 lines, "empat concern satu file")
+    # split by concern into two files, joined positionally at load time —
+    # lihat src/config/yaml_split_merge.py untuk kontrak join lengkap.
+    # YAML_PATH lama DIHAPUS (bukan dipertahankan sebagai alias) — tidak ada
+    # caller manapun (src/ maupun tests/) yang pernah pass yaml_path= custom
+    # ke __init__ (dikonfirmasi via grep sebelum perubahan ini), jadi tidak
+    # ada blast radius dari penghapusan constant lama.
+    IDENTITY_YAML_PATH: Path = Path("config/instruments_identity.yaml")
+    TAXONOMY_YAML_PATH: Path = Path("config/instruments_taxonomy.yaml")
 
     # EIA series mapping untuk commodity (Layer 1)
     EIA_SERIES_MAP: dict[str, str | None] = {
@@ -211,9 +222,19 @@ class InstrumentLoader:
     # for _meta extraction, never contributes Instrument objects.
     _CONTEXT_META_ONLY_GROUP: str = "rates"
 
-    def __init__(self, yaml_path: Path | None = None) -> None:
-        self._path = yaml_path or self.YAML_PATH
-        raw = yaml.safe_load(self._path.read_text())
+    def __init__(
+        self,
+        identity_path: Path | None = None,
+        taxonomy_path: Path | None = None,
+    ) -> None:
+        self._identity_path = identity_path or self.IDENTITY_YAML_PATH
+        self._taxonomy_path = taxonomy_path or self.TAXONOMY_YAML_PATH
+        identity = yaml.safe_load(self._identity_path.read_text())
+        taxonomy = yaml.safe_load(self._taxonomy_path.read_text())
+        # merge_split_trees() raises ValueError (not a silent best-effort)
+        # on any structural misalignment between the two files — see
+        # src/config/yaml_split_merge.py for the exact join contract.
+        raw = merge_split_trees(identity, taxonomy)
 
         # ── Layer 1 — unchanged semantics ────────────────────────────────────
         self._instruments: list[Instrument] = self._load_layer1(raw)

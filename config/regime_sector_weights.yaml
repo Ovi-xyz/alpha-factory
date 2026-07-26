@@ -1,0 +1,122 @@
+# regime_sector_weights.yaml — REGIME_SECTOR_WEIGHTS, externalized from
+# src/gold/sector_rotation.py per GMI Decision Document v5 §2.1 (Decision B
+# Step 2). Values are IDENTICAL to the Python dict literal this replaces —
+# extracted via ast.literal_eval() against the live module, not manually
+# transcribed, to rule out copy-paste drift. sector_rotation.py loads this
+# file at module import time into a plain dict named REGIME_SECTOR_WEIGHTS
+# (same name/shape as before — src/gold/sector_rotation.py callers and
+# tests/unit/test_sector_rotation.py both import it unchanged).
+#
+# 'commodity_precious_metals' (not 'commodity_precious') is the correct key
+# per the mechanical f"commodity_{subcategory}" formula — this exact naming
+# inconsistency in Architecture v2.1 Addendum §7.1 vs §8.2 was found and
+# resolved in v1.11.0 (see CHANGELOG.md, RISK-10). Do not rename it back.
+#
+# 5 regimes x 20 keys each. Weight semantics: 0.0 exclude, 0.5 underweight,
+# 1.0 neutral, 1.3-1.5 overweight (GD §5.2.6 / IDD §4).
+
+RISK_ON:
+  Technology: 1.5
+  Consumer Discretionary: 1.3
+  Communication Services: 1.3
+  Financials: 1.2
+  Industrials: 1.1
+  Health Care: 0.9
+  Energy: 1.0
+  Materials: 1.0
+  Consumer Staples: 0.7
+  Real Estate: 0.8
+  Utilities: 0.6
+  idx: 1.1
+  forex: 1.0
+  commodity_precious_metals: 0.7
+  commodity_energy: 1.0
+  commodity_base_metals: 1.4
+  commodity_agricultural: 1.1
+  commodity_bulks: 1.3
+  index: 1.0
+  High Growth & Popular: 1.4
+RISK_OFF:
+  Technology: 0.6
+  Consumer Discretionary: 0.5
+  Communication Services: 0.7
+  Financials: 0.7
+  Industrials: 0.6
+  Health Care: 1.5
+  Energy: 0.9
+  Materials: 0.7
+  Consumer Staples: 1.5
+  Real Estate: 0.8
+  Utilities: 1.5
+  idx: 0.5
+  forex: 1.0
+  commodity_precious_metals: 1.4
+  commodity_energy: 0.9
+  commodity_base_metals: 0.6
+  commodity_agricultural: 0.9
+  commodity_bulks: 0.5
+  index: 1.0
+  High Growth & Popular: 0.5
+STAGFLATION:
+  Technology: 0.5
+  Consumer Discretionary: 0.5
+  Communication Services: 0.6
+  Financials: 0.7
+  Industrials: 1.0
+  Health Care: 1.2
+  Energy: 1.5
+  Materials: 1.4
+  Consumer Staples: 1.3
+  Real Estate: 0.5
+  Utilities: 1.1
+  idx: 0.6
+  forex: 1.0
+  commodity_precious_metals: 1.4
+  commodity_energy: 1.5
+  commodity_base_metals: 0.8
+  commodity_agricultural: 1.3
+  commodity_bulks: 0.7
+  index: 0.8
+  High Growth & Popular: 0.5
+REFLATION:
+  Technology: 0.8
+  Consumer Discretionary: 1.0
+  Communication Services: 0.9
+  Financials: 1.5
+  Industrials: 1.4
+  Health Care: 0.9
+  Energy: 1.3
+  Materials: 1.5
+  Consumer Staples: 0.8
+  Real Estate: 0.9
+  Utilities: 0.7
+  idx: 1.2
+  forex: 1.0
+  commodity_precious_metals: 0.9
+  commodity_energy: 1.3
+  commodity_base_metals: 1.4
+  commodity_agricultural: 1.1
+  commodity_bulks: 1.2
+  index: 1.0
+  High Growth & Popular: 0.9
+DISINFLATION:
+  Technology: 1.5
+  Consumer Discretionary: 1.1
+  Communication Services: 1.2
+  Financials: 0.8
+  Industrials: 0.9
+  Health Care: 1.1
+  Energy: 0.7
+  Materials: 0.7
+  Consumer Staples: 1.0
+  Real Estate: 1.4
+  Utilities: 1.3
+  idx: 0.9
+  forex: 1.0
+  commodity_precious_metals: 1.2
+  commodity_energy: 0.6
+  commodity_base_metals: 0.7
+  commodity_agricultural: 0.8
+  commodity_bulks: 0.6
+  index: 1.0
+  High Growth & Popular: 1.3

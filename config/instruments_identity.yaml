@@ -1,0 +1,971 @@
+# instruments_identity.yaml — Sourcing/identity fields ONLY.
+# GMI Decision Document v5 §2.1 (Decision B Step 2) — split from the single
+# config/instruments.yaml (v1.5, 1629 lines) into two files by concern:
+# this file (WHAT/WHERE to fetch: symbol, raw_symbol, yfinance_symbol,
+# tvfeed_symbol, timezone, base_currency, proxy_instrument) plus its sibling
+# instruments_taxonomy.yaml (classification, routing, domain-score weights,
+# _meta.contributes_to blocks). Joined positionally at load time by
+# src/config/yaml_split_merge.py — SAME tree path/list index in both files
+# = SAME instrument. 'symbol' is intentionally repeated in both files as a
+# self-checking anchor (see yaml_split_merge.py docstring). Do not add
+# taxonomy/routing fields here — see instruments_taxonomy.yaml instead.
+# Full field-classification table and rationale: CHANGELOG.md ADR-027.
+
+version: '1.6'
+last_updated: '2026-07-22'
+us_stocks:
+  Technology:
+  - symbol: AAPL
+  - symbol: ACLS
+  - symbol: ADI
+  - symbol: ALGM
+  - symbol: AMAT
+  - symbol: AMBA
+  - symbol: AMD
+  - symbol: ANET
+  - symbol: ANSS
+  - symbol: ARM
+  - symbol: AVGO
+  - symbol: CDNS
+  - symbol: CIEN
+  - symbol: COHR
+  - symbol: CRM
+  - symbol: CRWD
+  - symbol: DDOG
+  - symbol: DELL
+  - symbol: DIOD
+  - symbol: ENTG
+  - symbol: FORM
+  - symbol: FTNT
+  - symbol: GFS
+  - symbol: GOOG
+  - symbol: GOOGL
+  - symbol: HPE
+  - symbol: HPQ
+  - symbol: IBM
+  - symbol: ICHR
+  - symbol: INTC
+  - symbol: INTU
+  - symbol: JNPR
+  - symbol: KEYS
+  - symbol: KLAC
+  - symbol: LRCX
+  - symbol: MCHP
+  - symbol: META
+  - symbol: MKSI
+  - symbol: MPWR
+  - symbol: MRVL
+  - symbol: MSFT
+  - symbol: MU
+  - symbol: NET
+  - symbol: NOW
+  - symbol: NTAP
+  - symbol: NVDA
+  - symbol: OKTA
+  - symbol: 'ON'
+  - symbol: ONTO
+  - symbol: ORCL
+  - symbol: PANW
+  - symbol: PLTR
+  - symbol: PTC
+  - symbol: QCOM
+  - symbol: SMCI
+  - symbol: SNOW
+  - symbol: SNPS
+  - symbol: STX
+  - symbol: SWKS
+  - symbol: TXN
+  - symbol: WDAY
+  - symbol: WDC
+  - symbol: WOLF
+  - symbol: ZS
+  Consumer Discretionary:
+  - symbol: ABNB
+  - symbol: AMZN
+  - symbol: AN
+  - symbol: APTV
+  - symbol: BBWI
+  - symbol: BKNG
+  - symbol: BWA
+  - symbol: CAR
+  - symbol: CCL
+  - symbol: CMG
+  - symbol: CVNA
+  - symbol: DKNG
+  - symbol: DRI
+  - symbol: EBAY
+  - symbol: ETSY
+  - symbol: EXPE
+  - symbol: F
+  - symbol: GM
+  - symbol: HBI
+  - symbol: HD
+  - symbol: HLT
+  - symbol: HMC
+  - symbol: KMX
+  - symbol: LCID
+  - symbol: LEA
+  - symbol: LOW
+  - symbol: LVS
+  - symbol: MAR
+  - symbol: MCD
+  - symbol: MGA
+  - symbol: MGM
+  - symbol: NCLH
+  - symbol: NKE
+  - symbol: PENN
+  - symbol: PVH
+  - symbol: QSR
+  - symbol: RCL
+  - symbol: RIVN
+  - symbol: RL
+  - symbol: ROST
+  - symbol: SBUX
+  - symbol: STLA
+  - symbol: TJX
+  - symbol: TM
+  - symbol: TPR
+  - symbol: TSLA
+  - symbol: URBN
+  - symbol: VFC
+  - symbol: W
+  - symbol: WYNN
+  - symbol: YUM
+  Health Care:
+  - symbol: A
+  - symbol: ABBV
+  - symbol: ABC
+  - symbol: ABT
+  - symbol: ACAD
+  - symbol: AMGN
+  - symbol: AZN
+  - symbol: BAX
+  - symbol: BDX
+  - symbol: BIIB
+  - symbol: BMY
+  - symbol: BNTX
+  - symbol: BSX
+  - symbol: CAH
+  - symbol: CI
+  - symbol: CNC
+  - symbol: CRL
+  - symbol: CVS
+  - symbol: DHR
+  - symbol: DOCS
+  - symbol: EW
+  - symbol: EXAS
+  - symbol: GILD
+  - symbol: HALO
+  - symbol: HOLX
+  - symbol: HUM
+  - symbol: IDXX
+  - symbol: INCY
+  - symbol: IQV
+  - symbol: ISRG
+  - symbol: JNJ
+  - symbol: LLY
+  - symbol: MCK
+  - symbol: MDT
+  - symbol: MOH
+  - symbol: MRK
+  - symbol: MRNA
+  - symbol: MTD
+  - symbol: NTRA
+  - symbol: NVO
+  - symbol: PFE
+  - symbol: REGN
+  - symbol: RMD
+  - symbol: SYK
+  - symbol: TMO
+  - symbol: UNH
+  - symbol: VEEV
+  - symbol: VRTX
+  - symbol: WAT
+  - symbol: ZBH
+  Financials:
+  - symbol: AFL
+  - symbol: AIG
+  - symbol: ALL
+  - symbol: ALLY
+  - symbol: AXP
+  - symbol: BAC
+  - symbol: BLK
+  - symbol: BRK-B
+    raw_symbol: BRK.B
+  - symbol: C
+  - symbol: CB
+  - symbol: CBOE
+  - symbol: CFG
+  - symbol: CINF
+  - symbol: CMA
+  - symbol: CME
+  - symbol: COF
+  - symbol: DFS
+  - symbol: FDS
+  - symbol: FITB
+  - symbol: GL
+  - symbol: GS
+  - symbol: HBAN
+  - symbol: HIG
+  - symbol: ICE
+  - symbol: JPM
+  - symbol: KEY
+  - symbol: L
+  - symbol: LNC
+  - symbol: MA
+  - symbol: MCO
+  - symbol: MET
+  - symbol: MS
+  - symbol: MSCI
+  - symbol: MTB
+  - symbol: NDAQ
+  - symbol: PNC
+  - symbol: PRU
+  - symbol: PYPL
+  - symbol: RE
+  - symbol: RF
+  - symbol: RNR
+  - symbol: SCHW
+  - symbol: SPGI
+  - symbol: SQ
+  - symbol: SYF
+  - symbol: TFC
+  - symbol: TRV
+  - symbol: USB
+  - symbol: V
+  - symbol: WFC
+  - symbol: ZION
+  Communication Services:
+  - symbol: AMC
+  - symbol: APPS
+  - symbol: BMBL
+  - symbol: CHTR
+  - symbol: CMCSA
+  - symbol: DASH
+  - symbol: DIS
+  - symbol: EA
+  - symbol: FOX
+  - symbol: FOXA
+  - symbol: IAC
+  - symbol: LUMN
+  - symbol: LYFT
+  - symbol: LYV
+  - symbol: MGNI
+  - symbol: MTCH
+  - symbol: NFLX
+  - symbol: NWSA
+  - symbol: NYT
+  - symbol: PARA
+  - symbol: PINS
+  - symbol: PUBM
+  - symbol: RBLX
+  - symbol: RDDT
+  - symbol: SIRI
+  - symbol: SNAP
+  - symbol: SPOT
+  - symbol: T
+  - symbol: TMUS
+  - symbol: TTD
+  - symbol: TTWO
+  - symbol: U
+  - symbol: UBER
+  - symbol: VZ
+  - symbol: WBD
+  - symbol: ZM
+  Industrials:
+  - symbol: AAL
+  - symbol: ALK
+  - symbol: AME
+  - symbol: AOS
+  - symbol: AXON
+  - symbol: BA
+  - symbol: CAT
+  - symbol: CHRW
+  - symbol: CSX
+  - symbol: CTAS
+  - symbol: DAL
+  - symbol: DE
+  - symbol: DOV
+  - symbol: EMR
+  - symbol: ETN
+  - symbol: EXPD
+  - symbol: FDX
+  - symbol: GD
+  - symbol: GE
+  - symbol: GNRC
+  - symbol: HON
+  - symbol: HWM
+  - symbol: ITW
+  - symbol: JBHT
+  - symbol: JOBY
+  - symbol: LMT
+  - symbol: LUV
+  - symbol: MAS
+  - symbol: MMM
+  - symbol: MSA
+  - symbol: NOC
+  - symbol: NSC
+  - symbol: ODFL
+  - symbol: PH
+  - symbol: ROK
+  - symbol: ROP
+  - symbol: RSG
+  - symbol: RTX
+  - symbol: SAIA
+  - symbol: SAVE
+  - symbol: SPR
+  - symbol: TDG
+  - symbol: UAL
+  - symbol: UNP
+  - symbol: UPS
+  - symbol: VRSK
+  - symbol: WAB
+  - symbol: WM
+  - symbol: XPO
+  - symbol: XYL
+  Energy:
+  - symbol: APA
+  - symbol: AR
+  - symbol: BE
+  - symbol: BKR
+  - symbol: CHRD
+  - symbol: CLNE
+  - symbol: CNX
+  - symbol: COP
+  - symbol: CTRA
+  - symbol: CVX
+  - symbol: DINO
+  - symbol: DKL
+  - symbol: DVN
+  - symbol: EOG
+  - symbol: EPD
+  - symbol: EQT
+  - symbol: ET
+  - symbol: FANG
+  - symbol: FCEL
+  - symbol: HAL
+  - symbol: HES
+  - symbol: KMI
+  - symbol: MMP
+  - symbol: MPC
+  - symbol: MRO
+  - symbol: MTDR
+  - symbol: NOV
+  - symbol: OVV
+  - symbol: OXY
+  - symbol: PAA
+  - symbol: PBF
+  - symbol: PLUG
+  - symbol: PR
+  - symbol: PSX
+  - symbol: PXD
+  - symbol: RRC
+  - symbol: SLB
+  - symbol: SM
+  - symbol: TRGP
+  - symbol: VLO
+  - symbol: WMB
+  - symbol: XOM
+  Consumer Staples:
+  - symbol: ACI
+  - symbol: ADM
+  - symbol: BG
+  - symbol: BUD
+  - symbol: CAG
+  - symbol: CELH
+  - symbol: CHD
+  - symbol: CHEF
+  - symbol: CL
+  - symbol: CLX
+  - symbol: COKE
+  - symbol: COST
+  - symbol: CPB
+  - symbol: DXCM
+  - symbol: EL
+  - symbol: GIS
+  - symbol: GO
+  - symbol: HRL
+  - symbol: HSY
+  - symbol: K
+  - symbol: KHC
+  - symbol: KMB
+  - symbol: KO
+  - symbol: KR
+  - symbol: MDLZ
+  - symbol: MKC
+  - symbol: MNST
+  - symbol: MO
+  - symbol: PEP
+  - symbol: PG
+  - symbol: PM
+  - symbol: SAM
+  - symbol: SJM
+  - symbol: SPTN
+  - symbol: STZ
+  - symbol: SYY
+  - symbol: TAP
+  - symbol: TSN
+  - symbol: USM
+  - symbol: WMT
+  Real Estate:
+  - symbol: AMH
+  - symbol: AMT
+  - symbol: AVB
+  - symbol: CBL
+  - symbol: CCI
+  - symbol: COLD
+  - symbol: CUBE
+  - symbol: DLR
+  - symbol: DOC
+  - symbol: EGP
+  - symbol: EQIX
+  - symbol: EQR
+  - symbol: EXR
+  - symbol: FR
+  - symbol: FRT
+  - symbol: HR
+  - symbol: INVH
+  - symbol: IRM
+  - symbol: KIM
+  - symbol: MAC
+  - symbol: NNN
+  - symbol: O
+  - symbol: PEAK
+  - symbol: PLD
+  - symbol: PSA
+  - symbol: REG
+  - symbol: REXR
+  - symbol: SBAC
+  - symbol: SPG
+  - symbol: STAG
+  - symbol: UNIT
+  - symbol: VTR
+  - symbol: WELL
+  - symbol: WY
+  Utilities:
+  - symbol: AEP
+  - symbol: ATO
+  - symbol: AVA
+  - symbol: AWK
+  - symbol: CMS
+  - symbol: D
+  - symbol: DUK
+  - symbol: ED
+  - symbol: ES
+  - symbol: ETR
+  - symbol: EVRG
+  - symbol: EXC
+  - symbol: GWRS
+  - symbol: IDA
+  - symbol: LNT
+  - symbol: MSEX
+  - symbol: NEE
+  - symbol: NEW
+  - symbol: NI
+  - symbol: NWE
+  - symbol: OGE
+  - symbol: PCG
+  - symbol: POR
+  - symbol: SJW
+  - symbol: SO
+  - symbol: SRE
+  - symbol: SWX
+  - symbol: WEC
+  - symbol: WTRG
+  - symbol: XEL
+  Materials:
+  - symbol: AA
+  - symbol: APD
+  - symbol: ATI
+  - symbol: BALL
+  - symbol: CCK
+  - symbol: CE
+  - symbol: CENX
+  - symbol: CF
+  - symbol: CLF
+  - symbol: CRS
+  - symbol: CTVA
+  - symbol: ECL
+  - symbol: EMN
+  - symbol: FCX
+  - symbol: FMC
+  - symbol: GPK
+  - symbol: HUN
+  - symbol: IFF
+  - symbol: IP
+  - symbol: LIN
+  - symbol: LYB
+  - symbol: MLM
+  - symbol: MOS
+  - symbol: NEM
+  - symbol: NUE
+  - symbol: OLN
+  - symbol: PKG
+  - symbol: PPG
+  - symbol: RPM
+  - symbol: SEE
+  - symbol: SHW
+  - symbol: SLGN
+  - symbol: SMG
+  - symbol: STLD
+  - symbol: TS
+  - symbol: VMC
+  - symbol: WRK
+  - symbol: X
+  High Growth & Popular:
+  - symbol: ABCL
+  - symbol: ACMR
+  - symbol: ACVA
+  - symbol: AFRM
+  - symbol: AGIO
+  - symbol: ALLK
+  - symbol: ALNY
+  - symbol: ALTR
+  - symbol: AMPH
+  - symbol: APPN
+  - symbol: ARWR
+  - symbol: ASTR
+  - symbol: BAH
+  - symbol: BAND
+  - symbol: BEAM
+  - symbol: BILL
+  - symbol: BJ
+  - symbol: BLNK
+  - symbol: CACI
+  - symbol: CFLT
+  - symbol: CHPT
+  - symbol: CLSK
+  - symbol: COIN
+  - symbol: COOP
+  - symbol: CRSP
+  - symbol: DG
+  - symbol: DLTR
+  - symbol: DOCN
+  - symbol: EDIT
+  - symbol: ENVX
+  - symbol: ESTC
+  - symbol: EVGO
+  - symbol: FATE
+  - symbol: FIVE
+  - symbol: FOLD
+  - symbol: FROG
+  - symbol: FSLY
+  - symbol: GCMG
+  - symbol: GTLB
+  - symbol: HOOD
+  - symbol: HUBS
+  - symbol: HUT
+  - symbol: HYZN
+  - symbol: IBRX
+  - symbol: IMVT
+  - symbol: INDI
+  - symbol: INO
+  - symbol: INVZ
+  - symbol: IONS
+  - symbol: KTOS
+  - symbol: KYMR
+  - symbol: LAZR
+  - symbol: LDOS
+  - symbol: LHX
+  - symbol: LIDR
+  - symbol: MARA
+  - symbol: MBLY
+    raw_symbol: MOBILEYE
+  - symbol: MDB
+  - symbol: MNTS
+  - symbol: MSGM
+  - symbol: MSTR
+  - symbol: NCNO
+  - symbol: NKLA
+  - symbol: NTLA
+  - symbol: NVAX
+  - symbol: OCGN
+  - symbol: OLLI
+  - symbol: OPEN
+  - symbol: OUST
+  - symbol: PEGA
+  - symbol: PFSI
+  - symbol: PGEN
+  - symbol: PRAX
+  - symbol: PRGO
+  - symbol: PTGX
+  - symbol: RARE
+  - symbol: RCKT
+  - symbol: RDFN
+  - symbol: RDW
+  - symbol: RIDE
+  - symbol: RIOT
+  - symbol: RKLB
+  - symbol: RVMD
+  - symbol: RXRX
+  - symbol: SAIC
+  - symbol: SAVA
+  - symbol: SDGR
+  - symbol: SOFI
+  - symbol: SPCE
+  - symbol: SRPT
+  - symbol: SUMO
+  - symbol: SUPN
+  - symbol: TNGX
+  - symbol: TWLO
+  - symbol: UPST
+  - symbol: VERV
+  - symbol: VLDR
+  - symbol: VXRT
+  - symbol: WKHS
+  - symbol: XNCR
+  - symbol: Z
+  - symbol: ZI
+idx_stocks:
+  IDX30:
+  - symbol: AADI
+    yfinance_symbol: AADI.JK
+  - symbol: ADRO
+    yfinance_symbol: ADRO.JK
+  - symbol: AMRT
+    yfinance_symbol: AMRT.JK
+  - symbol: ANTM
+    yfinance_symbol: ANTM.JK
+  - symbol: ASII
+    yfinance_symbol: ASII.JK
+  - symbol: BBCA
+    yfinance_symbol: BBCA.JK
+  - symbol: BBNI
+    yfinance_symbol: BBNI.JK
+  - symbol: BBRI
+    yfinance_symbol: BBRI.JK
+  - symbol: BMRI
+    yfinance_symbol: BMRI.JK
+  - symbol: BRPT
+    yfinance_symbol: BRPT.JK
+  - symbol: BUMI
+    yfinance_symbol: BUMI.JK
+  - symbol: CPIN
+    yfinance_symbol: CPIN.JK
+  - symbol: EMTK
+    yfinance_symbol: EMTK.JK
+  - symbol: GOTO
+    yfinance_symbol: GOTO.JK
+  - symbol: ICBP
+    yfinance_symbol: ICBP.JK
+  - symbol: INCO
+    yfinance_symbol: INCO.JK
+  - symbol: INDF
+    yfinance_symbol: INDF.JK
+  - symbol: INKP
+    yfinance_symbol: INKP.JK
+  - symbol: ISAT
+    yfinance_symbol: ISAT.JK
+  - symbol: JPFA
+    yfinance_symbol: JPFA.JK
+  - symbol: KLBF
+    yfinance_symbol: KLBF.JK
+  - symbol: MBMA
+    yfinance_symbol: MBMA.JK
+  - symbol: MDKA
+    yfinance_symbol: MDKA.JK
+  - symbol: MEDC
+    yfinance_symbol: MEDC.JK
+  - symbol: PGAS
+    yfinance_symbol: PGAS.JK
+  - symbol: PGEO
+    yfinance_symbol: PGEO.JK
+  - symbol: PTBA
+    yfinance_symbol: PTBA.JK
+  - symbol: TLKM
+    yfinance_symbol: TLKM.JK
+  - symbol: UNTR
+    yfinance_symbol: UNTR.JK
+  - symbol: UNVR
+    yfinance_symbol: UNVR.JK
+commodity:
+  Gold/Silver/Oil:
+  - symbol: AG
+    yfinance_symbol: SI=F
+  - symbol: AU
+    yfinance_symbol: GC=F
+  - symbol: CL
+    yfinance_symbol: CL=F
+forex:
+  Usd/Eur/Gbp:
+  - symbol: AUD_USD
+    raw_symbol: AUD/USD
+    yfinance_symbol: AUDUSD=X
+  - symbol: EUR_AUD
+    raw_symbol: EUR/AUD
+    yfinance_symbol: EURAUD=X
+  - symbol: EUR_CAD
+    raw_symbol: EUR/CAD
+    yfinance_symbol: EURCAD=X
+  - symbol: EUR_CHF
+    raw_symbol: EUR/CHF
+    yfinance_symbol: EURCHF=X
+  - symbol: EUR_GBP
+    raw_symbol: EUR/GBP
+    yfinance_symbol: EURGBP=X
+  - symbol: EUR_JPY
+    raw_symbol: EUR/JPY
+    yfinance_symbol: EURJPY=X
+  - symbol: EUR_NZD
+    raw_symbol: EUR/NZD
+    yfinance_symbol: EURNZD=X
+  - symbol: EUR_USD
+    raw_symbol: EUR/USD
+    yfinance_symbol: EURUSD=X
+  - symbol: GBP_AUD
+    raw_symbol: GBP/AUD
+    yfinance_symbol: GBPAUD=X
+  - symbol: GBP_CAD
+    raw_symbol: GBP/CAD
+    yfinance_symbol: GBPCAD=X
+  - symbol: GBP_CHF
+    raw_symbol: GBP/CHF
+    yfinance_symbol: GBPCHF=X
+  - symbol: GBP_JPY
+    raw_symbol: GBP/JPY
+    yfinance_symbol: GBPJPY=X
+  - symbol: GBP_NZD
+    raw_symbol: GBP/NZD
+    yfinance_symbol: GBPNZD=X
+  - symbol: GBP_USD
+    raw_symbol: GBP/USD
+    yfinance_symbol: GBPUSD=X
+  - symbol: NZD_USD
+    raw_symbol: NZD/USD
+    yfinance_symbol: NZDUSD=X
+  - symbol: USD_CAD
+    raw_symbol: USD/CAD
+    yfinance_symbol: USDCAD=X
+  - symbol: USD_CHF
+    raw_symbol: USD/CHF
+    yfinance_symbol: USDCHF=X
+  - symbol: USD_IDR
+    raw_symbol: USD/IDR
+    yfinance_symbol: USDIDR=X
+  - symbol: USD_JPY
+    raw_symbol: USD/JPY
+    yfinance_symbol: USDJPY=X
+index: []
+context:
+  dollar:
+    instruments:
+    - symbol: DXY
+      yfinance_symbol: DX-Y.NYB
+      timezone: UTC
+  dollar_basket:
+    instruments:
+    - symbol: CNH
+      yfinance_symbol: USDCNH=X
+      timezone: UTC
+    - symbol: KRW
+      yfinance_symbol: USDKRW=X
+      timezone: UTC
+    - symbol: SGD
+      yfinance_symbol: USDSGD=X
+      timezone: UTC
+    - symbol: HKD
+      yfinance_symbol: USDHKD=X
+      timezone: UTC
+    - symbol: TWD
+      yfinance_symbol: USDTWD=X
+      timezone: UTC
+    - symbol: NOK
+      yfinance_symbol: USDNOK=X
+      timezone: UTC
+  fx_normalization:
+    instruments:
+    - symbol: MYR
+      yfinance_symbol: MYR=X
+      timezone: UTC
+  rates:
+    fed: {}
+    curve: {}
+    spread: {}
+    dm_cb: {}
+    em_cb: {}
+  equity:
+    dm:
+      instruments:
+      - symbol: SPX
+        yfinance_symbol: ^GSPC
+        timezone: America/New_York
+      - symbol: NYA
+        yfinance_symbol: ^NYA
+        timezone: America/New_York
+      - symbol: DJI
+        yfinance_symbol: ^DJI
+        timezone: America/New_York
+      - symbol: IXIC
+        yfinance_symbol: ^IXIC
+        timezone: America/New_York
+      - symbol: FTSE
+        yfinance_symbol: ^FTSE
+        timezone: Europe/London
+      - symbol: DAX
+        yfinance_symbol: ^GDAXI
+        timezone: Europe/Berlin
+      - symbol: CAC
+        yfinance_symbol: ^FCHI
+        timezone: Europe/Paris
+      - symbol: N225
+        yfinance_symbol: ^N225
+        timezone: Asia/Tokyo
+      - symbol: AXJO
+        yfinance_symbol: ^AXJO
+        timezone: Australia/Sydney
+    em:
+      instruments:
+      - symbol: TWSE
+        yfinance_symbol: ^TWII
+        timezone: Asia/Taipei
+      - symbol: KOSPI
+        yfinance_symbol: ^KS11
+        timezone: Asia/Seoul
+      - symbol: HSI
+        yfinance_symbol: ^HSI
+        timezone: Asia/Hong_Kong
+      - symbol: SSEC
+        yfinance_symbol: ^SSEC
+        timezone: Asia/Shanghai
+      - symbol: JKSE
+        yfinance_symbol: ^JKSE
+        timezone: Asia/Jakarta
+    volatility:
+      instruments:
+      - symbol: VIX
+        yfinance_symbol: ^VIX
+        timezone: America/New_York
+  commodity:
+    energy:
+      instruments:
+      - symbol: BRENT
+        yfinance_symbol: BZ=F
+        timezone: UTC
+      - symbol: NG
+        yfinance_symbol: NG=F
+        timezone: UTC
+    metals:
+      instruments:
+      - symbol: COPPER
+        yfinance_symbol: HG=F
+        timezone: UTC
+      - symbol: NICKEL
+        yfinance_symbol: NI=F
+        timezone: UTC
+      - symbol: ALUMINIUM
+        yfinance_symbol: ALI=F
+        timezone: UTC
+      - symbol: ZINC
+        yfinance_symbol: ZN=F
+        timezone: UTC
+      - symbol: IRON_ORE
+        yfinance_symbol: VALE
+        proxy_instrument: VALE
+        timezone: America/New_York
+      - symbol: TIN
+        yfinance_symbol: null
+        base_currency: USD
+    agri:
+      instruments:
+      - symbol: CPO
+        yfinance_symbol: null
+        base_currency: MYR
+      - symbol: RUBBER
+        yfinance_symbol: null
+        base_currency: USD
+    coal:
+      instruments:
+      - symbol: COAL_NEWC
+        yfinance_symbol: WHC.AX
+        proxy_instrument: WHC.AX
+        timezone: Australia/Sydney
+  etf:
+    broad_market:
+      instruments:
+      - symbol: SPY
+        yfinance_symbol: SPY
+        timezone: America/New_York
+      - symbol: IVV
+        yfinance_symbol: IVV
+        timezone: America/New_York
+      - symbol: QQQ
+        yfinance_symbol: QQQ
+        timezone: America/New_York
+      - symbol: DIA
+        yfinance_symbol: DIA
+        timezone: America/New_York
+      - symbol: IWM
+        yfinance_symbol: IWM
+        timezone: America/New_York
+    sector:
+      instruments:
+      - symbol: XLK
+        yfinance_symbol: XLK
+        timezone: America/New_York
+      - symbol: XLF
+        yfinance_symbol: XLF
+        timezone: America/New_York
+      - symbol: XLV
+        yfinance_symbol: XLV
+        timezone: America/New_York
+      - symbol: XLY
+        yfinance_symbol: XLY
+        timezone: America/New_York
+      - symbol: XLP
+        yfinance_symbol: XLP
+        timezone: America/New_York
+      - symbol: XLI
+        yfinance_symbol: XLI
+        timezone: America/New_York
+      - symbol: XLB
+        yfinance_symbol: XLB
+        timezone: America/New_York
+      - symbol: XLU
+        yfinance_symbol: XLU
+        timezone: America/New_York
+      - symbol: XLRE
+        yfinance_symbol: XLRE
+        timezone: America/New_York
+      - symbol: XLC
+        yfinance_symbol: XLC
+        timezone: America/New_York
+    factor:
+      instruments:
+      - symbol: SCHD
+        yfinance_symbol: SCHD
+        timezone: America/New_York
+      - symbol: NOBL
+        yfinance_symbol: NOBL
+        timezone: America/New_York
+    credit:
+      instruments:
+      - symbol: HYG
+        yfinance_symbol: HYG
+        timezone: America/New_York
+    commodity_etf:
+      instruments:
+      - symbol: DBA
+        yfinance_symbol: DBA
+        timezone: America/New_York
+    international:
+      instruments:
+      - symbol: EEM
+        yfinance_symbol: EEM
+        timezone: America/New_York
+      - symbol: EFA
+        yfinance_symbol: EFA
+        timezone: America/New_York
+      - symbol: EWJ
+        yfinance_symbol: EWJ
+        timezone: America/New_York
+      - symbol: INDA
+        yfinance_symbol: INDA
+        timezone: America/New_York
+      - symbol: EIDO
+        yfinance_symbol: EIDO
+        timezone: America/New_York
+    thematic:
+      instruments:
+      - symbol: ARKK
+        yfinance_symbol: ARKK
+        timezone: America/New_York

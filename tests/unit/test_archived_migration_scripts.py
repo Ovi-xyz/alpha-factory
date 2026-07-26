@@ -27,7 +27,17 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ARCHIVE_DIR = REPO_ROOT / "scripts" / "archive"
-INSTRUMENTS_YAML = REPO_ROOT / "config" / "instruments.yaml"
+# UPD Decision B Step 2 (GMI_Decision_Document_v5.docx, 2026-07-22):
+# config/instruments.yaml no longer exists as a single file — split into
+# 3. The regression this test guards against (destructive import-time
+# write) applies equally to all 3 new files, and there's more surface
+# area to guard now than before, so all 3 are checked rather than picking
+# just one as a stand-in.
+GUARDED_CONFIG_FILES = [
+    REPO_ROOT / "config" / "instruments_identity.yaml",
+    REPO_ROOT / "config" / "instruments_taxonomy.yaml",
+    REPO_ROOT / "config" / "regime_sector_weights.yaml",
+]
 
 ARCHIVED_SCRIPTS = [
     "migrate_instruments.py",
@@ -66,23 +76,22 @@ class TestArchivedScriptsAreDisabled:
 
     @pytest.mark.parametrize("script_name", ARCHIVED_SCRIPTS)
     def test_instruments_yaml_untouched_by_either_invocation(self, script_name):
-        """The regression this guards against: instruments.yaml content and
-        mtime must be identical before and after both attempted invocations."""
-        before_text = INSTRUMENTS_YAML.read_text()
-        before_mtime = INSTRUMENTS_YAML.stat().st_mtime_ns
+        """The regression this guards against: none of the 3 instrument
+        config files' content or mtime may change from either attempted
+        invocation."""
+        before = [(f, f.read_text(), f.stat().st_mtime_ns) for f in GUARDED_CONFIG_FILES]
 
         _run([sys.executable, str(ARCHIVE_DIR / script_name)])
         module_name = script_name.removesuffix(".py")
         _run([sys.executable, "-c", f"import scripts.archive.{module_name}"])
 
-        after_text = INSTRUMENTS_YAML.read_text()
-        after_mtime = INSTRUMENTS_YAML.stat().st_mtime_ns
-        assert after_text == before_text, (
-            f"{script_name} modified config/instruments.yaml content — guard failed"
-        )
-        assert after_mtime == before_mtime, (
-            f"{script_name} touched config/instruments.yaml on disk — guard failed"
-        )
+        for f, before_text, before_mtime in before:
+            assert f.read_text() == before_text, (
+                f"{script_name} modified {f.name} content — guard failed"
+            )
+            assert f.stat().st_mtime_ns == before_mtime, (
+                f"{script_name} touched {f.name} on disk — guard failed"
+            )
 
 
 class TestArchiveHousekeeping:

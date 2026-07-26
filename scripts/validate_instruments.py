@@ -56,6 +56,9 @@ from pathlib import Path
 from collections import Counter
 
 import yaml
+import jsonschema
+
+from src.config.yaml_split_merge import merge_split_trees
 
 # UPD ADR-013/014/024 (GMI Decision Documents v1/v2, 2026-07-11):
 #   - EXPECTED_TOTAL: 692 -> 699 (+7: 6 context_dollar_basket currencies +
@@ -507,14 +510,23 @@ def _validate_domain_score_weights(data: dict, errors: list[str]) -> None:
             )
 
 
-def validate(path: str = None) -> bool:
-    if path is None:
-        path = str(
-            Path(__file__).parent.parent / "config" / "instruments.yaml"
-        )
+def validate_data(data: dict, extra_errors: list[str] | None = None) -> bool:
+    """
+    Core validation logic against an already-loaded, merged dict.
 
-    data = yaml.safe_load(Path(path).read_text())
-    errors: list[str] = []
+    ADD GMI Decision Document v5 §2.2 (Decision B Step 3, 2026-07-22):
+    extracted out of the old single-file validate() so the exact same rule
+    set runs whether the data came from ONE legacy combined dict
+    (validate(), kept for ~40 existing synthetic test fixtures in
+    test_validate_instruments.py — zero changes needed there) or from the
+    real split files, merged positionally (validate_split(), the real
+    production entry point below).
+
+    extra_errors: pre-computed errors (mis. jsonschema structural findings
+    from validate_split()) to fold into the same report, so operators see
+    ONE combined error list rather than two separate outputs to reconcile.
+    """
+    errors: list[str] = list(extra_errors) if extra_errors else []
 
     layer1_symbols = _validate_layer1(data, errors)
     layer2_symbols = _validate_layer2(data, errors)
@@ -544,5 +556,101 @@ def validate(path: str = None) -> bool:
     return True
 
 
+def validate(path: str = None) -> bool:
+    """
+    LEGACY single-combined-file entry point. Reads ONE YAML file shaped
+    like the pre-split instruments.yaml (v1.5 and earlier) and validates
+    it via validate_data(). Kept unchanged in behavior specifically so
+    every existing test fixture that builds one combined dict via
+    yaml.dump() continues to exercise the exact same rule set with zero
+    fixture rewrites (GMI Decision Document v5 §2.1: "test_validate_
+    instruments.py... needs the most rework" was scoped to the ~4 call
+    sites that pointed at the real, now-split file — see validate_split()
+    for those).
+
+    path is required in practice: there is no longer a single real
+    instruments.yaml to default to (Decision B Step 2 removed it). A
+    caller relying on the old auto-default would previously have read
+    real project data; doing so silently against a file that no longer
+    exists would be a confusing FileNotFoundError, so this fails loudly
+    with a pointer to validate_split() instead.
+    """
+    if path is None:
+        raise ValueError(
+            "validate(path=None) has no real file to default to since"
+            " Decision B Step 2 split instruments.yaml — pass an explicit"
+            " path (test fixtures), or call validate_split() for the real,"
+            " split-file production case."
+        )
+
+    data = yaml.safe_load(Path(path).read_text())
+    return validate_data(data)
+
+
+def _load_schema(name: str) -> dict:
+    schema_path = (
+        Path(__file__).parent.parent / "config" / "schemas" / "instruments" / name
+    )
+    return yaml.safe_load(schema_path.read_text())
+
+
+def _validate_jsonschema_file(data: dict, schema_name: str, file_label: str) -> list[str]:
+    """
+    Structural/type check for ONE split file against its JSON Schema
+    (GMI Decision Document v5 §2.2). Runs on the split file's OWN shape,
+    before merging — this is deliberately a per-file check, not a
+    validate_data()-level one, since it validates exactly what changed
+    in Decision B Step 2 (the on-disk shape of each split file), not the
+    reconstructed logical view validate_data() already covers by hand.
+    """
+    schema = _load_schema(schema_name)
+    validator = jsonschema.Draft7Validator(schema)
+    return [
+        f"[jsonschema:{file_label}] {'/'.join(str(p) for p in e.path) or '(root)'}: {e.message}"
+        for e in validator.iter_errors(data)
+    ]
+
+
+def validate_split(
+    identity_path: str = None,
+    taxonomy_path: str = None,
+) -> bool:
+    """
+    REAL production entry point (GMI Decision Document v5 §2.1-§2.2,
+    Decision B Steps 2-3). Reads the two split files, jsonschema-checks
+    each against its own structural schema, merges them positionally via
+    src.config.yaml_split_merge (the SAME merge InstrumentLoader uses —
+    one implementation, not two that could silently drift apart), then
+    runs the full hand-written rule set via validate_data() unchanged.
+    """
+    if identity_path is None:
+        identity_path = str(
+            Path(__file__).parent.parent / "config" / "instruments_identity.yaml"
+        )
+    if taxonomy_path is None:
+        taxonomy_path = str(
+            Path(__file__).parent.parent / "config" / "instruments_taxonomy.yaml"
+        )
+
+    identity = yaml.safe_load(Path(identity_path).read_text())
+    taxonomy = yaml.safe_load(Path(taxonomy_path).read_text())
+
+    schema_errors = _validate_jsonschema_file(
+        identity, "identity.schema.yaml", "instruments_identity.yaml"
+    )
+    schema_errors += _validate_jsonschema_file(
+        taxonomy, "taxonomy.schema.yaml", "instruments_taxonomy.yaml"
+    )
+
+    # merge_split_trees() raises ValueError on structural misalignment
+    # (length mismatch, anchor-key mismatch, unexpected field overlap) —
+    # deliberately NOT caught here: a misaligned split is not a normal
+    # validation finding to report and continue past, it means the two
+    # files are not a coherent pair at all.
+    merged = merge_split_trees(identity, taxonomy)
+
+    return validate_data(merged, extra_errors=schema_errors)
+
+
 if __name__ == "__main__":
-    sys.exit(0 if validate() else 1)
+    sys.exit(0 if validate_split() else 1)

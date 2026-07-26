@@ -92,7 +92,8 @@ cp .env.example .env
 ### 2. Initialize & Validate Instruments
 
 ```bash
-# instruments.yaml already exists at v1.5 (699 symbols) — validate it:
+# instruments.yaml split into 2 files at v1.6 (v1.12.0, Decision B) —
+# validate reads and merges both, same invocation as before:
 python scripts/validate_instruments.py
 # Expect: VALIDATION PASSED — 699 symbols (Layer 1=640, Layer 2=59), no errors.
 ```
@@ -266,8 +267,9 @@ two semantics are incompatible). Backtest queries always guard:
 
 ### Domain Score Weight-Sum Invariant (v1.10.0)
 
-Every domain score's `_meta.contributes_to` weights in `instruments.yaml`
-must sum to **exactly 1.00** — enforced by
+Every domain score's `_meta.contributes_to` weights in
+`config/instruments_taxonomy.yaml` (v1.12.0, split from `instruments.yaml`
+— see CHANGELOG.md ADR-027) must sum to **exactly 1.00** — enforced by
 `scripts/validate_instruments.py::_validate_domain_score_weights()`. A
 full audit found 5 of 8 scores had drifted (1.05–1.30) due to
 undocumented contributors; all restored to literal fidelity with the
@@ -303,7 +305,10 @@ fixed in 8 modules across two releases (`quality_validator.py`,
 ```
 alpha-factory/
 ├── config/
-│   ├── instruments.yaml            # v1.5 — 699 symbols, dual-layer, 22 subcategories
+│   ├── instruments_identity.yaml   # v1.6 — sourcing fields (Decision B split)
+│   ├── instruments_taxonomy.yaml   # v1.6 — routing/scoring + _meta blocks
+│   ├── regime_sector_weights.yaml  # externalized from sector_rotation.py
+│   ├── schemas/instruments/        # jsonschema Draft-7, one per file above
 │   ├── bis_cb_rates.yaml           # 12 REF_AREA map + structural break registry
 │   ├── fred_series.yaml           # 60 FRED series registry
 │   ├── pipeline.yaml

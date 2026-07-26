@@ -1,0 +1,11 @@
+# regime_sector_weights.schema.yaml — JSON Schema (Draft 7) untuk
+# config/regime_sector_weights.yaml. GMI Decision Document v5 §2.2.
+"$schema": "http://json-schema.org/draft-07/schema#"
+title: "Alpha Factory regime_sector_weights.yaml"
+type: object
+required: ["RISK_ON", "RISK_OFF", "STAGFLATION", "REFLATION", "DISINFLATION"]
+additionalProperties:
+  type: object
+  additionalProperties:
+    type: number
+    minimum: 0

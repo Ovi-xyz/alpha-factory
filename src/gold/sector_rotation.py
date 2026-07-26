@@ -19,6 +19,7 @@ from pathlib import Path
 
 import duckdb
 import polars as pl
+import yaml
 from loguru import logger
 
 from src.utils.atomic_io import atomic_write_parquet
@@ -31,153 +32,19 @@ from src.config.instrument_loader import get_loader
 # weight_adj multiplier: 0.0 = exclude, 0.5 = underweight, 1.0 = neutral,
 #                        1.3 = moderate OW, 1.5 = strong OW, 2.0 = max OW
 
-# ADD Decision B Step 1 (GMI_Decision_Document_v3.docx): commodity_* key
-# names below are ALL the mechanical f"commodity_{subcategory}" formula
-# (Architecture v2.1 Addendum §8.4's own pseudocode) applied to the 5
-# commodity_subcategory enum values from Addendum §7.1 — EXCEPT one:
-# Addendum §8.2's own key-name table says "commodity_precious" (no
-# "_metals"), which does not match §7.1's own enum value
-# "precious_metals" — an internal inconsistency within that single
-# document, caught empirically by
-# test_no_orphaned_commodity_subcategory (it would have silently degraded
-# AU/AG to a neutral 1.0 weight in every regime via weights.get(key, 1.0)'s
-# fallback, instead of erroring). Resolved in favor of the mechanical
-# formula — the other 4 keys (energy/base_metals/agricultural/bulks) are
-# ALL literal f"commodity_{subcategory}" matches already, so
-# "commodity_precious_metals" is the internally-consistent choice, not
-# "commodity_precious". §7.1's enum value itself (commodity_subcategory=
-# 'precious_metals' in instruments.yaml) is left untouched — it is the
-# more consumer-facing contract of the two.
-REGIME_SECTOR_WEIGHTS: dict[str, dict[str, float]] = {
-
-    "RISK_ON": {
-        "Technology":             1.5,
-        "Consumer Discretionary": 1.3,
-        "Communication Services": 1.3,
-        "Financials":             1.2,
-        "Industrials":            1.1,
-        "Health Care":            0.9,
-        "Energy":                 1.0,
-        "Materials":              1.0,
-        "Consumer Staples":       0.7,
-        "Real Estate":            0.8,
-        "Utilities":              0.6,
-        "idx":                    1.1,    # IDX30 — foreign fund inflow
-        "forex":                  1.0,
-        # ADD Decision B Step 1 (GMI_Decision_Document_v3.docx, Architecture
-        # v2.1 Addendum §8): flat 'commodity' key replaced by 5 disaggregated
-        # subcategory keys. Base metals OW (China growth/PMI), precious UW
-        # (safe haven not needed in risk-on).
-        "commodity_precious_metals":     0.7,
-        "commodity_energy":       1.0,
-        "commodity_base_metals":  1.4,
-        "commodity_agricultural": 1.1,
-        "commodity_bulks":        1.3,
-        "index":                  1.0,
-        "High Growth & Popular":  1.4,
-    },
-
-    "RISK_OFF": {
-        "Technology":             0.6,
-        "Consumer Discretionary": 0.5,
-        "Communication Services": 0.7,
-        "Financials":             0.7,
-        "Industrials":            0.6,
-        "Health Care":            1.5,
-        "Energy":                 0.9,
-        "Materials":              0.7,
-        "Consumer Staples":       1.5,
-        "Real Estate":            0.8,
-        "Utilities":              1.5,
-        "idx":                    0.5,    # foreign fund outflow, IDR weakens
-        "forex":                  1.0,    # DXY bias long in risk-off
-        # ADD Decision B Step 1: precious metals OW (AU/AG safe haven),
-        # bulks severely UW (China construction halts).
-        "commodity_precious_metals":     1.4,
-        "commodity_energy":       0.9,
-        "commodity_base_metals":  0.6,
-        "commodity_agricultural": 0.9,
-        "commodity_bulks":        0.5,
-        "index":                  1.0,
-        "High Growth & Popular":  0.5,
-    },
-
-    "STAGFLATION": {
-        "Technology":             0.5,
-        "Consumer Discretionary": 0.5,
-        "Communication Services": 0.6,
-        "Financials":             0.7,
-        "Industrials":            1.0,
-        "Health Care":            1.2,
-        "Energy":                 1.5,    # CL primary beneficiary
-        "Materials":              1.4,
-        "Consumer Staples":       1.3,
-        "Real Estate":            0.5,    # Rate pressure hurts REITs
-        "Utilities":              1.1,
-        "idx":                    0.6,
-        "forex":                  1.0,    # commodity-linked FX (AUD, CAD)
-        # ADD Decision B Step 1: energy and precious metals primary
-        # beneficiaries; base metals UW (demand collapse despite inflation).
-        "commodity_precious_metals":     1.4,
-        "commodity_energy":       1.5,
-        "commodity_base_metals":  0.8,
-        "commodity_agricultural": 1.3,
-        "commodity_bulks":        0.7,
-        "index":                  0.8,
-        "High Growth & Popular":  0.5,
-    },
-
-    "REFLATION": {
-        "Technology":             0.8,
-        "Consumer Discretionary": 1.0,
-        "Communication Services": 0.9,
-        "Financials":             1.5,    # yield curve steepening = banks benefit
-        "Industrials":            1.4,
-        "Health Care":            0.9,
-        "Energy":                 1.3,
-        "Materials":              1.5,
-        "Consumer Staples":       0.8,
-        "Real Estate":            0.9,
-        "Utilities":              0.7,
-        "idx":                    1.2,
-        "forex":                  1.0,
-        # ADD Decision B Step 1: base metals and bulks OW (infrastructure
-        # cycle, China stimulus); precious UW (rising yields = opportunity
-        # cost of gold).
-        "commodity_precious_metals":     0.9,
-        "commodity_energy":       1.3,
-        "commodity_base_metals":  1.4,
-        "commodity_agricultural": 1.1,
-        "commodity_bulks":        1.2,
-        "index":                  1.0,
-        "High Growth & Popular":  0.9,
-    },
-
-    "DISINFLATION": {
-        "Technology":             1.5,    # growth + duration benefit
-        "Consumer Discretionary": 1.1,
-        "Communication Services": 1.2,
-        "Financials":             0.8,
-        "Industrials":            0.9,
-        "Health Care":            1.1,
-        "Energy":                 0.7,
-        "Materials":              0.7,
-        "Consumer Staples":       1.0,
-        "Real Estate":            1.4,    # duration + lower rates
-        "Utilities":              1.3,
-        "idx":                    0.9,
-        "forex":                  1.0,
-        # ADD Decision B Step 1: energy and bulks UW (demand slows, prices
-        # fall); precious moderately OW (falling real yields).
-        "commodity_precious_metals":     1.2,
-        "commodity_energy":       0.6,
-        "commodity_base_metals":  0.7,
-        "commodity_agricultural": 0.8,
-        "commodity_bulks":        0.6,
-        "index":                  1.0,
-        "High Growth & Popular":  1.3,    # long-duration growth benefits
-    },
-}
+# ADD GMI Decision Document v5 §2.1 (Decision B Step 2, 2026-07-22):
+# externalized from a Python dict literal into config/regime_sector_weights.yaml.
+# Values are UNCHANGED (extracted from the live dict via ast.literal_eval(),
+# not re-transcribed by hand) — including the commodity_precious_metals
+# naming fix from Decision B Step 1 (RISK-10, v1.11.0): the mechanical
+# f"commodity_{subcategory}" formula is the correct key, not the
+# Architecture v2.1 Addendum §8.2 table's "commodity_precious" typo. Full
+# history preserved in config/regime_sector_weights.yaml's own header, not
+# duplicated here.
+REGIME_SECTOR_WEIGHTS_PATH = Path("config/regime_sector_weights.yaml")
+REGIME_SECTOR_WEIGHTS: dict[str, dict[str, float]] = yaml.safe_load(
+    REGIME_SECTOR_WEIGHTS_PATH.read_text()
+)
 
 # Neutral fallback jika regime tidak dikenali
 NEUTRAL_WEIGHTS: dict[str, float] = {k: 1.0 for k in REGIME_SECTOR_WEIGHTS["RISK_ON"]}

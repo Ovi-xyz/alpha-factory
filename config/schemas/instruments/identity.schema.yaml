@@ -1,0 +1,85 @@
+# identity.schema.yaml — JSON Schema (Draft 7) untuk config/instruments_identity.yaml
+# GMI Decision Document v5 §2.2 (Decision B Step 3).
+#
+# Ditulis dalam YAML (bukan .json) mengikuti konvensi Bronze schema
+# registry yang sudah ada (config/schemas/*.yaml, 13 file) — lokasi dan
+# gaya penulisan yang sama, hanya domain berbeda (instrument config,
+# bukan Bronze OHLCV/fundamental payload).
+#
+# Cakupan yang DISENGAJA terbatas pada structural/type check (jenis field
+# yang jsonschema unggul mendeteksi — mis. boolean tertulis sebagai string
+# "true"). Cross-file invariant (698 total, weight sum = 1.00, symbol
+# lockstep antar file) TETAP hand-written di scripts/validate_instruments.py
+# — sesuai keputusan eksplisit Decision Document v5 §2.2 ("a schema was
+# never going to express these cleanly").
+"$schema": "http://json-schema.org/draft-07/schema#"
+title: "Alpha Factory instruments_identity.yaml"
+type: object
+required: ["version", "last_updated", "us_stocks", "idx_stocks", "commodity", "forex", "index", "context"]
+properties:
+  version:
+    type: string
+  last_updated:
+    type: string
+  us_stocks:
+    type: object
+    additionalProperties:
+      type: array
+      items: { "$ref": "#/$defs/instrument" }
+  idx_stocks:
+    type: object
+    additionalProperties:
+      type: array
+      items: { "$ref": "#/$defs/instrument" }
+  commodity:
+    type: object
+    additionalProperties:
+      type: array
+      items: { "$ref": "#/$defs/instrument" }
+  forex:
+    type: object
+    additionalProperties:
+      type: array
+      items: { "$ref": "#/$defs/instrument" }
+  index:
+    type: array
+    items: { "$ref": "#/$defs/instrument" }
+  context:
+    type: object
+    properties:
+      dollar:           { "$ref": "#/$defs/context_subcategory" }
+      dollar_basket:    { "$ref": "#/$defs/context_subcategory" }
+      fx_normalization: { "$ref": "#/$defs/context_subcategory" }
+      rates:      { type: object, additionalProperties: { "$ref": "#/$defs/context_subcategory" } }
+      equity:     { type: object, additionalProperties: { "$ref": "#/$defs/context_subcategory" } }
+      commodity:  { type: object, additionalProperties: { "$ref": "#/$defs/context_subcategory" } }
+      etf:        { type: object, additionalProperties: { "$ref": "#/$defs/context_subcategory" } }
+    additionalProperties: false
+
+"$defs":
+  instrument:
+    type: object
+    required: ["symbol"]
+    properties:
+      symbol:            { type: string, minLength: 1 }
+      raw_symbol:         { type: ["string", "null"] }
+      # yfinance_symbol: null diamati SECARA NYATA pada file real untuk
+      # CPO/RUBBER/TIN (tvdatafeed-only, deferred Wave 2) — eksplisit null
+      # by design (bukan "lupa isi"), ditemukan justru lewat schema check
+      # ini terhadap data real. type longgar untuk mencerminkan itu.
+      yfinance_symbol:    { type: ["string", "null"] }
+      tvfeed_symbol:      { type: ["string", "null"] }
+      timezone:           { type: ["string", "null"] }
+      base_currency:      { type: ["string", "null"] }
+      proxy_instrument:   { type: ["string", "null"] }
+    additionalProperties: false
+
+  context_subcategory:
+    type: object
+    properties:
+      instruments:
+        type: array
+        items: { "$ref": "#/$defs/instrument" }
+      # 'rates.*' subcategories (FRED/BIS macro series, no OHLCV instruments)
+      # carry no keys at all on the identity side — an empty {} is valid.
+    additionalProperties: false

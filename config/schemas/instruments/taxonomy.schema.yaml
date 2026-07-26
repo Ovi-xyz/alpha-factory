@@ -1,0 +1,96 @@
+# taxonomy.schema.yaml — JSON Schema (Draft 7) untuk config/instruments_taxonomy.yaml
+# GMI Decision Document v5 §2.2 (Decision B Step 3). Lihat identity.schema.yaml
+# untuk catatan konvensi & scope yang sama — tidak diulang di sini.
+"$schema": "http://json-schema.org/draft-07/schema#"
+title: "Alpha Factory instruments_taxonomy.yaml"
+type: object
+required: ["version", "last_updated", "us_stocks", "idx_stocks", "commodity", "forex", "index", "context"]
+properties:
+  version:
+    type: string
+  last_updated:
+    type: string
+  us_stocks:
+    type: object
+    additionalProperties:
+      type: array
+      items: { "$ref": "#/$defs/instrument" }
+  idx_stocks:
+    type: object
+    additionalProperties:
+      type: array
+      items: { "$ref": "#/$defs/instrument" }
+  commodity:
+    type: object
+    additionalProperties:
+      type: array
+      items: { "$ref": "#/$defs/instrument" }
+  forex:
+    type: object
+    additionalProperties:
+      type: array
+      items: { "$ref": "#/$defs/instrument" }
+  index:
+    type: array
+    items: { "$ref": "#/$defs/instrument" }
+  context:
+    type: object
+    properties:
+      dollar:           { "$ref": "#/$defs/context_subcategory" }
+      dollar_basket:    { "$ref": "#/$defs/context_subcategory" }
+      fx_normalization: { "$ref": "#/$defs/context_subcategory" }
+      rates:      { type: object, additionalProperties: { "$ref": "#/$defs/context_subcategory" } }
+      equity:     { type: object, additionalProperties: { "$ref": "#/$defs/context_subcategory" } }
+      commodity:  { type: object, additionalProperties: { "$ref": "#/$defs/context_subcategory" } }
+      etf:        { type: object, additionalProperties: { "$ref": "#/$defs/context_subcategory" } }
+    additionalProperties: false
+
+"$defs":
+  instrument:
+    type: object
+    required: ["symbol"]
+    properties:
+      symbol:                       { type: string, minLength: 1 }
+      layer:                        { type: integer, enum: [1, 2] }
+      context_category:             { type: string }
+      context_group:                { type: string }
+      context_available:            { type: boolean }
+      include_in_forecast:          { type: boolean }
+      proxy_for:                    { type: string }
+      proxy_correlation_expected:   { type: number, minimum: 0, maximum: 1 }
+      reclassified_from:            { type: string }
+      deferred_reason:              { type: string }
+      planned_wave:                 { type: integer, minimum: 1 }
+      reliability_flag:             { type: boolean }
+      exclude_from_lead_lag_leader: { type: boolean }
+      commodity_role:               { type: string, enum: ["trading", "context"] }
+      commodity_subcategory:
+        type: string
+        enum: ["precious_metals", "energy", "base_metals", "agricultural", "bulks"]
+      requires_fx_normalization:    { type: boolean }
+      notes:                        { type: string }
+      structural_break:             { type: object }   # free-form quality annotation
+    additionalProperties: false
+
+  context_subcategory:
+    type: object
+    properties:
+      instruments:
+        type: array
+        items: { "$ref": "#/$defs/instrument" }
+      _meta:
+        type: object
+        properties:
+          contributes_to:
+            type: array
+            items:
+              type: object
+              required: ["score", "weight"]
+              properties:
+                score:       { type: string }
+                weight:      { type: number, minimum: 0, maximum: 1 }
+                aggregation: { type: string }
+        additionalProperties: true   # subcategory_id/source/description/series/
+                                      # series_count/reliability_notes/etc. — free-
+                                      # form documentation fields, not re-typed here.
+    additionalProperties: false

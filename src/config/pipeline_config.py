@@ -51,9 +51,16 @@ class PipelineConfig:
     sentinels_path:  Path = field(default_factory=lambda: Path("data/.sentinels"))
 
     # ── Schema paths ──────────────────────────────────────────────────────────
-    schemas_dir:          Path = field(default_factory=lambda: Path("config/schemas"))
-    instruments_yaml:     Path = field(default_factory=lambda: Path("config/instruments.yaml"))
-    fred_series_yaml:     Path = field(default_factory=lambda: Path("config/fred_series.yaml"))
+    schemas_dir:           Path = field(default_factory=lambda: Path("config/schemas"))
+    # UPD Decision B Step 2 (GMI_Decision_Document_v5.docx, 2026-07-22):
+    # config/instruments.yaml no longer exists — split into 2 files. This
+    # field was already a documentation-only knob before the split (grep-
+    # confirmed: InstrumentLoader hardcodes its own paths, does not read
+    # this config) — kept that way, just updated so it's not a stale
+    # reference to a deleted file.
+    instruments_identity_yaml: Path = field(default_factory=lambda: Path("config/instruments_identity.yaml"))
+    instruments_taxonomy_yaml: Path = field(default_factory=lambda: Path("config/instruments_taxonomy.yaml"))
+    fred_series_yaml:      Path = field(default_factory=lambda: Path("config/fred_series.yaml"))
 
     # ── Bronze settings ───────────────────────────────────────────────────────
     bronze_compression:        str   = "snappy"

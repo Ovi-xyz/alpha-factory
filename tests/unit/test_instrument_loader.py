@@ -1,6 +1,10 @@
 """tests/unit/test_instrument_loader.py — InstrumentLoader test suite"""
 
+from pathlib import Path
+
 import pytest
+import yaml
+
 from src.config.instrument_loader import get_loader, InstrumentLoader
 
 
@@ -457,3 +461,100 @@ class TestGMIDecisionDocumentsV1V2:
         assert len(ids) == 22
         assert "context_dollar_basket" in ids
         assert "context_fx_normalization" in ids
+
+
+class TestInstrumentLoaderCoverageGaps:
+    """NEW (2026-07-22) — targeted coverage for branches the real
+    config/instruments_identity.yaml + instruments_taxonomy.yaml never
+    exercise in practice (mis. index: is empty since ADR-003 reclassified
+    SPX/VIX/DXY out of Layer 1), found while closing Gate G-6's coverage
+    gap alongside the Decision B split (GMI_Decision_Document_v5.docx).
+    Uses the constructor's identity_path/taxonomy_path override — added
+    by the same split — to build small synthetic pairs, rather than
+    touching the real config files."""
+
+    def setup_method(self):
+        self.loader = get_loader()
+
+    def test_is_idx_is_forex_is_index_hive_key_properties(self):
+        idx_inst = self.loader.by_market("idx")[0]
+        assert idx_inst.is_idx is True
+        assert idx_inst.is_forex is False
+
+        fx_inst = self.loader.by_market("forex")[0]
+        assert fx_inst.is_forex is True
+        assert fx_inst.is_idx is False
+
+        assert fx_inst.hive_key == fx_inst.symbol
+
+    def test_get_with_market_filter_raises_when_market_not_present(self):
+        with pytest.raises(KeyError, match="tidak ditemukan di market"):
+            self.loader.get("AAPL", market="idx")
+
+    def test_by_sector_filters_us_stocks_only(self):
+        tech = self.loader.by_sector("Technology")
+        assert len(tech) > 0
+        assert all(i.is_us_stock and i.sector == "Technology" for i in tech)
+
+    def test_symbol_list_with_market_filter(self):
+        idx_symbols = self.loader.symbol_list(market="idx")
+        assert "PTBA" in idx_symbols
+        assert all(isinstance(s, str) for s in idx_symbols)
+
+    def _write_pair(self, tmp_path, identity: dict, taxonomy: dict):
+        id_path = tmp_path / "identity.yaml"
+        tax_path = tmp_path / "taxonomy.yaml"
+        id_path.write_text(yaml.dump(identity))
+        tax_path.write_text(yaml.dump(taxonomy))
+        return id_path, tax_path
+
+    def _base_pair(self):
+        base_identity = {
+            "version": "1.0", "last_updated": "2026-01-01",
+            "us_stocks": {}, "idx_stocks": {}, "commodity": {},
+            "forex": {}, "index": [], "context": {},
+        }
+        base_taxonomy = {
+            "version": "1.0", "last_updated": "2026-01-01",
+            "us_stocks": {}, "idx_stocks": {}, "commodity": {},
+            "forex": {}, "index": [], "context": {},
+        }
+        return base_identity, base_taxonomy
+
+    def test_build_index_path_with_known_and_unknown_symbol(self, tmp_path):
+        """index: list — empty in the real file post-ADR-003 (SPX/VIX
+        reclassified to Layer 2), so _build_index() is dead code against
+        real data. Covers both the YFINANCE_INDEX_MAP hit and the
+        f'^{symbol}' fallback for an unmapped symbol."""
+        identity, taxonomy = self._base_pair()
+        identity["index"] = [
+            {"symbol": "SPX"},          # in YFINANCE_INDEX_MAP -> ^GSPC
+            {"symbol": "MADE_UP_IDX"},  # not mapped -> fallback ^MADE_UP_IDX
+        ]
+        id_path, tax_path = self._write_pair(tmp_path, identity, taxonomy)
+        loader = InstrumentLoader(identity_path=id_path, taxonomy_path=tax_path)
+        spx = loader.get("SPX")
+        assert spx.yfinance_symbol == "^GSPC"
+        assert spx.is_index is True
+        fallback = loader.get("MADE_UP_IDX")
+        assert fallback.yfinance_symbol == "^MADE_UP_IDX"
+
+    def test_malformed_context_blocks_are_skipped_not_raised(self, tmp_path):
+        """Defensive isinstance() guards in _load_layer2()/
+        _load_subcategory_meta(): a malformed context block (wrong type
+        where a dict is expected) must be skipped, not raise — YAML typos
+        at this level should degrade to 'that subcategory contributed
+        nothing' rather than crash the whole loader."""
+        identity, taxonomy = self._base_pair()
+        identity["context"] = {"dollar": "oops_a_string_not_a_dict"}
+        taxonomy["context"] = {
+            "dollar": "oops_a_string_not_a_dict",
+            "equity": "also_not_a_dict",
+            "commodity": {"metals": "still_not_a_dict"},
+            "rates": {"fed": "not_a_dict_either"},
+        }
+        id_path, tax_path = self._write_pair(tmp_path, identity, taxonomy)
+        # Must not raise despite the malformed blocks above.
+        loader = InstrumentLoader(identity_path=id_path, taxonomy_path=tax_path)
+        assert loader.all_context() == []
+        assert loader.subcategory_meta("context_dollar") == {}
