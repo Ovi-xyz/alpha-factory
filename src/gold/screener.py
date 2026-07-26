@@ -35,6 +35,15 @@ GOLD_SECTOR_PATH    = Path("data/gold/sector/sector_regime_weights.parquet")
 GOLD_CORR_PATH      = Path("data/gold/correlation/correlation_clusters.parquet")
 SILVER_SENTIMENT    = "data/silver/sentiment/date=*/*.parquet"
 GOLD_SCREENER_PATH  = Path("data/gold/screener")
+# FIX GLD-SCR-002: these two were previously built inline as ad hoc string/
+# f-string Path constructions inside build_watchlist()/_enrich_sentiment()
+# (not the SQL-injection kind — plain filesystem paths — but un-patchable
+# hardcodes all the same, matching the same class of issue fixed via
+# REGIME_STORE_PATH in mtf_alignment.py this same thread). Promoted to
+# module-level roots alongside the constants above; the per-run_date
+# filename is still built dynamically where it's used.
+SILVER_ACTIVE_SYMBOLS_ROOT = Path("data/silver/active_symbols")
+SILVER_SENTIMENT_ROOT      = Path("data/silver/sentiment")
 
 # Screening filters (hard thresholds for watchlist inclusion)
 MIN_MTF_SCORE      = 5       # |score| >= 5 → grade A or B only
@@ -206,8 +215,8 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     has_regime  = GOLD_REGIME_PATH.exists()
     has_sector  = GOLD_SECTOR_PATH.exists()
     has_corr    = GOLD_CORR_PATH.exists()
-    active_sym_path = Path(
-        f"data/silver/active_symbols/active_{run_date.isoformat()}.parquet"
+    active_sym_path = (
+        SILVER_ACTIVE_SYMBOLS_ROOT / f"active_{run_date.isoformat()}.parquet"
     )
     has_active_symbols = active_sym_path.exists()
 
@@ -292,7 +301,21 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     FROM mtf m
     LEFT JOIN sector_tbl s ON m.symbol = s.symbol
     LEFT JOIN active_tbl  a ON m.symbol = a.symbol
-    CROSS JOIN (SELECT * FROM regime_tbl LIMIT 1) r
+    -- FIX GLD-SCR-001: was CROSS JOIN (SELECT * FROM regime_tbl LIMIT 1) r.
+    -- CROSS JOIN against a subquery that legitimately produces ZERO rows
+    -- (regime_store.parquet missing, or present but with no row for this
+    -- exact run_date — e.g. --force run ahead of gold_regime, or a
+    -- backfill date regime detection never covered) is a Cartesian
+    -- product with an empty relation, which is empty by definition — it
+    -- silently discarded the ENTIRE watchlist regardless of how many
+    -- valid MTF/sector/active candidates existed. Empirically reproduced
+    -- with a standalone DuckDB query (0 rows out with CROSS JOIN, 2/2
+    -- preserved with LEFT JOIN ... ON TRUE, r.* correctly NULL rather
+    -- than dropping rows) before this fix was written. LEFT JOIN ON TRUE
+    -- is the correct "broadcast at most one row, degrade to NULL, never
+    -- drop the left side" join — the same graceful-degrade contract
+    -- sector_tbl/active_tbl already get via LEFT JOIN + COALESCE above.
+    LEFT JOIN (SELECT * FROM regime_tbl LIMIT 1) r ON TRUE
     WHERE COALESCE(s.sector_weight_adj, 1.0) > $min_sector_weight
       AND COALESCE(a.dollar_volume_20d, 1e9) > $min_dollar_volume
     ORDER BY ABS(m.mtf_score) DESC,
@@ -370,9 +393,22 @@ def _deduplicate_by_cluster(
         df = df.with_columns(
             pl.col("cluster_id").fill_null(-1)
         )
-        # Rank within cluster
+        # Rank within cluster — preserves the DataFrame's existing row
+        # order (i.e. the caller's ORDER BY ABS(mtf_score) DESC, ... from
+        # build_watchlist), so rank 0 is always the highest-priority
+        # candidate already in the cluster.
+        # FIX GLD-SCR-003: pl.int_ranges() (plural) broadcasts a single
+        # List[Int64] value (e.g. [0,1,2]) to every row in a group — it
+        # does NOT number rows individually. The subsequent
+        # `cluster_rank < MAX_PER_CLUSTER` comparison then raised
+        # `SchemaError: could not evaluate '<' comparison ... List(Int64)`
+        # on every call where correlation data was actually present,
+        # caught by the except below and silently ignored — verified
+        # empirically with a standalone repro before this fix (see
+        # thread report). pl.int_range() (singular) is the correct
+        # per-row "position within group" primitive.
         df = df.with_columns(
-            pl.int_ranges(pl.len()).over("cluster_id").alias("cluster_rank")
+            pl.int_range(pl.len()).over("cluster_id").alias("cluster_rank")
         )
         df = df.filter(pl.col("cluster_rank") < MAX_PER_CLUSTER)
         df = df.drop(["cluster_id", "cluster_rank"])
@@ -427,7 +463,7 @@ def _enrich_sentiment(df: pl.DataFrame, run_date: date) -> pl.DataFrame:
     GD §5.2.4: sentiment_score is a DATA field (informational).
     """
     sentiment_path = (
-        Path("data/silver/sentiment")
+        SILVER_SENTIMENT_ROOT
         / f"date={run_date.isoformat()}"
         / "sentiment_silver.parquet"
     )

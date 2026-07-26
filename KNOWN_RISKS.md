@@ -847,7 +847,179 @@ passed, 0 failed.
 
 ---
 
-*Last updated: v1.11.2 — Post-ADR-026 hardening (coverage gap closure,
+## RISK-12 (NEW): `gold_screener`'s regime join silently zeroed the entire watchlist whenever regime data was momentarily unavailable — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED.** Discovered empirically while writing the first
+real-function coverage for `build_watchlist()` (previously
+`tests/unit/test_screener_gld005.py` covered only `_check_data_freshness()`
+— `build_watchlist()` itself, the actual multi-source join, had zero
+tests).
+
+**GD Reference:** GD §5.2.4 (Screener & Watchlist), §0.4 Interface
+Contract (`watchlist_{date}.parquet` is a promised daily Gold output).
+
+### What the risk was
+
+`build_watchlist()`'s main query broadcast the single active-regime row
+onto every MTF candidate via `CROSS JOIN (SELECT * FROM regime_tbl LIMIT
+1) r`. When `regime_store.parquet` doesn't exist yet, or exists but has
+no row for the exact `run_date` (a `--force` run ahead of `gold_regime`,
+or a backfill date regime detection never covered), `regime_tbl` is a
+legitimately **zero-row** placeholder — and a `CROSS JOIN` (Cartesian
+product) against an empty relation is empty, by definition, regardless of
+how many rows are on the other side. This silently discarded the entire
+watchlist even when MTF/sector/active data were all perfectly healthy.
+Reproduced with a standalone DuckDB query before touching the source: 0
+rows out with `CROSS JOIN`, 2/2 preserved (with `r.*` correctly `NULL`)
+after switching to `LEFT JOIN (SELECT * FROM regime_tbl LIMIT 1) r ON
+TRUE` — the same graceful-degrade contract `sector_tbl`/`active_tbl`
+already get via `LEFT JOIN` + `COALESCE` a few lines above it in the same
+query.
+
+### Why this was invisible
+
+In the normal dependency-guarded daily sequence, `gold_regime` always
+precedes `gold_screener` and (in the common case) writes a row for
+today before the screener runs, so the bug wouldn't trigger under
+routine operation — only under `--force`, backfill, or a regime-detection
+gap for that specific date. No existing test called `build_watchlist()`
+at all, so this went unnoticed regardless.
+
+### Fix
+
+`CROSS JOIN (SELECT * FROM regime_tbl LIMIT 1) r` → `LEFT JOIN (SELECT *
+FROM regime_tbl LIMIT 1) r ON TRUE`. Regime columns (`regime`,
+`regime_composite`, `regime_confidence`, `regime_transition`,
+`transition_alert`) are now `NULL` — not row-eliminating — when regime
+data is unavailable, consistent with the project's "data field, not a
+decision" philosophy (GD §0.3): the screener reports what it knows,
+Trading Engine interprets absence.
+
+### Verification
+
+`tests/unit/test_screener.py::TestBuildWatchlistRegimeJoinRegression` (6
+tests) is the permanent regression guard: missing file, file-exists-but-
+no-matching-row, corrupt file, and the correct-broadcast happy path are
+all covered. Full suite: 1385 passed, 0 failed, `screener.py` coverage
+31% → 100%.
+
+---
+
+## RISK-13 (NEW): correlation-cluster deduplication in `gold_screener` has never actually executed — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED.** Discovered empirically alongside RISK-12, while
+building a real `correlation_clusters.parquet` fixture for
+`_deduplicate_by_cluster()` — also previously untested.
+
+**GD Reference:** GD §15.1 (Correlation Concentration Guard — "Max 2
+posisi per correlation cluster (enforced di screener SQL)").
+
+### What the risk was
+
+`_deduplicate_by_cluster()` computed `pl.int_ranges(pl.len()).over
+("cluster_id")` intending a per-row "rank within cluster" — but
+`int_ranges` (plural) is polars' **list-producing** primitive: it
+broadcasts a single `List[Int64]` value (e.g. `[0, 1, 2]`) identically to
+every row in a group, it does not number rows individually. The
+subsequent `.filter(pl.col("cluster_rank") < MAX_PER_CLUSTER)` then
+raised `SchemaError: could not evaluate '<' comparison ... List(Int64)`
+on every call where correlation data actually existed — caught by this
+same function's own `except Exception: logger.debug(...)`, which simply
+returned the **unmodified** input DataFrame. Net effect: the
+Correlation Concentration Guard has silently never fired for any real
+correlation input since it was written; screener output could legally
+contain more than `MAX_PER_CLUSTER` (2) highly-correlated symbols with no
+error, warning, or visible signal that dedup wasn't happening.
+
+### Why this was invisible
+
+The broad `except Exception` around the whole function body is
+appropriate in principle (a missing/corrupt correlation file shouldn't
+break the screener) — but it also swallowed a genuine logic bug at
+`logger.debug` level, below the visibility threshold anyone would notice
+in normal operation. No test exercised this function with real, non-empty
+correlation data before now.
+
+### Fix
+
+`pl.int_ranges(pl.len())` → `pl.int_range(pl.len())` (singular). Verified
+empirically before the source change: the singular form produces a
+proper per-row `Int64` position-within-group (`0, 1, 2, ...`), and the
+existing DataFrame row order — which is already `ORDER BY
+ABS(mtf_score) DESC, ...` from the caller — means rank 0 within a cluster
+is always the highest-priority candidate, so the correct member(s) are
+kept.
+
+### Verification
+
+`tests/unit/test_screener.py::TestClusterDeduplication` (3 tests) is the
+permanent regression guard, including a direct call proving the previous
+`SchemaError` no longer occurs and that the lowest-priority member of an
+over-represented cluster is the one dropped. Full suite: 1385 passed, 0
+failed.
+
+---
+
+## RISK-14 (NEW): EIA incremental-fetch cache scanned a path that never matched real written data — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED.** Discovered empirically while writing real-function
+coverage for `bronze/eia_ingester.py` (Decision C tranche item #6,
+previously zero coverage).
+
+**GD Reference:** Supplementary Design v1.1 G1 (`IncFetchProtocol` —
+the general incremental-fetch pattern this cache is meant to mirror for
+EIA specifically, per its own `FIX EIA-2`/`FIX EIA-4` comments).
+
+### What the risk was
+
+`_build_last_known_cache()` scanned a hardcoded literal
+`"data/bronze/commodity/eia/**/*.parquet"` — independent of
+`self.BASE_PATH` entirely, and pointed at `commodity/eia/`. The
+ingester's own `write_macro(source="eia", domain="crude_oil")` call
+actually writes to `BASE_PATH/macro/eia/crude_oil/` (per
+`BronzeIngester.write_macro()`'s `path = self.BASE_PATH / "macro" /
+source / domain`). The scan pattern therefore never matched any file
+this ingester ever wrote. `FIX EIA-4` (an earlier, in-code-documented fix)
+correctly repaired how the cache is *read* — it was being queried with
+`spec['name']` instead of the cache's actual `spec['id']` keys — but the
+cache was never populated in the first place, so that fix alone couldn't
+have restored the intended behavior. Net effect: `EIAIngester.run()`
+silently used the full 5-year lookback window on every single invocation,
+never the intended 14-day incremental buffer — not a crash, not a
+visible error, just permanently degraded to the slow path.
+
+### Why this was invisible
+
+The scan is wrapped in a broad `except Exception: pass`, and an empty
+result set from a non-matching glob doesn't raise — it just yields `{}`,
+identical in behavior to "no prior EIA data exists yet." Both look the
+same from the outside (a full lookback fetch), so nothing about normal
+operation would surface the difference. No test called
+`_build_last_known_cache()` with a real, correctly-placed bronze fixture
+before now.
+
+### Fix
+
+`pattern = "data/bronze/commodity/eia/**/*.parquet"` → `pattern =
+str(self.BASE_PATH / "macro" / "eia" / "crude_oil" / "**" / "*.parquet")`
+— now BASE_PATH-relative (testable, deployment-correct) and pointed at
+the domain `write_macro()` actually uses.
+
+### Verification
+
+`tests/unit/test_eia_ingester.py::TestBuildLastKnownCache` and
+`TestIncrementalFetchWindow` are the permanent regression guards — both
+failed against the pre-fix code (empty cache, cache lookup `KeyError`,
+incremental window falling back to the 5-year default) and pass against
+the fix. Full suite: 16/16 in this file, no regressions elsewhere.
+
+---
+
+*Last updated: v1.12.1 (in progress) — Decision C coverage tranche items
+#1–#3 (`mtf_alignment.py`, `screener.py`, `eia_ingester.py`), three real
+bugs found and fixed via first real-function test coverage (RISK-12,
+RISK-13, RISK-14), July 2026.
+Prior entry: v1.11.2 — Post-ADR-026 hardening (coverage gap closure,
 dead-script archival, hardcode fixes), July 2026.
 Prior entry: GMI Decision Document v3 implementation (Decision A +
 Decision B Step 1), July 2026.

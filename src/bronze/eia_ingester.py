@@ -198,7 +198,17 @@ class EIAIngester(BronzeIngester):
 
     def _build_last_known_cache(self) -> dict[str, date]:
         """FIX EIA-2: single scan to find last observation_date per EIA series."""
-        pattern = "data/bronze/commodity/eia/**/*.parquet"
+        # FIX EIA-5: was a hardcoded literal "data/bronze/commodity/eia/**"
+        # — matching neither self.BASE_PATH (ignored entirely, breaking
+        # test isolation and any deployment where BASE_PATH != the
+        # default) nor the domain write_macro() actually uses for this
+        # ingester ("macro/eia/crude_oil/", not "commodity/eia/"). The
+        # glob therefore never matched any real file this ingester ever
+        # wrote, so the cache was always {} and every run silently used
+        # the full 5-year lookback (see FIX EIA-4's own key-mismatch fix
+        # above, which corrected how the cache is READ but not this —
+        # the cache was never actually populated in the first place).
+        pattern = str(self.BASE_PATH / "macro" / "eia" / "crude_oil" / "**" / "*.parquet")
         cache: dict[str, date] = {}
         try:
             import duckdb

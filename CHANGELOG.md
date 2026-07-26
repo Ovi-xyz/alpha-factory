@@ -1,5 +1,206 @@
 # CHANGELOG — Data Platform
 
+## v1.12.1 — Decision C: Coverage Tranche (7/7 files) — Tiga Bug Nyata Ditemukan & Diperbaiki; pydantic Dihapus (Juli 2026)
+
+Dokumen referensi: `GMI_Decision_Document_v5.docx` §3 (Decision C — coverage
+tranche, sequencing dan exclusion policy) dan §9.2 Development Log
+(pydantic removal, gated pada konfirmasi ulang tidak ada penggunaan lain).
+Thread ini dimulai dari fresh clone di atas package v1.12.0 (dikonfirmasi
+ulang terhadap live main commit `9f7eab3`: 1329 passed, coverage 70.36%,
+699 instrumen — exact match, tidak ada drift), lalu menerapkan seluruh 7
+file tranche Decision C secara berurutan sesuai sequencing yang sudah
+diputuskan (`gold/mtf_alignment.py` → `gold/screener.py` →
+`bronze/fred_ingester.py` → `bronze/bls_ingester.py` →
+`bronze/imf_ingester.py` → `bronze/eia_ingester.py` →
+`utils/pipeline_dashboard.py`). `correlation_matrix.py` dan
+`hmm_regime.py` dikecualikan sesuai keputusan yang sudah ada (REPLACED by
+design, tetap di denominator coverage, tidak disentuh).
+
+Total: **140 test baru** (7 file baru: `test_screener.py`,
+`test_fred_ingester.py`, `test_bls_ingester.py`, `test_imf_ingester.py`,
+`test_eia_ingester.py`, `test_pipeline_dashboard.py`, plus 15 test
+ditambahkan ke `test_mtf_alignment.py` yang sudah ada) | **1469 passed / 0
+failed / 0 error** (Δ +140 dari v1.12.0 — 1329) | **coverage 70.36% →
+81.97%** | **3 bug nyata ditemukan dan diperbaiki** (RISK-12, RISK-13,
+RISK-14 — lihat `KNOWN_RISKS.md`) selama membangun fixture real untuk
+fungsi yang sebelumnya nol coverage | **4 hardcode path dipromosikan ke
+module-level constant** | **pydantic dihapus** (dikonfirmasi unused kedua
+kalinya, `poetry remove pydantic`). PATCH bump (1.12.0 → 1.12.1): seluruh
+perubahan adalah test coverage, bug fix pada path yang sebelumnya rusak,
+dan dependency cleanup — tidak ada perubahan interface contract atau
+schema Silver/Gold.
+
+| File | Sebelum | Sesudah |
+| --- | --- | --- |
+| `gold/mtf_alignment.py` | 20% | 98% |
+| `gold/screener.py` | 31% | **100%** |
+| `bronze/fred_ingester.py` | 31% | 87% |
+| `bronze/bls_ingester.py` | 28% | 94% |
+| `bronze/imf_ingester.py` | 27% | 95% |
+| `bronze/eia_ingester.py` | 24% | 95% |
+| `utils/pipeline_dashboard.py` | 29% | 99% |
+
+### FIX GLD-SCR-001 [src/gold/screener.py] — CROSS JOIN Regime Kosong Menghapus Seluruh Watchlist
+
+**Root cause**: `build_watchlist()` mem-broadcast satu baris regime aktif
+ke setiap kandidat MTF via `CROSS JOIN (SELECT * FROM regime_tbl LIMIT 1)
+r`. Ketika `regime_store.parquet` belum ada, atau ada tapi tidak punya
+baris untuk `run_date` yang tepat (`--force` run sebelum `gold_regime`,
+atau backfill date yang belum pernah di-cover regime detection),
+`regime_tbl` adalah placeholder nol-baris yang legitimate — dan CROSS JOIN
+(Cartesian product) terhadap relasi kosong adalah kosong, definisi
+matematis, terlepas dari berapa banyak baris di sisi lain. Efeknya:
+seluruh watchlist hilang diam-diam meski data MTF/sector/active sempurna
+valid.
+
+**Opsi yang dipertimbangkan**: dipertahankan CROSS JOIN + guard manual
+sebelum query (tambah kompleksitas kontrol-alur untuk masalah yang solvable
+di level join) — ditolak. LEFT JOIN ... ON TRUE (dipilih) — pola
+graceful-degrade yang PERSIS sama dengan yang sudah dipakai `sector_tbl`/
+`active_tbl` beberapa baris di atasnya di query yang sama.
+
+**Fix**: `CROSS JOIN (SELECT * FROM regime_tbl LIMIT 1) r` → `LEFT JOIN
+(SELECT * FROM regime_tbl LIMIT 1) r ON TRUE`. Kolom regime
+(`regime`, `regime_composite`, `regime_confidence`, `regime_transition`,
+`transition_alert`) sekarang NULL — bukan menghapus baris — saat data
+regime tidak tersedia, konsisten dengan filosofi "data field, bukan
+keputusan" (GD §0.3).
+
+**Diverifikasi empiris**: standalone DuckDB repro sebelum menyentuh source
+— 0 baris keluar dengan CROSS JOIN, 2/2 baris terjaga (dengan `r.*` NULL
+yang benar) dengan LEFT JOIN ON TRUE.
+
+**Test baru**: `TestBuildWatchlistRegimeJoinRegression` (6 test) —
+`tests/unit/test_screener.py`.
+
+### FIX GLD-SCR-003 [src/gold/screener.py] — Correlation Concentration Guard Tidak Pernah Benar-Benar Jalan
+
+**Root cause**: `_deduplicate_by_cluster()` memakai `pl.int_ranges(pl.len
+()).over("cluster_id")` — bentuk JAMAK yang menghasilkan satu nilai
+`List[Int64]` yang di-broadcast identik ke setiap baris dalam satu grup
+(mis. `[0,1,2]`), BUKAN nomor urut per-baris. `filter(cluster_rank <
+MAX_PER_CLUSTER)` selanjutnya raise `SchemaError` (perbandingan `<`
+terhadap kolom List) pada SETIAP invocation nyata dengan data korelasi
+asli — ditangkap diam-diam oleh `except Exception: logger.debug(...)` milik
+fungsi ini sendiri. Efeknya: GD §15.1 Correlation Concentration Guard ("Max
+2 posisi per correlation cluster") tidak pernah benar-benar tereksekusi
+untuk input korelasi nyata manapun sejak fungsi ini ditulis.
+
+**Fix**: `pl.int_ranges(pl.len())` → `pl.int_range(pl.len())` (bentuk
+TUNGGAL — posisi skalar per-baris dalam grup, bukan list). Urutan baris
+existing (`ORDER BY ABS(mtf_score) DESC, ...` dari caller) tetap terjaga
+oleh `.over()`, jadi rank 0 dalam satu cluster selalu kandidat
+prioritas-tertinggi yang sudah ada di cluster itu.
+
+**Diverifikasi empiris**: standalone repro sebelum fix — plural raise
+`SchemaError`; singular menghasilkan `Int64` per-baris yang benar (`[0,1,2]`
+untuk grup 3-anggota, `[0,1]` untuk grup 2-anggota), filter selanjutnya
+sukses.
+
+**Test baru**: `TestClusterDeduplication` (3 test).
+
+### FIX GLD-SCR-002 [src/gold/screener.py] — Dua Path Hardcode Dipromosikan ke Module Constant
+
+`active_sym_path` (di `build_watchlist()`) dan `sentiment_path` (di
+`_enrich_sentiment()`) sebelumnya dibangun inline sebagai f-string/`Path()`
+literal, tidak bisa di-monkeypatch untuk isolasi test. Dipromosikan ke
+`SILVER_ACTIVE_SYMBOLS_ROOT` dan `SILVER_SENTIMENT_ROOT` — nilai default
+identik, filename per-`run_date` tetap dibangun dinamis di titik pemakaian.
+
+### FIX GLD-MTF-COV-01 [src/gold/mtf_alignment.py] — Regime Path Hardcode + Coverage 20% → 98%
+
+`_apply_regime_compatible()` sebelumnya hanya diuji lewat salinan
+tangan-duplikasi dari logikanya sendiri (`_apply_mock` di test lama) —
+fungsi asli, `_compute_mtf_alignment()`, dan `run()` tidak pernah benar-
+benar dipanggil oleh test manapun. `regime_path` (string literal inline)
+dipromosikan ke `REGIME_STORE_PATH` (module constant, pola sama dengan
+`GOLD_SIGNALS_PATH`/`GOLD_MTF_PATH` yang sudah ada, dan `REGIME_STORE_PATH`
+milik `macro_regime.py` sendiri) untuk memungkinkan isolasi test.
+
+**Observasi (di-flag, TIDAK diperbaiki — di luar scope tranche test-only
+ini)**: `reward_risk_ratio = (1.5*atr)/(1.25*atr)` secara aljabar selalu
+sama dengan konstanta 1.2 untuk atr berapapun > 0 — kolom ini saat ini
+tidak membawa informasi spesifik-simbol/volatilitas meski namanya begitu.
+Test baru mengunci PERILAKU SAAT INI sebagai regression guard, bukan
+endorsement bahwa formulanya benar. Keputusan ada di tangan Ovi.
+
+**Test baru**: 22 test baru + 1 ditambahkan (`TestComputeMtfAlignment*`,
+`TestApplyRegimeCompatibleReal`, `TestRunIntegration`,
+`TestGetMtfSummaryFullPath`) di `test_mtf_alignment.py`.
+
+### FIX EIA-5 [src/bronze/eia_ingester.py] — Cache Incremental-Fetch Tidak Pernah Ke-populate
+
+**Root cause**: `_build_last_known_cache()` men-scan literal hardcode
+`"data/bronze/commodity/eia/**/*.parquet"` — independen dari
+`self.BASE_PATH` sepenuhnya, dan menunjuk ke `commodity/eia/`. Padahal
+`write_macro(source="eia", domain="crude_oil")` milik ingester ini sendiri
+menulis ke `BASE_PATH/macro/eia/crude_oil/`. Pattern scan itu TIDAK PERNAH
+match file manapun yang pernah ditulis ingester ini. `FIX EIA-4`
+(dokumentasi in-code dari fix sebelumnya) memperbaiki cara cache DIBACA
+(key mismatch `spec['name']` vs `spec['id']`) — tapi cache-nya sendiri
+tidak pernah terisi sejak awal, jadi fix itu saja tidak cukup memulihkan
+perilaku yang dimaksud. Efeknya: `EIAIngester.run()` diam-diam selalu
+pakai lookback 5-tahun penuh di SETIAP invocation, tidak pernah buffer
+incremental 14-hari yang dimaksud.
+
+**Fix**: `pattern` sekarang `str(self.BASE_PATH / "macro" / "eia" /
+"crude_oil" / "**" / "*.parquet")` — BASE_PATH-relative (testable, benar
+untuk deployment manapun) dan menunjuk ke domain yang benar-benar dipakai
+`write_macro()`.
+
+**Test baru**: `TestBuildLastKnownCache`, `TestIncrementalFetchWindow` —
+keduanya gagal terhadap kode pre-fix (cache kosong, `KeyError`, window
+incremental jatuh ke default 5-tahun), lulus terhadap fix.
+
+### REMOVED [pyproject.toml, poetry.lock] — pydantic
+
+Dikonfirmasi ulang unused (`grep` kedua kali, exit 1 — nol match di
+`src/` maupun `scripts/`), perlakuan sama seperti alpha-vantage sebelum
+benar-benar di-drop (Decision A / Checkpoint v5). `poetry remove
+pydantic` — `pyproject.toml` dan `poetry.lock` diperbarui konsisten.
+Keputusan "removal" ini adalah konfirmasi ulang eksplisit yang memang
+diminta Development Log §9.2 ("belongs to whoever confirms there's no
+other intended use"), bukan penghapusan diam-diam yang dilipat ke
+perubahan lain.
+
+### ADD [tests/unit/test_fred_ingester.py, test_bls_ingester.py, test_imf_ingester.py, test_pipeline_dashboard.py] — Coverage Tranche Sisanya
+
+Empat file lain di tranche Decision C — tidak ada bug nyata ditemukan
+(berbeda dari `screener.py`/`eia_ingester.py` di atas), murni penambahan
+coverage terhadap fungsi yang sebelumnya nol test: parsing period BLS
+(M/Q/A/M13), fallback FRED-mirror BLS saat `BLS_API_KEY` absen, batching
+25-series BLS, proxy release-date IMF WEO (Oktober tahun berjalan → April
+tahun depan → fallback run_date), clamping release_date FRED terhadap
+run_date, gerbang SchemaValidator nyata (bukan mock) di keempatnya, dan
+seluruh 5 section dashboard (`_section_job_status` s/d
+`_section_data_freshness`) via `monkeypatch.chdir(tmp_path)` untuk
+isolasi CWD-relative glob.
+
+**Observasi (di-flag, tidak diperbaiki)**: `pipeline_dashboard.py`
+membangun ~15 glob path sebagai literal CWD-relative tanpa module
+constant — pola hardcode yang sama dengan yang diperbaiki di
+`mtf_alignment.py`/`screener.py`, tapi file ini murni diagnostik
+(kegagalan mode aman: dashboard menampilkan "no data", bukan korupsi
+data) sehingga refactor besar-besaran path-nya sengaja tidak dilakukan
+di tranche ini — prioritas terendah dari 7 file per sequencing Decision
+C sendiri.
+
+### Diverifikasi
+
+Full suite (working copy): 1469 passed, 0 failed, 0 error. Full suite
+(fresh independent clone kedua + venv terpisah + `poetry install --with
+dev` terpisah): identik. Coverage: 81.97%, Gate G-6 lulus dengan margin
+besar. Gate G-1 (162 file, 0 error), G-2 (0 f-string SQL), G-3 (699
+simbol, exit 0), G-8 (0 glob-scope violation) — semua di-re-run manual,
+semua PASS.
+
+Package: `alpha-factory-v1_12_1-changed-files.zip` (`MANIFEST.md` +
+`CHANGES.diff` + seluruh file baru/dimodifikasi). Base: v1.12.0 package
+(itu sendiri belum pernah di-apply ke live main — lihat `MANIFEST.md`
+package ini untuk urutan apply yang benar: v1.12.0 dulu, baru v1.12.1
+di atasnya, ATAU gunakan package ini langsung di atas commit `9f7eab3`
+karena isinya sudah kumulatif).
+
 ## v1.12.0 — Decision B: instruments.yaml Split + JSON Schema Layer; Decision D: Gate G-6 Trigger Fix (Juli 2026)
 
 Dokumen referensi: `GMI_Decision_Document_v5.docx` §2 (Decision B Steps 2-3,

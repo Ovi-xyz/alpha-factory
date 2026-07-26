@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.12.0"
+version = "1.12.1"
 description = "Data Platform — Bronze/Silver/Gold Medallion Architecture"
 authors = ["Ovi"]
 packages = [
@@ -36,15 +36,12 @@ finnhub-python = "*"
 polygon-api-client = "*"
 fredapi = "*"
 loguru = "*"
-# NOTE Decision B Step 3 (GMI_Decision_Document_v5.docx §2.2, 2026-07-22):
-# pydantic remains declared but has ZERO usage anywhere in src/ or scripts/
-# (confirmed via grep, matches Decision Document v5's own finding).
-# Flagged for removal, same treatment alpha-vantage got before it was
-# actually dropped (Decision A / Checkpoint v5) — NOT removed in this
-# pass, since that decision belongs to whoever confirms there's no other
-# intended use, not something to fold silently into an unrelated schema
-# change. See CHANGELOG.md ADR-027.
-pydantic = ">=2.0"
+# REMOVED (this thread, July 2026): pydantic — confirmed unused a second
+# time (zero imports anywhere in src/ or scripts/, re-verified via grep),
+# same disposition alpha-vantage got once its own "flagged, not removed"
+# state (Decision B Step 3 / GMI_Decision_Document_v5.docx §2.2) was
+# reconfirmed. `poetry remove pydantic` — pyproject.toml and poetry.lock
+# both updated consistently. See CHANGELOG.md for the full entry.
 pyyaml = "*"
 # ADD Decision B Step 3: promoted from transitive (was resolving only via
 # poetry.lock, zero explicit import anywhere) to an explicit direct

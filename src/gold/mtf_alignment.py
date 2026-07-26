@@ -29,6 +29,20 @@ from src.utils.progress_checkpoint import ProgressCheckpoint
 
 GOLD_SIGNALS_PATH = Path("data/gold/signals")
 GOLD_MTF_PATH     = Path("data/gold/mtf")
+# FIX GLD-MTF-COV-01: promoted from a string literal inline in
+# _apply_regime_compatible() to a module-level constant, matching the
+# GOLD_SIGNALS_PATH / GOLD_MTF_PATH pattern above and macro_regime.py's own
+# REGIME_STORE_PATH. Same default value — pure hardcode-avoidance/
+# testability fix, no behavior change. Before this fix the path could not
+# be monkeypatched in tests, so _apply_regime_compatible() was only ever
+# exercised via a hand-duplicated copy of its logic in test code, never the
+# real function. NOTE (flagged, not fixed here — out of this file's scope):
+# this same literal is independently hardcoded inline (not as a module
+# constant) in sector_rotation.py and views.py, and as a display-only
+# literal in pipeline_dashboard.py; consolidating all Gold-layer output
+# paths behind one shared constants module is a reasonable follow-up but is
+# a broader, separately-scoped change.
+REGIME_STORE_PATH = Path("data/gold/macro/regime_store.parquet")
 TIMEFRAMES        = ["5m", "15m", "1H", "4H", "1D", "1W", "1M"]
 
 
@@ -225,8 +239,7 @@ def _apply_regime_compatible(df: pl.DataFrame, run_date: date) -> pl.DataFrame:
     RISK_OFF → short/defensive bias (negative score) = compatible
     Other    → all symbols compatible (regime-agnostic)
     """
-    regime_path = "data/gold/macro/regime_store.parquet"
-    regime      = "NEUTRAL"
+    regime = "NEUTRAL"
 
     try:
         import duckdb
@@ -240,7 +253,7 @@ def _apply_regime_compatible(df: pl.DataFrame, run_date: date) -> pl.DataFrame:
             ORDER BY date DESC
             LIMIT 1
             """,
-            {"path": regime_path, "run_date": run_date},
+            {"path": str(REGIME_STORE_PATH), "run_date": run_date},
         ).fetchone()
         if result:
             regime = result[0]
