@@ -65,6 +65,15 @@ candidates, and computing RSI/MACD on VIX is not meaningful.
 
 ### 1. Setup Environment
 
+> **Prerequisite — Poetry itself:** everything below assumes `poetry` is
+> already on PATH. If `poetry --version` fails, install it first:
+> `pip install poetry` (conda envs aren't externally-managed, so plain pip
+> works fine here — no `--user`/`--break-system-packages` needed once the
+> env below is active), or `pipx install poetry` for an isolated global
+> install. `make setup` / `make install` / `make doctor` now check this
+> automatically and print a clear message instead of a bare
+> `command not found` (FIX ADR-028).
+
 ```bash
 cd alpha-factory
 
