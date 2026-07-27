@@ -164,9 +164,19 @@ jobs:
             exit 1
           fi
 
-      # 8. GATE G-6: Coverage minimum (PR only)
-      - name: Gate G-6 — Coverage Gate (PR only)
-        if: github.event_name == 'pull_request'
+      # 8. GATE G-6: Coverage minimum
+      # FIX GMI-CI-G6 (completes Decision D, GMI_Decision_Document_v5.docx
+      # §4 -- decided previously but confirmed empirically this thread to
+      # have never actually been applied to the live workflow: this `if`
+      # was the only version of this line in the file's entire git
+      # history). Repo has no PR step (no push access; Ovi applies
+      # verified zips directly to main), so a PR-only gate has structurally
+      # never executed on any of the 3+ live pushes checked to date. Firing
+      # on push makes the number visible on every real landing -- a
+      # showing below-threshold here is informational, not blocking, since
+      # there is no PR for it to block (Decision D's own stated
+      # consequence).
+      - name: Gate G-6 — Coverage Gate
         run: |
           poetry run python -m pytest tests/ \
             --cov=src \
