@@ -43,6 +43,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+# FIX (Ovi, this thread -- "issues even though .env already filled"):
+# python-dotenv is a declared dependency but was never actually called
+# anywhere in this repo (confirmed by grep). Without this, os.getenv()
+# only sees variables the shell has separately exported -- a filled
+# .env file alone was not enough, which is exactly what this preflight
+# run surfaced for TV_USERNAME/TV_PASSWORD and FINNHUB_API_KEY.
+from dotenv import load_dotenv
+load_dotenv()
+
 REQUIRED_COLUMNS = {"Open", "High", "Low", "Close", "Volume"}
 
 # Gate 2 (GMI_Decision_Document_v1.docx §6 / v2.docx §8): tickers whose live

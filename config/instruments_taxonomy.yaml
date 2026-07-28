@@ -1115,15 +1115,26 @@ context:
         layer: 2
         context_category: context_commodity_metals
         context_group: commodity
-        context_available: true
-        include_in_forecast: true
+        # FIX (alpha-factory_preflight_logs 28 July 2026): NI=F confirmed
+        # 404 on live yfinance -- deferred following the exact TIN pattern
+        # (context_available=false) rather than pointing at a broken
+        # source. Like TIN, the correct fix is LME routing via tvdatafeed
+        # (scripts/preflight/check_tvdatafeed_symbols.py's ROUTING_TABLE
+        # does not yet cover NICKEL -- OD-C1 scope was CPO/RUBBER/TIN/
+        # COAL_NEWC only; extending it to NICKEL is a follow-up, not done
+        # here since the tvfeed_symbol/exchange pairing needs the same
+        # empirical verification the other four still need too).
+        context_available: false
+        include_in_forecast: false
         commodity_role: context
         commodity_subcategory: base_metals
+        deferred_reason: yfinance NI=F confirmed 404 (alpha-factory_preflight_logs 28 July 2026) — needs tvdatafeed LME routing, ticker/exchange unverified (same class of gap as OD-C1, not yet added to that routing table)
+        planned_wave: 2
         structural_break:
           date: '2022-03-07'
           severity: HIGH
           description: LME trading suspension — price +100% in hours
-        notes: EV/battery cycle indicator
+        notes: EV/battery cycle indicator. yfinance NI=F confirmed broken (404) — deferred pending tvdatafeed LME routing, same as TIN.
       - symbol: ALUMINIUM
         layer: 2
         context_category: context_commodity_metals

@@ -176,11 +176,20 @@ jobs:
       # showing below-threshold here is informational, not blocking, since
       # there is no PR for it to block (Decision D's own stated
       # consequence).
+      # FIX (Ovi, this thread — "take Option B"): GMI_Decision_Document_v6.docx
+      # §4 presented two paths to the requested 95% target — jump straight
+      # there (Option A, leaves CI red until a large test-writing tranche
+      # lands) or ratchet up in stages from an honest current value
+      # (Option B). Ovi chose B. 80 is ~2 points under today's real 81.98%
+      # (poetry run pytest --cov=src, this thread) — enough headroom that
+      # normal fluctuation doesn't trip it, while still being meaningfully
+      # above the old 70. Raise again as each future coverage tranche lands;
+      # 95 remains the eventual target, not abandoned.
       - name: Gate G-6 — Coverage Gate
         run: |
           poetry run python -m pytest tests/ \
             --cov=src \
-            --cov-fail-under=70 \
+            --cov-fail-under=80 \
             --cov-report=term-missing \
             -q
 

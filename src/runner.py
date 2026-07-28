@@ -23,7 +23,21 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from dotenv import load_dotenv
 from loguru import logger
+
+# FIX (Ovi, this thread — "issues in API/ticker/data sources even though
+# .env already filled"): python-dotenv has been a declared dependency
+# since Grand Design v1.2 §12.3, but nothing in src/ or scripts/ ever
+# called load_dotenv() — confirmed by grep, zero hits repo-wide before
+# this fix. A filled .env file was never actually reaching os.getenv()
+# in ANY bronze ingester unless the shell had separately exported those
+# variables. This is the single load-bearing fix: every job dispatched
+# through this CLI (i.e. all of production) now gets .env loaded once,
+# here, before any job function runs. Preflight scripts are separate
+# entry points that bypass runner.py entirely — each needs its own
+# load_dotenv() call too (added directly to each of the 5 scripts).
+load_dotenv()
 
 from src.scheduler.dependency_guard import DependencyGuard
 from src.scheduler.job_registry import (

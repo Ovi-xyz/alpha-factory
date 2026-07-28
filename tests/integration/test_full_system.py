@@ -267,7 +267,7 @@ class TestFullSystemPipeline:
         FIX GMI-IL-001: was == 643. Architecture Extension v1.0 ADR-003
         reclassifies SPX, VIX, DXY out of Layer 1 into Layer 2 context.
         Layer 1 'unchanged' now means 640 (the new stable baseline) plus
-        a separate, independently-asserted Layer 2 count of 56 active /
+        a separate, independently-asserted Layer 2 count of 55 active /
         59 with deferred — see test_l7_layer2_context_universe_present.
         """
         from src.config.instrument_loader import get_loader
@@ -277,14 +277,16 @@ class TestFullSystemPipeline:
         """ADD GMI-IL-001: Layer 2 context anchors — Extension v1.0 §3.1 total
         52, extended to 59 by GMI_Decision_Document_v1.docx ADR-014
         (context_dollar_basket, +6) and GMI_Decision_Document_v2.docx
-        ADR-024 (context_fx_normalization, +1). deferred_count() unchanged
-        at 3 — ADR-023 corrected TIN/RUBBER's blocking reason (no longer
+        ADR-024 (context_fx_normalization, +1). deferred_count() now 4, not
+        3 — NICKEL added this thread (yfinance NI=F confirmed 404,
+        alpha-factory_preflight_logs 28 July 2026) alongside TIN/CPO/RUBBER;
+        ADR-023 corrected TIN/RUBBER's blocking reason (no longer
         MYR-dependent) but did not change their deferred status."""
         from src.config.instrument_loader import get_loader
         loader = get_loader()
-        assert loader.count_context() == 56
+        assert loader.count_context() == 55
         assert loader.count_context(include_deferred=True) == 59
-        assert loader.deferred_count() == 3
+        assert loader.deferred_count() == 4
 
     def test_l7_all_markets_represented(self):
         """

@@ -31,7 +31,33 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-BIS_ENDPOINT = "https://stats.bis.org/api/v1/data/WS_CBPOL_D/all"
+# FIX (Ovi, this thread -- "issues even though .env already filled"):
+# python-dotenv is a declared dependency but was never actually called
+# anywhere in this repo (confirmed by grep). Without this, os.getenv()
+# only sees variables the shell has separately exported -- a filled
+# .env file alone was not enough, which is exactly what this preflight
+# run surfaced for TV_USERNAME/TV_PASSWORD and FINNHUB_API_KEY.
+from dotenv import load_dotenv
+load_dotenv()
+
+# FIX (alpha-factory_preflight_logs 28 July 2026): the v1 endpoint below
+# now returns a bare HTTP 404 -- confirmed empirically when this script
+# was actually run. Web search this thread found: (1) BIS's own current
+# help/legal page (data.bis.org/help/legal) points exclusively at
+# stats.bis.org/api-doc/v2/ -- v1 is not mentioned at all, consistent
+# with it having been retired; (2) a real, working v2 query example for a
+# different BIS dataflow (WS_CBTA) using the
+# /api/v2/data/dataflow/BIS/<FLOW>/1.0/<key> shape; (3) the SDMX-REST
+# spec confirms an empty/omitted key -- or the literal keyword "all" --
+# means "return everything," matching this script's existing intent.
+# WS_CBPOL_D itself (the dataflow ID) is unaffected -- confirmed via a
+# second independent source (a BIS SDMX Python client's dataflow listing)
+# that "WS_CBPOL_D" is the correct, existing daily dataflow ID; only the
+# URL *path structure* was wrong, not the dataset name. Still worth a
+# live confirmation the next time this actually runs (same as everything
+# else in this file) -- this is stronger evidence than a guess, not a
+# certainty this sandbox can fully close.
+BIS_ENDPOINT = "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_CBPOL_D/1.0/all"
 
 # config/bis_cb_rates.yaml's ref_area_map, duplicated here deliberately
 # (not imported) so this pre-flight check does not silently pass if the

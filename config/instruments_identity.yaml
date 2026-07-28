@@ -825,7 +825,14 @@ context:
         yfinance_symbol: ^HSI
         timezone: Asia/Hong_Kong
       - symbol: SSEC
-        yfinance_symbol: ^SSEC
+        # FIX (alpha-factory_preflight_logs 28 July 2026): ^SSEC returns
+        # HTTP 404 on live yfinance ("possibly delisted"). Confirmed via
+        # web search: Yahoo Finance's actual symbol is 000001.SS (Shanghai
+        # Stock Exchange suffix convention -- same pattern as .JK for
+        # Jakarta already used elsewhere in this file, .AX for ASX, etc.).
+        # ^SSEC is a ticker used by other data vendors (CNBC, Investing.com)
+        # but is not yfinance's canonical form.
+        yfinance_symbol: 000001.SS
         timezone: Asia/Shanghai
       - symbol: JKSE
         yfinance_symbol: ^JKSE
@@ -850,7 +857,17 @@ context:
         yfinance_symbol: HG=F
         timezone: UTC
       - symbol: NICKEL
-        yfinance_symbol: NI=F
+        # FIX (alpha-factory_preflight_logs 28 July 2026): NI=F returns
+        # HTTP 404 on live yfinance ("possibly delisted"). This was
+        # flagged from day one as needing empirical verification
+        # (Architecture v2.1 Addendum OD-C2, "verify ticker") -- now
+        # confirmed it does not work. Unlike COPPER (HG=F, COMEX-listed,
+        # reliable on yfinance), Nickel is LME-primary and yfinance does
+        # not carry a working LME nickel futures contract. Nulled to
+        # match TIN's existing pattern rather than leave a known-broken
+        # value in place; see taxonomy.yaml for the context_available
+        # change and rationale.
+        yfinance_symbol: null
         timezone: UTC
       - symbol: ALUMINIUM
         yfinance_symbol: ALI=F

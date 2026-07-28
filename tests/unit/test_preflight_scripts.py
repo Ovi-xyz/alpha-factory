@@ -139,3 +139,94 @@ class TestCheckYfinanceTickers:
         import check_yfinance_tickers as mod
         monkeypatch.setattr(sys, "argv", ["check_yfinance_tickers.py", "--symbol", "NOT_A_REAL_SYMBOL"])
         assert mod.main() == 1
+
+
+class TestCheckTvdatafeedSymbols:
+    """NEW -- these 2 scripts (this class + TestCheckBisEerWeights below)
+    had zero test coverage since their own authoring thread; added now
+    while already touching this file for the BIS endpoint / MXN->IDR
+    fixes, matching the pattern established for the other 3 scripts."""
+
+    def test_routing_table_has_4_entries(self):
+        """OD-C1 scope: CPO, RUBBER, TIN (blocking) + COAL_NEWC (informational)."""
+        import check_tvdatafeed_symbols as mod
+        assert set(mod.ROUTING_TABLE) == {"CPO", "RUBBER", "TIN", "COAL_NEWC"}
+        assert mod.INFORMATIONAL_ONLY == frozenset({"COAL_NEWC"})
+
+    def test_main_returns_1_without_credentials(self, monkeypatch):
+        import check_tvdatafeed_symbols as mod
+        monkeypatch.delenv("TV_USERNAME", raising=False)
+        monkeypatch.delenv("TV_PASSWORD", raising=False)
+        monkeypatch.setattr(sys, "argv", ["check_tvdatafeed_symbols.py"])
+        assert mod.main() == 1
+
+    def test_main_returns_1_for_unknown_symbol_filter(self, monkeypatch):
+        import check_tvdatafeed_symbols as mod
+        monkeypatch.setenv("TV_USERNAME", "fake")
+        monkeypatch.setenv("TV_PASSWORD", "fake")
+        monkeypatch.setattr(sys, "argv", ["check_tvdatafeed_symbols.py", "--symbol", "NOT_REAL"])
+        # TV_AVAILABLE gates before argument validation if tvDatafeed isn't
+        # installed in this environment -- either a clean 1 (no routing
+        # entry) or a clean 1 (package not installed) is an acceptable
+        # outcome here; what matters is it never raises.
+        assert mod.main() == 1
+
+    def test_check_one_returns_false_for_empty_result(self):
+        import check_tvdatafeed_symbols as mod
+        client = MagicMock()
+        client.get_hist.return_value = None
+        ok, msg = mod._check_one("SN", "LME", client)
+        assert ok is False
+        assert "empty" in msg.lower()
+
+    def test_check_one_returns_true_for_valid_ohlcv(self):
+        import check_tvdatafeed_symbols as mod
+        import pandas as pd
+        df = pd.DataFrame({
+            "open": [1.0], "high": [1.1], "low": [0.9],
+            "close": [1.05], "volume": [1000],
+        })
+        client = MagicMock()
+        client.get_hist.return_value = df
+        ok, msg = mod._check_one("SN", "LME", client)
+        assert ok is True
+
+
+class TestCheckBisEerWeights:
+
+    def test_mxn_removed_idr_added(self):
+        """UPD (Ovi, this thread): MXN was a stale Architecture v2.0 §7.2
+        placeholder with zero relevance to this Indonesia-focused
+        platform and zero other occurrences anywhere in the repo. IDR is
+        the economically relevant EM currency here (Layer 1 forex pair
+        USD_IDR, ADR-018 basket-weight override) -- locks in the fix so
+        it can't silently regress."""
+        import check_bis_eer_weights as mod
+        assert "MXN" not in mod.BROAD_DOLLAR_REF_AREAS
+        assert mod.BROAD_DOLLAR_REF_AREAS["IDR"] == "ID"
+
+    def test_endpoint_uses_v2_path_structure(self):
+        """Regression guard for the v1->v2 BIS API fix -- both the daily
+        variant (WS_EER_D) and the old /api/v1/ shape are confirmed gone;
+        WS_EER_M is the only remaining target."""
+        import check_bis_eer_weights as mod
+        assert "/api/v2/" in mod.BIS_EER_ENDPOINT_MONTHLY
+        assert "WS_EER_M" in mod.BIS_EER_ENDPOINT_MONTHLY
+        assert not hasattr(mod, "BIS_EER_ENDPOINT_DAILY")
+
+    def test_main_returns_1_for_unknown_currency_filter(self, monkeypatch):
+        import check_bis_eer_weights as mod
+        monkeypatch.setattr(sys, "argv", ["check_bis_eer_weights.py", "--currency", "NOT_REAL"])
+        assert mod.main() == 1
+
+    def test_check_one_returns_false_for_missing_ref_area(self, monkeypatch):
+        import check_bis_eer_weights as mod
+        monkeypatch.setattr(mod, "_fetch_csv", lambda url: "some,other,data\n1,2,3\n")
+        ok, msg = mod._check_one("ID")
+        assert ok is False
+
+    def test_check_one_returns_true_when_ref_area_present(self, monkeypatch):
+        import check_bis_eer_weights as mod
+        monkeypatch.setattr(mod, "_fetch_csv", lambda url: "REF_AREA,TIME_PERIOD,OBS_VALUE\nID,2026-01-01,101.2\n")
+        ok, msg = mod._check_one("ID")
+        assert ok is True

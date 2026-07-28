@@ -133,10 +133,11 @@ class TestInstrumentLoaderLayer2:
         self.loader = get_loader()
 
     def test_all_context_default_count(self):
-        """all_context() default excludes deferred — 56 active (59 - 3 deferred),
-        post ADR-014/024 (GMI Decision Documents v1/v2)."""
+        """all_context() default excludes deferred — 55 active (59 - 4 deferred),
+        post NICKEL's deferral (yfinance NI=F confirmed 404,
+        alpha-factory_preflight_logs 28 July 2026) added to TIN/CPO/RUBBER."""
         ctx = self.loader.all_context()
-        assert len(ctx) == 56
+        assert len(ctx) == 55
         assert all(i.context_available for i in ctx)
 
     def test_all_context_include_deferred(self):
@@ -150,18 +151,22 @@ class TestInstrumentLoaderLayer2:
         assert {"CNH", "KRW", "SGD", "HKD", "TWD", "NOK", "MYR"}.issubset(symbols)
 
     def test_count_context(self):
-        assert self.loader.count_context() == 56
+        assert self.loader.count_context() == 55
         assert self.loader.count_context(include_deferred=True) == 59
 
     def test_count_total(self):
-        """Layer 1 (640) + Layer 2 active (56) = 696 OHLCV-bearing instruments."""
-        assert self.loader.count_total() == 696
+        """Layer 1 (640) + Layer 2 active (55) = 695 OHLCV-bearing instruments
+        (was 696 before NICKEL's deferral -- see test_all_context_default_count)."""
+        assert self.loader.count_total() == 695
 
-    def test_deferred_count_is_3(self):
-        """ADR-007: TIN, CPO, RUBBER deferred to Wave 2. ADR-023 corrected
-        the blocking reason for TIN/RUBBER (ticker verification, not MYR
-        normalization) but did not change deferred status — still 3."""
-        assert self.loader.deferred_count() == 3
+    def test_deferred_count_is_4(self):
+        """ADR-007: TIN, CPO, RUBBER deferred to Wave 2. NICKEL added this
+        thread (yfinance NI=F confirmed 404, alpha-factory_preflight_logs
+        28 July 2026 -- needs tvdatafeed LME routing like TIN, unverified).
+        ADR-023 corrected the blocking reason for TIN/RUBBER (ticker
+        verification, not MYR normalization) but did not change deferred
+        status. Now 4, not 3."""
+        assert self.loader.deferred_count() == 4
 
     def test_deferred_instruments_have_required_fields(self):
         """
@@ -170,16 +175,22 @@ class TestInstrumentLoaderLayer2:
         enforced in scripts/validate_instruments.py.
 
         UPD ADR-023 (GMI_Decision_Document_v2.docx): requires_fx_normalization
-        / base_currency are NOT uniform across all 3 deferred instruments
-        anymore. Of the three, only CPO is MYR-dependent; TIN (LME) and
+        / base_currency are NOT uniform across all deferred instruments
+        anymore. Of TIN/CPO/RUBBER, only CPO is MYR-dependent; TIN (LME) and
         RUBBER (SICOM/SGX) are USD-native and were previously mis-framed as
         MYR-blocked. Checked per-symbol below rather than asserted uniformly.
+
+        UPD (this thread): NICKEL added as a 4th deferred instrument
+        (yfinance NI=F confirmed 404, alpha-factory_preflight_logs 28 July
+        2026) — checked separately below since its deferral reason is
+        ticker/exchange verification, not currency, so it isn't folded into
+        the CPO/TIN/RUBBER currency-specific assertions.
         """
         deferred = {
             i.symbol: i for i in self.loader.all_context(include_deferred=True)
             if not i.context_available
         }
-        assert len(deferred) == 3
+        assert len(deferred) == 4
         for inst in deferred.values():
             assert inst.deferred_reason, f"{inst.symbol} missing deferred_reason"
             assert inst.planned_wave == 2, f"{inst.symbol} missing planned_wave"
@@ -191,6 +202,12 @@ class TestInstrumentLoaderLayer2:
                 f"{sym} should be USD-native per ADR-023 — not MYR-dependent"
             )
             assert deferred[sym].meta.get("base_currency") == "USD"
+
+        assert "nickel" in deferred["NICKEL"].deferred_reason.lower() or \
+            "yfinance" in deferred["NICKEL"].deferred_reason.lower(), (
+            "NICKEL's deferred_reason should name the actual finding (yfinance "
+            "404), not a generic placeholder"
+        )
 
     def test_get_context_vix(self):
         inst = self.loader.get_context("VIX")
@@ -260,7 +277,7 @@ class TestInstrumentLoaderLayer2:
         cc_symbols = {i.symbol for i in self.loader.correlation_context()}
         assert "SPY" in cc_symbols
         assert "XLK" in cc_symbols
-        assert len(cc_symbols) == 56
+        assert len(cc_symbols) == 55
 
     def test_subcategory_meta_dm_cb(self):
         """Data Source & Rates Adjustment v1.0 §6.1: 9 DM central banks via BIS."""

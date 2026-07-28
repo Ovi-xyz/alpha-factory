@@ -46,7 +46,17 @@ from src.bronze.schema_validator import SchemaValidator
 
 # ── Konfigurasi ──────────────────────────────────────────────────────────────
 
-_BIS_ENDPOINT = "https://stats.bis.org/api/v1/data/WS_CBPOL_D/all"
+# FIX (alpha-factory_preflight_logs 28 July 2026): v1 endpoint confirmed
+# 404 via check_bis_cbpol_d.py's actual run against live BIS -- this
+# ingester hardcodes its own copy of the endpoint (does NOT read
+# config/bis_cb_rates.yaml's `endpoint:` field, confirmed by grep), so the
+# same fix must land here independently, not just in the preflight
+# script or the yaml doc. See check_bis_cbpol_d.py's docstring for the
+# full v1->v2 evidence trail (BIS's own current docs, a working v2
+# example for a different dataflow, SDMX-REST spec for empty-key
+# semantics). WS_CBPOL_D itself is unaffected -- only the URL path
+# structure changed.
+_BIS_ENDPOINT = "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_CBPOL_D/1.0/all"
 _FORMAT_PARAM  = "?format=csv"
 _TIMEOUT_SEC   = 60
 _MAX_RETRIES   = 3

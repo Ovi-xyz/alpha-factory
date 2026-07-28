@@ -46,8 +46,8 @@ class TestContextAnchorsResolve:
         InstrumentLoader (no Silver DuckDB query, no silver_1d_path argument
         even exists on this method's signature). We do NOT mock get_loader
         here — it exercises the real InstrumentLoader against
-        instruments.yaml v1.5 (56 active context instruments post
-        ADR-014/024).
+        instruments.yaml v1.5 (55 active context instruments post
+        NICKEL's deferral this thread, on top of ADR-014/024).
         """
         resolver, output_path = _resolver_with_tmp_output(tmp_path, monkeypatch)
         run_date = date(2025, 3, 3)
@@ -56,8 +56,8 @@ class TestContextAnchorsResolve:
 
         context_parquet = output_path / f"context_anchors_{run_date.isoformat()}.parquet"
         assert context_parquet.exists(), "context_anchors_{date}.parquet must exist"
-        assert len(symbols) == 56, (
-            f"Expected 56 active Layer 2 instruments (59 - 3 deferred), got {len(symbols)}"
+        assert len(symbols) == 55, (
+            f"Expected 55 active Layer 2 instruments (59 - 4 deferred), got {len(symbols)}"
         )
 
     def test_resolve_excludes_deferred(self, tmp_path, monkeypatch):
@@ -124,7 +124,7 @@ class TestContextAnchorsLoad:
         symbols = resolver.load(run_date)
         assert isinstance(symbols, list)
         assert all(isinstance(s, str) for s in symbols)
-        assert len(symbols) == 56
+        assert len(symbols) == 55  # was 56 before NICKEL's deferral this thread
 
     def test_load_matches_resolve_output(self, tmp_path, monkeypatch):
         resolver, _ = _resolver_with_tmp_output(tmp_path, monkeypatch)
@@ -148,7 +148,7 @@ class TestContextAnchorsLoad:
 
         df = resolver.load_full(run_date)
         assert isinstance(df, pl.DataFrame)
-        assert len(df) == 56
+        assert len(df) == 55  # was 56 before NICKEL's deferral this thread
         required_cols = {
             "symbol", "context_category", "context_group", "layer",
             "include_in_forecast", "reliability_flag", "proxy_for",
