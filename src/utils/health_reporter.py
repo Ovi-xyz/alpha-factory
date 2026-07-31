@@ -11,16 +11,24 @@ Output:
     - Telegram: optional alert jika TELEGRAM_BOT_TOKEN di-set
 
 FIX GAP-10 [P3] (Production Readiness Assessment v1.7.2, GD §9.1, §3.3.2):
-tvdatafeed is a reverse-engineered, unofficial TradingView API (ToS risk,
-can break without warning — see KNOWN_RISKS.md). IDX30 (30 of 643
-instruments) depends on it as primary source, falling back to yfinance .JK
-(lower coverage — some IDX stocks aren't on yfinance at all). That risk was
-documented in GD §9.1 but had no runtime mitigation: a silent tvdatafeed
-degradation would only be noticed by manually reading logs. _check_idx_coverage()
-closes that gap — it reads Bronze IDX metadata (the `_source` / `_symbol`
-columns ChainedAdapter and BronzeIngester always write, GD §3.5/§3.6) and
-surfaces how many of the 30 IDX symbols actually came from tvdatafeed today
-vs. fell back to yfinance_jk vs. are missing entirely.
+tvdatafeed WAS a reverse-engineered, unofficial TradingView API (ToS risk,
+could break without warning). IDX30 (30 of 643 instruments) depended on it
+as primary source, falling back to yfinance .JK. This mitigation originally
+surfaced how many of the 30 IDX symbols came from tvdatafeed vs. fell back
+to yfinance_jk vs. were missing entirely.
+
+FIX ADR-029 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
+RETIRED entirely (KNOWN_RISKS.md RISK-1 -> RESOLVED). yfinance .JK is now
+IDX30's SOLE source, not a fallback -- a tvdatafeed-vs-fallback source
+distinction is no longer meaningful; every present symbol would show as
+"fallback" under the old schema, permanently over-tripping the alert
+regardless of actual health (every healthy run would show ~30 "fallback"
+symbols > IDX_COVERAGE_ALERT_THRESHOLD=5, firing IDX_PARTIAL_FAILURE on
+EVERY run). _check_idx_coverage() reworked from tvdatafeed-vs-fallback to
+presence-vs-missing: it reads Bronze IDX metadata (the `_symbol` column
+BronzeIngester always writes, GD §3.6) and surfaces how many of the 30 IDX
+symbols have data at all today vs. are missing entirely. Source-of-origin
+is no longer tracked since there is only one source.
 """
 
 from __future__ import annotations
@@ -78,13 +86,15 @@ def generate_daily_report(run_date: date) -> dict:
         "total_failed":     0,
         "total_rows":       0,
         "avg_duration_sec": 0.0,
-        # FIX GAP-10 [P3]: IDX coverage fields, populated by _check_idx_coverage().
-        "idx_total":           0,
-        "idx_tvdatafeed_count": 0,
-        "idx_fallback_count":  0,
-        "idx_missing_count":   0,
-        "idx_coverage_pct":    None,
-        "idx_coverage_alert":  False,
+        # FIX GAP-10 [P3] + FIX ADR-029: IDX coverage fields, populated by
+        # _check_idx_coverage(). Reworked to presence-vs-missing (30 Jul 2026) --
+        # idx_tvdatafeed_count/idx_fallback_count REMOVED (source-of-origin no
+        # longer meaningful, single source only). See module docstring.
+        "idx_total":          0,
+        "idx_present_count":  0,
+        "idx_missing_count":  0,
+        "idx_coverage_pct":   None,
+        "idx_coverage_alert": False,
     }
 
     # ── Pipeline summary from SQLite ──────────────────────────────────────────
@@ -151,27 +161,32 @@ def generate_daily_report(run_date: date) -> dict:
 
 def _check_idx_coverage(run_date: date) -> dict:
     """
-    FIX GAP-10 [P3] (Production Readiness Assessment v1.7.2, GD §9.1):
-    Count, for today's Bronze IDX ingestion, how many of the 30 IDX symbols
-    actually came from tvdatafeed (`_source = 'tvdatafeed'`) vs. fell back
-    to yfinance .JK (`_source = 'yfinance_jk'`) vs. have no Bronze data at
-    all for run_date (complete failure — worse than a fallback).
+    FIX ADR-029 (GMI_Decision_Document_v7.docx, 30 Jul 2026): reworked from
+    tvdatafeed-vs-fallback to presence-vs-missing after tvdatafeed's
+    retirement (KNOWN_RISKS.md RISK-1 -> RESOLVED). yfinance .JK is now
+    IDX30's SOLE source -- a source-of-origin distinction is no longer
+    meaningful, and the old schema would have permanently over-tripped the
+    alert (every present symbol showing as "fallback", tripping
+    IDX_COVERAGE_ALERT_THRESHOLD on every single healthy run).
 
-    Reads the `_symbol` / `_source` / `_ingested_at` columns every Bronze
-    file already carries (BronzeIngester.write() + ChainedAdapter.fetch(),
-    GD §3.5/§3.6) — no new write path or schema change required.
+    Counts, for today's Bronze IDX ingestion, how many of the 30 IDX symbols
+    have data at all (idx_present_count) vs. have none (idx_missing_count).
+
+    Reads the `_symbol` column every Bronze file already carries
+    (BronzeIngester.write(), GD §3.6) — no new write path or schema change
+    required.
 
     Returns a dict merged into generate_daily_report()'s report. Mirrors
-    the IDD §6.3 SOP note: "Jika lebih dari 5 IDX symbols return None dalam
-    satu run ... log warning 'IDX_PARTIAL_FAILURE'".
+    the original IDD §6.3 SOP note ("Jika lebih dari 5 IDX symbols return
+    None dalam satu run ... log warning 'IDX_PARTIAL_FAILURE'"), now
+    applied to missing-only rather than missing+fallback.
     """
     result = {
-        "idx_total":            0,
-        "idx_tvdatafeed_count": 0,
-        "idx_fallback_count":   0,
-        "idx_missing_count":    0,
-        "idx_coverage_pct":     None,
-        "idx_coverage_alert":   False,
+        "idx_total":          0,
+        "idx_present_count":  0,
+        "idx_missing_count":  0,
+        "idx_coverage_pct":   None,
+        "idx_coverage_alert": False,
     }
 
     try:
@@ -192,18 +207,9 @@ def _check_idx_coverage(run_date: date) -> dict:
         con = duckdb.connect()
         rows = con.execute(
             """
-            SELECT symbol, source
-            FROM (
-                SELECT
-                    _symbol AS symbol,
-                    _source AS source,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY _symbol ORDER BY _ingested_at DESC
-                    ) AS rn
-                FROM read_parquet($glob, hive_partitioning=true)
-                WHERE CAST(_ingested_at AS DATE) = $run_date
-            )
-            WHERE rn = 1
+            SELECT DISTINCT _symbol AS symbol
+            FROM read_parquet($glob, hive_partitioning=true)
+            WHERE CAST(_ingested_at AS DATE) = $run_date
             """,
             {"glob": BRONZE_IDX_GLOB, "run_date": run_date},
         ).fetchall()
@@ -211,34 +217,27 @@ def _check_idx_coverage(run_date: date) -> dict:
         logger.debug(f"[HealthReporter] IDX coverage check skipped (no Bronze data yet): {e}")
         return result
 
-    by_symbol = {symbol: source for symbol, source in rows}
-    tvdatafeed_count = sum(1 for s in by_symbol.values() if s == "tvdatafeed")
-    fallback_count   = sum(
-        1 for sym, s in by_symbol.items() if sym in idx_symbols and s != "tvdatafeed"
-    )
-    missing_count    = len(idx_symbols - by_symbol.keys())
+    present_symbols = {r[0] for r in rows} & idx_symbols
+    present_count   = len(present_symbols)
+    missing_count   = len(idx_symbols - present_symbols)
 
-    result["idx_tvdatafeed_count"] = tvdatafeed_count
-    result["idx_fallback_count"]   = fallback_count
-    result["idx_missing_count"]    = missing_count
-    result["idx_coverage_pct"]     = round(
-        tvdatafeed_count / result["idx_total"] * 100, 1
+    result["idx_present_count"] = present_count
+    result["idx_missing_count"] = missing_count
+    result["idx_coverage_pct"]  = round(
+        present_count / result["idx_total"] * 100, 1
     ) if result["idx_total"] else None
 
-    degraded = fallback_count + missing_count
-    result["idx_coverage_alert"] = degraded > IDX_COVERAGE_ALERT_THRESHOLD
+    result["idx_coverage_alert"] = missing_count > IDX_COVERAGE_ALERT_THRESHOLD
 
     if result["idx_coverage_alert"]:
         logger.warning(
             "IDX_PARTIAL_FAILURE: "
-            f"{degraded} of {result['idx_total']} IDX symbols not on tvdatafeed "
-            f"today ({fallback_count} fell back to yfinance_jk, "
-            f"{missing_count} missing entirely) — "
-            f"coverage={result['idx_coverage_pct']}% (GD §9.1, GAP-10)"
+            f"{missing_count} of {result['idx_total']} IDX symbols missing "
+            f"today — coverage={result['idx_coverage_pct']}% (ADR-029)"
         )
-    elif degraded > 0:
+    elif missing_count > 0:
         logger.debug(
-            f"[HealthReporter] IDX coverage: {degraded} symbols degraded "
+            f"[HealthReporter] IDX coverage: {missing_count} symbols missing "
             f"(below alert threshold of {IDX_COVERAGE_ALERT_THRESHOLD})"
         )
 
@@ -282,15 +281,14 @@ def _print_report(report: dict) -> None:
             f"Storage free: {report['storage_free_gb']:.1f} GB{storage_status}"
         )
 
-    # FIX GAP-10 [P3]: IDX coverage line
+    # FIX GAP-10 [P3] + FIX ADR-029: IDX coverage line (presence-vs-missing)
     if report.get("idx_total"):
         idx_status = ""
         if report["idx_coverage_alert"]:
-            idx_status = " ⚠️  IDX_PARTIAL_FAILURE — see GD §9.1 / KNOWN_RISKS.md"
+            idx_status = " ⚠️  IDX_PARTIAL_FAILURE — see KNOWN_RISKS.md RISK-1"
         logger.info(
-            f"IDX coverage: {report['idx_tvdatafeed_count']}/{report['idx_total']} "
-            f"tvdatafeed ({report['idx_coverage_pct']}%) | "
-            f"{report['idx_fallback_count']} fallback | "
+            f"IDX coverage: {report['idx_present_count']}/{report['idx_total']} "
+            f"present ({report['idx_coverage_pct']}%) | "
             f"{report['idx_missing_count']} missing{idx_status}"
         )
 
@@ -307,12 +305,13 @@ def send_telegram_alert(report: dict, token: str, chat_id: str) -> None:
             f"Storage ALERT: {report['storage_free_gb']}GB free"
         )
     elif report.get("idx_coverage_alert"):
-        # FIX GAP-10 [P3]: IDX coverage alert takes priority over the generic
-        # success message, same tier as storage/failed-job alerts.
+        # FIX GAP-10 [P3] + FIX ADR-029: IDX coverage alert takes priority over
+        # the generic success message, same tier as storage/failed-job alerts.
+        # Reworked to presence-vs-missing -- idx_fallback_count no longer exists.
         msg = (
             f"⚠️ Pipeline {report['date']} | "
-            f"IDX_PARTIAL_FAILURE: {report['idx_fallback_count'] + report['idx_missing_count']}"
-            f"/{report['idx_total']} IDX symbols degraded "
+            f"IDX_PARTIAL_FAILURE: {report['idx_missing_count']}"
+            f"/{report['idx_total']} IDX symbols missing "
             f"(coverage={report['idx_coverage_pct']}%)"
         )
     elif report["total_failed"] >= FAILED_ALERT_COUNT:

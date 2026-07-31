@@ -7,10 +7,14 @@ materializes.
 
 ---
 
-## RISK-1: tvdatafeed is an unofficial, reverse-engineered API
+## RISK-1: tvdatafeed is an unofficial, reverse-engineered API — RESOLVED (retired)
 
-**Status:** Accepted risk, partially mitigated. Tracked under Production
-Readiness Assessment v1.7.2, **GAP-10** (P3 LOW).
+**Status:** ✅ **RESOLVED — tvdatafeed retired entirely as a platform
+dependency.** Fixed via `GMI_Decision_Document_v7.docx` Decision I
+(ADR-029, 30 Jul 2026). Originally tracked under Production Readiness
+Assessment v1.7.2, **GAP-10** (P3 LOW) as an accepted, partially-mitigated
+risk — see "Resolution" below for why mitigation escalated to full
+retirement rather than staying at detection-and-alerting.
 
 **GD Reference:** GD §9.1 (IDX30 Primary Source), §3.3.2 (Market OHLCV Sources).
 
@@ -31,18 +35,21 @@ API. Using it:
   `.env`) that could be rate-limited, flagged, or suspended at
   TradingView's discretion.
 
-### Blast radius
+### Blast radius (historical — tvdatafeed no longer in the source chain)
 
-`tvdatafeed` is the **primary source for IDX30** (30 of 643 instruments,
-GD §9.1) — Indonesian large-cap equities. No other free-tier source in
-the GD §3.4 Data Source Configuration Matrix covers IDX with comparable
-depth:
+`tvdatafeed` was the **primary source for IDX30** (30 of 640 Layer 1
+instruments, GD §9.1) — Indonesian large-cap equities. No other free-tier
+source in the GD §3.4 Data Source Configuration Matrix covers IDX with
+comparable depth:
 
-- **Fallback today:** `YFinanceJKAdapter` (`.JK` suffix) via
+- **Fallback (pre-ADR-029):** `YFinanceJKAdapter` (`.JK` suffix) via
   `ChainedAdapter([TvDatafeedAdapter(), YFinanceJKAdapter()])`
-  (`src/bronze/market_ingester.py`). Coverage is **lower** — some IDX30
-  constituents are thinly covered or entirely absent on yfinance's
-  Indonesian listings.
+  (`src/bronze/market_ingester.py`). Coverage was **lower** — some IDX30
+  constituents were thinly covered or entirely absent on yfinance's
+  Indonesian listings. As of ADR-029, `YFinanceJKAdapter` is IDX30's SOLE
+  source (`ChainedAdapter([YFinanceJKAdapter()])`), not a fallback — the
+  same coverage gap that existed as a *fallback* limitation now applies
+  unconditionally, since there is no longer a primary to fall back from.
 - If both `tvdatafeed` AND the yfinance `.JK` fallback fail for a symbol
   on a given day, that symbol simply has no Bronze OHLCV for that day —
   it silently drops out of Silver/Gold for that date (existing
@@ -65,24 +72,19 @@ depth:
 2. **Automatic fallback** (GD §3.5, pre-existing): `ChainedAdapter`
    transparently falls through to `YFinanceJKAdapter` per-symbol if
    `tvdatafeed` fails, no manual intervention required.
-3. **Runtime coverage alert (FIX GAP-10, this fix):**
-   `src/utils/health_reporter.py::_check_idx_coverage()` runs as part of
-   the daily `health_report` job. It reads the `_source` / `_symbol`
-   metadata every Bronze write already carries and compares, for each of
-   the 30 IDX symbols, whether today's data came from `tvdatafeed`,
-   fell back to `yfinance_jk`, or is missing entirely. If **more than 5**
-   symbols are degraded (fallback + missing) in a single run, it:
-   - logs a `WARNING` with the literal marker `IDX_PARTIAL_FAILURE`
-     (matching the IDD §6.3 SOP note), the exact counts, and the
-     coverage percentage;
-   - sets `idx_coverage_alert: True` in the health report dict;
-   - prints an IDX coverage line in the terminal health report
-     (`_print_report`);
-   - takes priority in the optional Telegram alert
-     (`send_telegram_alert`) over the generic success message, same tier
-     as the storage and failed-job-count alerts.
-   - `IDX_COVERAGE_ALERT_THRESHOLD = 5` is a module constant in
-     `health_reporter.py` if the threshold needs tuning.
+3. **Runtime coverage alert (FIX GAP-10, superseded by ADR-029):**
+   `src/utils/health_reporter.py::_check_idx_coverage()` ran as part of
+   the daily `health_report` job. It read the `_source` / `_symbol`
+   metadata every Bronze write carried and compared, for each of the 30
+   IDX symbols, whether today's data came from `tvdatafeed`, fell back to
+   `yfinance_jk`, or was missing entirely. This mechanism is now retired
+   along with `tvdatafeed` itself — see "Resolution" below.
+   `_check_idx_coverage()` was reworked from tvdatafeed-vs-fallback to a
+   simpler presence-vs-missing check (there is only one source now, so a
+   source-of-origin distinction is meaningless); the `IDX_PARTIAL_FAILURE`
+   alert marker, `IDX_COVERAGE_ALERT_THRESHOLD = 5`, and Telegram-priority
+   behavior all carry over unchanged in spirit, just measuring "missing"
+   instead of "fallback + missing."
 
 ### What this does NOT do
 
@@ -109,31 +111,60 @@ degraded until either TradingView access is restored or a migration
    meantime — no manual action is required to keep the pipeline moving,
    only to restore full IDX30 coverage.
 
-### Long-term migration path (not yet implemented)
+### Resolution (ADR-029, 30 Jul 2026)
 
-The assessment's GAP-10 mitigation #3 suggested evaluating a paid/official
-IDX data vendor as a structural fix, since neither Polygon.io nor any
-other source already in the GD §3.4 matrix covers Indonesian equities.
-Candidates worth evaluating before committing engineering time (not
-evaluated in depth here — this is a roadmap note, not a vendor decision):
+tvdatafeed's sign-in started failing in practice, not just in theory —
+confirmed via `alpha-factory_preflight_logs___29_July_2026.txt`
+(`check_tvdatafeed_symbols.py`, full run): sign-in itself failed ("error
+while signin"), the client fell back to "nologin method, data you access
+may be limited," and while the session health check (a lightweight IDX
+`BBCA` daily bar) reported "Connection established and healthy," every
+subsequent fetch for a non-IDX exchange (BMDI, SGX, LME, ICE — the
+exchanges the deferred CPO/RUBBER/TIN/COAL_NEWC context instruments
+needed) timed out. This reads as a structural nologin-mode access-tier
+gap, not a transient blip: the account can reach some baseline
+TradingView data (enough for the IDX health check) but not the specific
+exchanges this platform needed beyond IDX.
 
-- **IDX (Indonesia Stock Exchange) official market data feed** — the
-  authoritative source, but typically enterprise-priced and requires a
-  local entity / broker relationship.
-- **Local Indonesian data vendors** (e.g. RTI Business, Stockbit API,
-  various RDT-class feeds) — variable pricing and API quality, would
-  need individual evaluation against GD §3.4's free-tier-first
-  philosophy.
-- **Refinitiv / Bloomberg** — comprehensive but priced well outside this
-  project's free-tier infrastructure budget (GD §1, MacBook Air M1
-  single-operator design).
+**Decision:** retire `tvdatafeed` entirely rather than keep it as a
+lower-priority IDX fallback. `YFinanceJKAdapter` was already the tested
+ChainedAdapter fallback for IDX30 and is now its sole source — this is
+priority reordering and dependency removal, not new integration risk.
+CPO/RUBBER/TIN never got live tvdatafeed wiring in the first place (still
+`context_available: false` at the time of this decision), so nothing in
+production actually depended on removing it for them — only the
+config-intent (`tvfeed_symbol`/`tvfeed_exchange` fields, the
+`check_tvdatafeed_symbols.py` `ROUTING_TABLE`) did. All four
+(CPO/RUBBER/TIN/NICKEL) were re-sourced as yfinance equity proxies
+instead — F34.SI (Wilmar Intl.), STA.BK (Sri Trang Agro), AFM.V (Alphamin
+Resources), NIC.AX (Nickel Industries) — confirmed live via
+`check_yfinance_tickers.py --candidates`
+(`alpha-factory verify-preflight logs — 30 July 2026.txt`).
 
-Any migration here is a **new SourceAdapter implementation**
-(`src/bronze/source_adapter.py`), not an architecture change — per GD
-§17.9's upgrade-path guarantee, swapping `tvdatafeed` for a different
-primary IDX adapter requires no change to Silver, Gold, or the
-Scheduler, as long as the new adapter's output matches the existing
-Bronze OHLCV schema contract (`config/schemas/yfinance_ohlcv.yaml`-style).
+**What changed:** `TvDatafeedAdapter`/`TvDatafeedSessionManager` archived
+to `scripts/archive/` (no import-time side effects, plain move — unlike
+RISK-11's guarded scripts). `market_ingester.py`'s `idx_chain` and
+`_primary_source_for()` updated to yfinance-only.
+`health_reporter.py::_check_idx_coverage()` reworked to presence-vs-
+missing (see mitigation #3 above). `pyproject.toml`'s `tvdatafeed` git
+dependency removed. `TV_USERNAME`/`TV_PASSWORD` left in `.env` as dead
+(not urgent to scrub). This section ("Operator playbook if
+`IDX_PARTIAL_FAILURE` fires" above) is now moot for the tvdatafeed-
+specific steps (checking `TvDatafeedSessionManager.is_available`, the
+upstream `tvdatafeed` repo) — left in place as historical record rather
+than deleted, since the general "check the health report, then
+investigate the fallback source" shape still applies if `yfinance_jk`
+itself ever degrades for IDX.
+
+**What this does NOT resolve:** RUBBER's proxy (STA.BK) returned only
+3/5 rows on its initial preflight check (likely a Thai exchange holiday,
+not independently confirmed) — flagged for a longer-window re-check
+before this feeds a real Bronze run. TIN's proxy (AFM.V) has an
+unverified "CIRO trade resumption" headline (~Jan 2026) surfaced during
+candidate research, not investigated. Neither blocks this resolution —
+both are monitored risks on the *new* sources, unrelated to the
+tvdatafeed retirement itself, and are lower severity than a fully broken
+primary source.
 
 ---
 
@@ -1015,7 +1046,71 @@ the fix. Full suite: 16/16 in this file, no regressions elsewhere.
 
 ---
 
-*Last updated: v1.12.1 (in progress) — Decision C coverage tranche items
+## RISK-15 (NEW): ADR-005/006's FRED Track 2 monthly supplements (`PIORECRORECUSDM`, `PCOALAUUSDM`) were never actually added to `config/fred_series.yaml`
+
+**Status:** ⚠️ **OPEN — flagged, not fixed.** Discovered incidentally while
+implementing ADR-030–033 (30 Jul 2026, `GMI_Decision_Document_v7.docx`) —
+not the focus of that thread, so deliberately not fixed in the same pass
+(see "Why not fixed now" below).
+
+**GD Reference:** Architecture Extension v1.0 ADR-005 (Iron Ore — VALE
+proxy + FRED `PIORECRORECUSDM` monthly supplement), ADR-006 (Newcastle
+Coal — WHC.AX proxy + FRED `PCOALAUUSDM` monthly supplement). Both
+describe a "Track 2" two-track design: a daily equity proxy (implemented,
+live) plus a monthly official FRED series as a lower-frequency supplement
+for `ForecastModule`.
+
+### What the risk is
+
+`config/fred_series.yaml` (60-series IDD §5 registry: monetary_policy,
+inflation, growth, labor, credit, housing, volatility domains) has **no
+`commodity` domain at all**, confirmed by reading the live file directly
+this thread. Neither `PIORECRORECUSDM` nor `PCOALAUUSDM` — both
+explicitly specified in ADR-005/006's own "Consequences" sections — exist
+anywhere in it. Track 1 (the equity proxies, VALE/WHC.AX) is fully live;
+Track 2 (the FRED monthly supplements) was apparently never implemented
+despite being decided, and this gap went unnoticed across at least three
+subsequent design/decision documents that reference IRON_ORE/COAL_NEWC.
+This is the same class of gap `GMI_Decision_Document_v3.docx` found for
+Architecture v2.1 Addendum's commodity taxonomy ("decided, described down
+to the code, zero occurrences in the live file") — a documentation-vs-
+reality gap, not a code bug.
+
+### Why not fixed now
+
+ADR-030–033 (this thread) introduced 4 new candidate FRED series of the
+same Track 2 shape — `PPOILUSDM` (palm oil), `PRUBBUSDM` (rubber),
+`PTINUSDM` (tin), `PNICKUSDM` (nickel), matching the same World Bank Pink
+Sheets naming convention as the two above. These were deliberately **NOT**
+added to `fred_series.yaml` in this pass either: (1) fixing the pre-
+existing IRON_ORE/COAL_NEWC gap was out of scope for a tvdatafeed-
+retirement thread; (2) whether `fred_ingester.py` even has domain-parsing
+logic for a `commodity` domain was not verified this thread; (3) none of
+the 6 series (2 pre-existing + 4 new) have been empirically confirmed
+against the live FRED API from any sandbox to date — same network
+constraint as every other preflight-class gap in this project
+(`check_bis_cbpol_d.py`, `check_yfinance_tickers.py`, etc.).
+
+### Suggested next step
+
+A dedicated, properly-scoped thread should: (1) verify `fred_ingester.py`'s
+domain handling supports (or needs extending for) a `commodity` domain;
+(2) add a `commodity` domain section to `fred_series.yaml` with all 6
+series (2 backfilled + 4 new); (3) author or extend a preflight script to
+confirm all 6 resolve against live FRED (mirroring `check_yfinance_tickers.py`'s
+pattern); (4) wire the Track 2 supplement into `ForecastModule` once
+GMI Wave 1 Cycle 4 (CrossAssetEngine) actually starts — Track 2 has no
+live consumer yet regardless of this gap, since `ForecastModule` itself
+isn't built.
+
+---
+
+*Last updated: v1.13.0 — ADR-029–033 (`GMI_Decision_Document_v7.docx`):
+tvdatafeed retired entirely (RISK-1 → RESOLVED); CPO/RUBBER/TIN/NICKEL
+un-deferred via yfinance equity proxies (F34.SI/STA.BK/AFM.V/NIC.AX);
+RISK-15 (NEW, OPEN) — pre-existing FRED Track 2 supplement gap found
+incidentally, flagged not fixed. July 2026.
+Prior entry: v1.12.1 (in progress) — Decision C coverage tranche items
 #1–#3 (`mtf_alignment.py`, `screener.py`, `eia_ingester.py`), three real
 bugs found and fixed via first real-function test coverage (RISK-12,
 RISK-13, RISK-14), July 2026.

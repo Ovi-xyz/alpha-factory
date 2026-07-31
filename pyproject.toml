@@ -1,6 +1,21 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.12.1"
+version = "1.13.0"
+# FIX ADR-029/030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026): version
+# bump folds in both this thread's work (tvdatafeed retirement, 4 Layer 2
+# proxy activations) AND a catch-up for several prior threads that landed
+# on live main without ever bumping this string (ADR-027 instruments.yaml
+# split, Decision C coverage tranche was captured at 1.12.1, GMI v6 Decision
+# E preflight extension + G-6 trigger completion, ADR-028 poetry bootstrap
+# check, the 28 Jul 2026 preflight-fixes/coverage-option-b thread, and the
+# check_yfinance_tickers.py --candidates addition). None of these bumped
+# this field -- it sat at 1.12.1 throughout, several real changes behind
+# live content (flagged in GMI_Decision_Document_v7.docx §4, "Ovi's call on
+# scope"). MINOR (not PATCH) chosen deliberately: rather than guess at
+# phantom 1.12.2/1.12.3/1.12.4 patch numbers that were never actually
+# stamped anywhere except informal zip filenames, one clean MINOR jump
+# avoids implying false precision about which prior thread owns which
+# patch digit. See CHANGELOG.md for the full catch-up entry.
 description = "Data Platform — Bronze/Silver/Gold Medallion Architecture"
 authors = ["Ovi"]
 packages = [
@@ -13,16 +28,18 @@ polars = {extras=["all"], version=">=0.20"}
 duckdb = ">=1.0"
 pyarrow = ">=14.0"
 yfinance = ">=0.2.36"
-# ADD Decision A (GMI_Decision_Document_v3.docx, 2026-07-17): tvdatafeed does
-# not exist on PyPI under any version (confirmed via PyPI JSON API: 404 at
-# https://pypi.org/pypi/tvdatafeed/json, and via a live pip resolution
-# attempt). It was correctly absent from pyproject.toml, but that left it
-# ONLY declared as a broken PyPI spec in environment.yml's pip: block, which
-# poisoned that block's entire atomic install (PyYAML, pytest, everything
-# else in the same block failed alongside it — see alpha-factory_logs.txt).
-# Re-declared here as a git dependency — the one path already confirmed to
-# work (manual workaround: pip install git+https://github.com/rongardF/tvdatafeed.git).
-tvdatafeed = {git = "https://github.com/rongardF/tvdatafeed.git"}
+# REMOVED FIX ADR-029 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
+# retired entirely as a platform dependency. Signin had been failing since
+# >=29 Jul 2026 (nologin fallback mode; every non-IDX exchange fetch timed
+# out even on a nominally "healthy" session -- see
+# alpha-factory_preflight_logs___29_July_2026.txt). yfinance .JK was already
+# the tested ChainedAdapter fallback for IDX30 and is now its sole source.
+# TvDatafeedAdapter/TvDatafeedSessionManager archived to scripts/archive/
+# (see scripts/archive/README.md). See KNOWN_RISKS.md RISK-1 (RESOLVED).
+# NOTE: this pyproject.toml edit alone does not regenerate poetry.lock --
+# `poetry lock` (or `poetry install`) must be run locally to drop the
+# tvdatafeed entry and its transitive deps from the lockfile; not something
+# this session can execute (no shell access to Ovi's actual Poetry env).
 pandas = ">=2.0"
 # FIX ADR-020 (GMI_Decision_Document_v2.docx, 2026-07-11): pandas-ta -> pandas-ta-classic.
 # PyPI removed pandas-ta's entire 0.3.x line (incl. the stated floor 0.3.14);
@@ -105,4 +122,17 @@ exclude_lines = [
 ]
 show_missing  = true
 skip_covered  = false
-fail_under    = 70     # Minimum 70% coverage to pass CI
+fail_under    = 80     # FIX (30 Jul 2026): was stale at 70 -- ci.yml has
+                        # enforced --cov-fail-under=80 since the 28 Jul 2026
+                        # preflight-fixes/coverage-option-b thread (Decision
+                        # F Option B, GMI_Decision_Document_v6.docx §4); this
+                        # field was never updated to match, so a bare
+                        # `pytest --cov=src --cov-fail-under` run (no
+                        # explicit CLI override) would silently enforce the
+                        # wrong, looser threshold. No behavior change to CI
+                        # itself (ci.yml's explicit flag already overrode
+                        # this), just removing a number that looked like it
+                        # enforced something without reflecting reality --
+                        # same class of gap this project's own G-6 trigger
+                        # history (GMI_Decision_Document_v6.docx §1.1) warns
+                        # about.

@@ -4,7 +4,15 @@ Primary ingester untuk market OHLCV data: US Stocks, IDX, Forex, Commodity.
 
 Source chain per asset class:
     US Stocks:  yfinance → Polygon.io
-    IDX:        tvdatafeed → yfinance (.JK)
+    IDX:        yfinance (.JK) — SOLE source since ADR-029 (GMI_Decision_
+                Document_v7.docx, 30 Jul 2026). tvdatafeed retired
+                entirely: signin failing since >=29 Jul 2026 (nologin
+                fallback mode; non-IDX exchange fetches time out even on
+                a nominally "healthy" session — see
+                alpha-factory_preflight_logs___29_July_2026.txt). yfinance
+                .JK was already the tested ChainedAdapter fallback — this
+                is priority reordering + dependency removal, not new
+                integration risk. See KNOWN_RISKS.md RISK-1 (RESOLVED).
     Forex:      yfinance → ForexDayCache (24h) → AlphaVantage (DXY only)
     Commodity:  yfinance → EIA (CL fundamental only)
     Index:      yfinance
@@ -215,11 +223,17 @@ class MarketOHLCVIngester(BronzeIngester):
         )
         from src.bronze.polygon_adapter import PolygonAdapter
         from src.bronze.alphavantage_adapter import AlphaVantageForexAdapter
-        from src.bronze.tvdatafeed_adapter import TvDatafeedAdapter
 
         # Build market-specific adapter chain (GD §3.3.2 Source Priority Matrix)
+        # FIX ADR-029 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
+        # retired entirely -- yfinance .JK is now IDX30's SOLE source, not a
+        # fallback. TvDatafeedAdapter import removed above; module archived to
+        # src/bronze/archive/tvdatafeed_adapter.py (see KNOWN_RISKS.md RISK-1,
+        # RESOLVED). Single-adapter ChainedAdapter is intentional -- ChainedAdapter
+        # requires >=1 adapter (raises ValueError on empty list) but supports
+        # exactly 1 fine; ChainedAdapter.fetch() with 1 adapter is a pure passthrough.
         if inst.market == "idx":
-            chain = ChainedAdapter([TvDatafeedAdapter(), YFinanceJKAdapter()])
+            chain = ChainedAdapter([YFinanceJKAdapter()])
         elif inst.market == "forex":
             chain = ChainedAdapter([
                 YFinanceForexAdapter(),
@@ -240,9 +254,12 @@ class MarketOHLCVIngester(BronzeIngester):
 
         FIX B-F01: digunakan oleh _run_symbol() untuk menentukan source
         awal sebelum ChainedAdapter menentukan actual_source.
+        FIX ADR-029 (GMI_Decision_Document_v7.docx, 30 Jul 2026): idx case
+        changed 'tvdatafeed' -> 'yfinance'. tvdatafeed retired entirely --
+        yfinance .JK is IDX30's sole source now, not a fallback.
         """
         if inst.market == "idx":
-            return "tvdatafeed"
+            return "yfinance"
         if inst.market == "forex":
             return "yfinance"
         return "yfinance"  # us_stocks, commodity, index, context

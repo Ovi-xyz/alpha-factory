@@ -179,13 +179,18 @@ class TestChainedAdapterBasic:
 class TestMarketSpecificChains:
 
     def test_idx_chain_pattern(self):
-        """IDX: tvdatafeed → yfinance .JK."""
-        tvdatafeed = AlwaysNoneAdapter("tvdatafeed")    # Simulate failure
-        yfinance   = AlwaysReturnAdapter("yfinance_jk")
-        chain      = ChainedAdapter([tvdatafeed, yfinance])
-        result     = chain.fetch("BBCA", "1D", START, END)
+        """IDX: yfinance .JK only -- SOLE source since ADR-029 (GMI_Decision_
+        Document_v7.docx, 30 Jul 2026). tvdatafeed retired entirely (signin
+        failing since >=29 Jul 2026); yfinance .JK was already the tested
+        fallback and is now the only adapter in the chain -- no more
+        2-adapter tvdatafeed->yfinance cascade. See KNOWN_RISKS.md RISK-1
+        (RESOLVED)."""
+        yfinance = AlwaysReturnAdapter("yfinance_jk")
+        chain    = ChainedAdapter([yfinance])
+        result   = chain.fetch("BBCA", "1D", START, END)
         assert result is not None
         assert result["_source"].to_list()[0] == "yfinance_jk"
+        assert yfinance.call_count == 1
 
     def test_forex_chain_pattern(self):
         """Forex: yfinance → ForexDayCache → AlphaVantage."""

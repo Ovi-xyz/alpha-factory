@@ -30,6 +30,14 @@ Usage:
     python scripts/preflight/check_yfinance_tickers.py
     python scripts/preflight/check_yfinance_tickers.py --group dollar_basket
     python scripts/preflight/check_yfinance_tickers.py --symbol MYR
+    python scripts/preflight/check_yfinance_tickers.py --candidates
+
+--candidates checks CANDIDATE_PROXY_TICKERS (below) instead of config —
+4 researched-but-not-decided proxy candidates for CPO/RUBBER/TIN/NICKEL,
+proposed to replace tvdatafeed after repeated OD-C1 signin/timeout
+failures (29 Jul 2026 preflight run). Run this BEFORE any
+instruments_identity.yaml/taxonomy.yaml change — the whole point of an
+independent candidate table is to verify before deciding, not after.
 
 Exit code 0 = every checked ticker returned a non-empty, correctly-shaped
 DataFrame. Exit code 1 = at least one ticker failed.
@@ -64,6 +72,41 @@ REQUIRED_COLUMNS = {"Open", "High", "Low", "Close", "Volume"}
 # exactly the gap this script closes.
 GATE_2_UNCONFIRMED_SYMBOLS = frozenset({"KRW", "SGD", "HKD", "TWD", "NOK"})
 
+# NEW (this thread — tvdatafeed reliability review, 30 Jul 2026): candidate
+# equity/ETF proxy tickers for the 4 Layer 2 commodity-context instruments
+# currently deferred (context_available: false) — CPO, RUBBER, TIN, NICKEL.
+# tvdatafeed has been failing OD-C1 verification (signin errors, timeouts
+# on non-IDX exchanges — see preflight logs 29 Jul 2026); these are
+# candidate replacements, researched but NOT yet decided or in config.
+#
+# Deliberately independent of instruments_identity.yaml/taxonomy.yaml —
+# same principle as check_tvdatafeed_symbols.py's own ROUTING_TABLE and
+# check_bis_cbpol_d.py's EXPECTED_REF_AREAS: an authoring-time researched
+# candidate must be checkable *before* any config change, not after, or
+# the independent-verification gate this whole preflight/ directory exists
+# for is defeated. Nothing here writes to or reads from config.
+CANDIDATE_PROXY_TICKERS: dict[str, str] = {
+    # Wilmar Int'l (SGX) — world's largest palm oil trader/processor.
+    # Diversified into sugar/grains too (imperfect proxy, same class of
+    # caveat as VALE not being pure iron ore — ADR-005).
+    "CPO":    "F34.SI",
+    # Sri Trang Agro-Industry (SET) — world's largest natural rubber
+    # producer. Has a nitrile-glove segment (synthetic, not natural
+    # rubber) that dilutes the signal somewhat.
+    "RUBBER": "STA.BK",
+    # Alphamin Resources (TSXV) — pure-play tin miner, Bisie mine (DRC).
+    # Cleaner proxy than CPO/RUBBER (single reportable segment). A "CIRO
+    # trade resumption" headline surfaced dated Jan 2026 — not otherwise
+    # investigated; flagging so a PASS here isn't read as "definitely
+    # clean," only "ticker resolves and returns shaped OHLCV."
+    "TIN":    "AFM.V",
+    # Nickel Industries (ASX) — pure-play nickel, RKEF smelting ops
+    # physically in Indonesia (Morowali) but ASX-listed, so not circular
+    # with the IDX30 lead-lag targets (ANTM/INCO/NCKL). .AX suffix
+    # already proven reliable in this pipeline (AXJO, WHC.AX both pass).
+    "NICKEL": "NIC.AX",
+}
+
 
 def _check_one(symbol: str, yfinance_symbol: str) -> tuple[bool, str]:
     """Return (ok, message) for one ticker. Import yfinance lazily — this
@@ -94,11 +137,42 @@ def _check_one(symbol: str, yfinance_symbol: str) -> tuple[bool, str]:
     return True, f"OK — {len(df)} rows, columns {sorted(cols)}"
 
 
+def _check_candidates() -> int:
+    """Check CANDIDATE_PROXY_TICKERS only — zero config/InstrumentLoader
+    access, so this is safe to run before CPO/RUBBER/TIN/NICKEL exist
+    anywhere in instruments_identity.yaml/taxonomy.yaml."""
+    failures = []
+    for symbol, yf_symbol in sorted(CANDIDATE_PROXY_TICKERS.items()):
+        ok, msg = _check_one(symbol, yf_symbol)
+        status = "PASS" if ok else "FAIL"
+        print(f"[{status}] {symbol:8s} ({yf_symbol:14s}) [candidate — not yet in config]  {msg}")
+        if not ok:
+            failures.append(symbol)
+
+    print()
+    if failures:
+        print(f"{len(failures)}/{len(CANDIDATE_PROXY_TICKERS)} candidate(s) FAILED: {failures}")
+        return 1
+
+    print(f"All {len(CANDIDATE_PROXY_TICKERS)} candidates PASSED.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--group", default=None, help="Only check one context_group (e.g. dollar_basket)")
     parser.add_argument("--symbol", default=None, help="Only check one symbol (e.g. MYR)")
+    parser.add_argument(
+        "--candidates", action="store_true",
+        help="Check CANDIDATE_PROXY_TICKERS (CPO/RUBBER/TIN/NICKEL proxy "
+             "candidates) instead of config. Independent of "
+             "instruments_identity.yaml/taxonomy.yaml — safe to run before "
+             "any config or decision-doc change.",
+    )
     args = parser.parse_args()
+
+    if args.candidates:
+        return _check_candidates()
 
     from src.config.instrument_loader import get_loader
 

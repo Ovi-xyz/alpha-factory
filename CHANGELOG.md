@@ -1,5 +1,277 @@
 # CHANGELOG — Data Platform
 
+## v1.13.0 — ADR-029–033: tvdatafeed Retirement & Layer 2 Proxy Adoption; Version/CHANGELOG Catch-Up (Juli 2026)
+
+Dokumen referensi: `GMI_Decision_Document_v7.docx` (Decision I / ADR-029
+tvdatafeed retirement; Decisions J–M / ADR-030–033 CPO/RUBBER/TIN/NICKEL
+proxy adoption), menggunakan `alpha-factory_preflight_logs___29_July_2026.txt`
+(OD-C1 kegagalan — sign-in gagal, non-IDX exchange fetch timeout meski
+session "healthy") dan `alpha-factory verify-preflight logs — 30 July
+2026.txt` (4 kandidat proxy PASS via `check_yfinance_tickers.py
+--candidates`) sebagai empirical ground truth.
+
+**Catatan versi/staleness:** `pyproject.toml` dan entri teratas
+`CHANGELOG.md` ini sempat macet di `1.12.1` melewati beberapa thread nyata
+yang landed di live main tanpa bump (ADR-027 instruments.yaml split, GMI
+v6 Decision E preflight extension + G-6 trigger completion, ADR-028
+poetry bootstrap check, thread 28 Jul 2026 preflight-fixes/coverage-
+option-b, penambahan `check_yfinance_tickers.py --candidates`) —
+dicatat di `GMI_Decision_Document_v7.docx` §4 sebagai "Ovi's call on
+scope." Thread ini melakukan MINOR bump langsung (1.12.1 → 1.13.0),
+bukan menebak angka PATCH 1.12.2/1.12.3/1.12.4 yang tidak pernah
+benar-benar tercatat di manapun selain nama file zip informal — satu
+lompatan bersih menghindari klaim presisi palsu tentang thread mana yang
+"memiliki" digit PATCH yang mana.
+
+Total: **tvdatafeed dipensiunkan sepenuhnya** (dependency, 2 modul
+Bronze, 1 script preflight, 2 file test — semua diarsipkan/dihapus, RISK-1
+→ RESOLVED) | **4 instrumen Layer 2 diaktifkan** (CPO, RUBBER, TIN, NICKEL
+— dari 55 aktif/4 deferred menjadi 59 aktif/0 deferred, `count_total()`
+695 → 699) | **1 risiko baru diflag** (RISK-15, `fred_series.yaml` gap
+pre-existing, tidak diperbaiki thread ini). **Full test suite DIJALANKAN
+sesi ini oleh Ovi** (`poetry-logs_v1_13_0.txt`, project knowledge) —
+`poetry lock` sukses, `poetry run pytest`: **1 failed, 1418 passed**
+pada pass pertama (1 regresi nyata ditemukan dan diperbaiki — lihat
+"Correction" di bawah), coverage **81.41%** (> gate 80%),
+`validate_instruments.py` PASSED (699 symbols, Layer 1=640, Layer 2=59),
+Gate G-8 PASSED. Final count setelah correction: **1420** (lihat
+"Catatan test count").
+
+### FIX ADR-029 [src/bronze/market_ingester.py, source_adapter.py, yfinance_adapter.py, utils/health_reporter.py] — tvdatafeed Retirement
+
+**Root cause / trigger**: `check_tvdatafeed_symbols.py` (29 Jul 2026, full
+run) menunjukkan sign-in gagal ("error while signin"), client fallback ke
+"nologin method", dan meski health check (BBCA 1D bar) melaporkan
+"healthy", setiap fetch non-IDX exchange (BMDI, SGX, LME, ICE) timeout.
+Pola ini dibaca sebagai structural nologin-mode access-tier gap, bukan
+transient blip.
+
+**Keputusan**: pensiunkan tvdatafeed sepenuhnya (bukan dipertahankan
+sebagai fallback prioritas rendah) — `YFinanceJKAdapter` sudah menjadi
+fallback ChainedAdapter teruji untuk IDX30 dan sekarang menjadi
+satu-satunya source. CPO/RUBBER/TIN tidak pernah punya live tvdatafeed
+wiring (`context_available: false` sepanjang waktu), jadi tidak ada
+production dependency nyata yang terputus untuk mereka — hanya
+config-intent (`tvfeed_symbol`/`tvfeed_exchange`, `ROUTING_TABLE`) yang
+hilang, digantikan proxy yfinance (lihat FIX ADR-030–033 di bawah).
+
+**Perubahan kode**:
+- `market_ingester.py`: `idx_chain` dari `ChainedAdapter([TvDatafeedAdapter(), YFinanceJKAdapter()])`
+  menjadi `ChainedAdapter([YFinanceJKAdapter()])`; `_primary_source_for()`
+  case idx: `"tvdatafeed"` → `"yfinance"`; import `TvDatafeedAdapter`
+  dihapus.
+- `source_adapter.py`, `yfinance_adapter.py`: docstring/usage example
+  diperbarui, tidak lagi mereferensikan pola 2-adapter tvdatafeed→yfinance.
+- `health_reporter.py::_check_idx_coverage()`: direwrite dari
+  tvdatafeed-vs-fallback menjadi presence-vs-missing. Field lama
+  `idx_tvdatafeed_count`/`idx_fallback_count` dihapus, field baru
+  `idx_present_count` ditambahkan. Query DuckDB disederhanakan (tidak lagi
+  butuh `ROW_NUMBER()` per-source resolution — cukup `SELECT DISTINCT
+  _symbol`). Ini BUKAN perubahan kosmetik: di bawah schema lama, setiap
+  symbol yang present akan selalu tampil sebagai "fallback" (karena
+  sumber satu-satunya sekarang adalah yfinance_jk), sehingga
+  `IDX_COVERAGE_ALERT_THRESHOLD` akan ter-trip di SETIAP run sehat —
+  false alarm permanen jika tidak diperbaiki.
+
+**Arsip** (tidak ada import-time side effect, plain move — beda dengan
+precedent RISK-11 yang butuh `SystemExit` guard):
+- `src/bronze/tvdatafeed_adapter.py`, `tvdatafeed_session.py` →
+  `scripts/archive/`.
+- `scripts/preflight/check_tvdatafeed_symbols.py` → `scripts/archive/`.
+- `tests/unit/test_tvdatafeed_adapter.py` (28 test, termasuk 1
+  parametrize×4), `test_tvdatafeed_session.py` (35 test) → dipindah ke
+  `scripts/archive/ARCHIVED_test_*.py` (prefix `test_` dihapus dari nama
+  file agar tidak pernah ter-collect pytest — meski `testpaths=["tests"]`
+  di `pyproject.toml` sudah membuat ini secara teknis tidak perlu, tetap
+  dilakukan sebagai defense-in-depth murah).
+- `tests/unit/test_preflight_scripts.py::TestCheckTvdatafeedSymbols` (5
+  test) dihapus sepenuhnya (bukan dipindah — kelas test, bukan file
+  utuh).
+- `scripts/archive/README.md` diperbarui: section baru "tvdatafeed
+  retirement (ADR-029)" mendokumentasikan kelima file di atas, terpisah
+  dari framing "destructive migration scripts" yang sudah ada (kategori
+  risiko yang berbeda — tvdatafeed modules tidak pernah punya destructive
+  write path).
+
+**pyproject.toml**: dependency git `tvdatafeed` dihapus.
+**`poetry.lock` — DIJALANKAN, DIKONFIRMASI (`poetry-logs_v1_13_0.txt`)**:
+`poetry lock` dijalankan Ovi setelah edit ini diterapkan (24.5s, resolve
+bersih) — entry `tvdatafeed` dan transitive dependency-nya benar-benar
+terhapus dari lockfile, bukan cuma dari teks `pyproject.toml`. (Catatan
+audit: paragraf ini awalnya berbunyi "PENTING — belum bisa dieksekusi
+sesi ini" saat entri ini pertama ditulis, sebelum `poetry-logs_v1_13_0.txt`
+tersedia — diperbarui di sini, bukan di entri terpisah, karena ini masih
+delivery yang sama, belum pernah di-tag/push.)
+
+**KNOWN_RISKS.md**: RISK-1 header/status diubah menjadi RESOLVED, section
+baru "Resolution (ADR-029, 30 Jul 2026)" ditambahkan sebelum
+"Long-term migration path" (yang sekarang sudah dieksekusi, bukan lagi
+roadmap item).
+
+### FIX ADR-030–033 [config/instruments_identity.yaml, instruments_taxonomy.yaml] — CPO/RUBBER/TIN/NICKEL Proxy Adoption
+
+**Root cause / trigger**: dengan tvdatafeed pensiun (ADR-029), keempat
+instrumen ini butuh source baru atau tetap deferred selamanya. Riset
+kandidat proxy ekuitas, dikonfirmasi live via
+`check_yfinance_tickers.py --candidates` (30 Jul 2026): F34.SI (Wilmar
+International, SGX — proxy CPO), STA.BK (Sri Trang Agro-Industry, SET —
+proxy RUBBER), AFM.V (Alphamin Resources, TSX Venture — proxy TIN),
+NIC.AX (Nickel Industries Ltd, ASX — proxy NICKEL).
+
+**Perubahan per instrumen** (`context_available`/`include_in_forecast`:
+`false` → `true`; `deferred_reason`/`planned_wave` dihapus):
+
+| Symbol | yfinance_symbol (baru) | proxy_instrument | Catatan |
+| --- | --- | --- | --- |
+| CPO | F34.SI | F34.SI | `requires_fx_normalization` `true`→`false` (bukan lagi raw MYR commodity feed) |
+| RUBBER | STA.BK | STA.BK | Preflight hanya 3/5 rows — kemungkinan libur bursa Thailand, belum dikonfirmasi independen |
+| TIN | AFM.V | AFM.V | Monitored risk: headline "CIRO trade resumption" (~Jan 2026) belum diinvestigasi |
+| NICKEL | NIC.AX | NIC.AX | `structural_break` (LME suspension 2022-03-07) dipertahankan — masih relevan sebagai konteks pasar nickel |
+
+**Keputusan desain yang sengaja TIDAK dilakukan**:
+- `proxy_for`/`proxy_correlation_expected` **sengaja tidak diset** untuk
+  keempat instrumen — `validate_instruments.py` mewajibkan
+  `proxy_correlation_expected` setiap kali `proxy_for` ada, dan belum ada
+  analisis korelasi empiris proxy-vs-komoditas untuk satupun dari empat
+  ini (berbeda dari VALE yang punya angka ~0.81 dari studi nyata).
+  Follow-up, bukan fabrikasi angka.
+- `base_currency` dihapus untuk keempat instrumen (sebelumnya
+  MYR/USD/USD/tidak-ada) — mengikuti presedan VALE/WHC.AX yang tidak
+  membawa flag currency meski trading dalam mata uang asing (SGD, THB,
+  CAD, AUD masing-masing) — pola equity-proxy, bukan raw
+  currency-denominated commodity feed.
+- `config/fred_series.yaml` **sengaja tidak disentuh** — lihat
+  `KNOWN_RISKS.md` RISK-15 (baru).
+
+**Dampak berantai — Layer 2 universe**:
+`InstrumentLoader.count_context()`: 55 → 59. `deferred_count()`: 4 → 0.
+`count_total()`: 695 → 699 (640 Layer 1 + 59 Layer 2, kembali ke ceiling
+699 sebelum deferral NICKEL). `by_context_group("commodity")` tetap 11
+(invariant terhadap split aktif/deferred).
+
+**Test diperbarui** (semua rename 1:1 atau perubahan assertion pada test
+existing — nol test baru ditambahkan, lihat "Catatan test count"):
+`test_context_anchors.py` (2 test: 55→59, `test_resolve_excludes_deferred`
+→ `test_resolve_no_instruments_currently_deferred` dengan assertion
+dibalik), `test_instrument_loader.py` (9 test: count 55→59/695→699/4→0,
+`test_deferred_instruments_have_required_fields` →
+`test_no_deferred_instruments_remain`, `test_forecast_context_excludes_deferred`
+→ `test_forecast_context_now_includes_former_deferred`,
+`test_adr023_only_cpo_is_myr_dependent` →
+`test_adr023_history_superseded_by_adr030_033`), `test_full_system.py`
+(1 test: `test_l7_layer2_context_universe_present`, 55/4 → 59/0).
+
+### Housekeeping [pyproject.toml] — Version Bump + Stale Coverage Threshold
+
+- `version = "1.12.1"` → `"1.13.0"` (MINOR — lihat catatan staleness di
+  atas untuk rationale).
+- `[tool.coverage.report] fail_under = 70` → `80`. Ditemukan saat sudah
+  membuka file ini untuk alasan lain: `ci.yml` sudah menegakkan
+  `--cov-fail-under=80` sejak thread 28 Jul 2026 (Decision F Option B,
+  `GMI_Decision_Document_v6.docx` §4), tapi field ini di `pyproject.toml`
+  tidak pernah diupdate untuk match — artinya `pytest --cov=src
+  --cov-fail-under` tanpa override CLI eksplisit akan diam-diam
+  menegakkan threshold yang salah (lebih longgar). Tidak ada perubahan
+  perilaku CI aktual (flag eksplisit `ci.yml` sudah override field ini),
+  murni menghapus angka yang terlihat menegakkan sesuatu padahal tidak
+  mencerminkan realita — kelas gap yang sama dengan riwayat trigger G-6
+  (`GMI_Decision_Document_v6.docx` §1.1).
+
+### ADD RISK-15 [KNOWN_RISKS.md] — FRED Track 2 Supplement Gap (Ditemukan, Tidak Diperbaiki)
+
+Ditemukan insidental saat membaca `config/fred_series.yaml` untuk thread
+ini: `PIORECRORECUSDM`/`PCOALAUUSDM` (ADR-005/006's FRED monthly
+supplement untuk IRON_ORE/COAL_NEWC) tidak pernah benar-benar ditambahkan
+ke file live, meski sudah diputuskan sejak Architecture Extension v1.0.
+4 series kandidat baru (`PPOILUSDM`/`PRUBBUSDM`/`PTINUSDM`/`PNICKUSDM`)
+untuk CPO/RUBBER/TIN/NICKEL TIDAK ditambahkan dalam thread ini — di luar
+scope tvdatafeed retirement, dan `fred_ingester.py`'s domain-parsing
+logic belum diverifikasi mendukung domain `commodity`. Detail lengkap
+dan suggested next step di `KNOWN_RISKS.md` RISK-15.
+
+### Catatan test count
+
+**1487 → 1419 → 1420 (final)**. 1487→1419 (Δ -68) murni dari
+pengarsipan/penghapusan test file untuk kode yang dipensiunkan (28 + 35 +
+5, lihat FIX ADR-029 di atas) — bukan regresi. 1419→1420 (Δ +1) dari
+correction di bawah: 1 rename 1:1 + 1 test baru genuinely ditambahkan
+(bukan nol seperti klaim awal thread ini — lihat "Correction"). Final:
+**1420**, cocok dengan real run kedua (1419 collected pada percobaan
+pertama, +1 dari test baru correction, belum di-re-run empiris tapi
+arithmetic straightforward). `tests/COUNT_BASELINE.txt`: 1487 → 1419 →
+**1420**.
+
+### Correction (sesi yang sama, sebelum dianggap selesai) — `test_is_deferred_property` Terlewat
+
+**Ditemukan oleh `poetry run pytest` sungguhan (`poetry-logs_v1_13_0.txt`,
+project knowledge), bukan oleh review manual thread ini sendiri**: 1
+failure nyata dari 1419 test, di luar seluruh test yang sudah
+diidentifikasi dan diupdate untuk perubahan 55→59/4→0 di atas.
+`TestInstrumentLoaderLayer2::test_is_deferred_property` meng-assert
+`tin.is_deferred is True` — pencarian awal thread ini menemukan setiap
+test yang mengandung angka HARDCODE (55, 59, 4, 695, 699) tapi melewatkan
+test ini karena tidak mengandung angka apapun, hanya memilih TIN sebagai
+contoh instrumen yang (dulu) deferred untuk menguji property `is_deferred`
+itu sendiri secara langsung.
+
+**Fix** (diverifikasi terhadap `InstrumentLoader` sungguhan SEBELUM
+ditulis ke test file — bukan ditebak ulang, lihat dev-log untuk detail
+reproduksi): `test_is_deferred_property` →
+`test_is_deferred_property_false_for_active_instruments`
+(`TestInstrumentLoaderLayer2`) — assertion dibalik ke `False` untuk TIN
+dan COPPER (branch `is_deferred==True` sekarang dead terhadap config
+real, karena nol instrumen Layer 2 yang deferred). Branch `True`
+dipindah ke data sintetis — test BARU
+`test_is_deferred_property_true_for_deferred_instrument`
+(`TestInstrumentLoaderCoverageGaps`, kelas yang memang didesain untuk
+"branch yang tidak dieksekusi config real") — pasangan
+identity/taxonomy sintetis (`FAKE_DEFERRED`/`FAKE_ACTIVE`) diverifikasi
+langsung terhadap `InstrumentLoader`/`merge_split_trees` sungguhan di
+sandbox sebelum ditulis ke repo, menghasilkan `is_deferred` True/False
+yang benar pada percobaan pertama.
+
+**Pelajaran, dicatat agar tidak terulang**: pencarian berbasis grep
+angka-hardcode (55/59/4/695/699) tidak cukup untuk menemukan test yang
+menguji suatu MEKANISME (di sini: property `is_deferred`) lewat SATU
+CONTOH SIMBOL spesifik tanpa angka apapun di assertion-nya. Real
+`poetry run pytest` run adalah satu-satunya sumber kebenaran lengkap —
+sesuai standing principle proyek ini ("never trust documentation without
+empirical re-verification"), yang sama berlaku untuk pekerjaan sesi ini
+sendiri, bukan hanya dokumen dari sesi sebelumnya.
+
+### Verifikasi
+
+**Dilakukan sesi ini (Claude, sebelum pytest sungguhan)**: setiap file
+yang diedit dibaca lengkap sebelum diedit; `validate_instruments.py`
+dibaca untuk mengonfirmasi constraint `proxy_for`/`proxy_correlation_expected`
+SEBELUM memutuskan tidak menyertakan keduanya; kedua JSON Schema dibaca
+untuk mengonfirmasi field baru valid; `InstrumentLoader` SUNGGUHAN
+dijalankan (bukan cuma dibaca) terhadap kedua file config yang sudah
+diedit, mengonfirmasi `count_total()=699`, `count_context()=59`,
+`deferred_count()=0` sebelum diklaim di test manapun; assertion beberapa
+test yang ditulis ulang dijalankan langsung terhadap `InstrumentLoader`
+sungguhan itu.
+
+**Dijalankan sesi ini oleh Ovi (`poetry-logs_v1_13_0.txt`)**: `poetry
+lock` (24.5s, sukses) — tvdatafeed benar-benar terhapus dari lockfile.
+`poetry run pytest tests/ -q` — **1 failed, 1418 passed** pada percobaan
+pertama (lihat "Correction" di atas untuk fix-nya — belum di-re-run
+empiris pasca-fix). `poetry run pytest tests/ --cov=src
+--cov-fail-under=80 -q` — **81.41%** (di atas gate 80% dengan margin
+nyaman; 1 kegagalan sama, tidak terkait coverage).
+`python scripts/validate_instruments.py` — **PASSED**: "699 symbols
+(Layer 1=640, Layer 2=59), no errors." `python scripts/check_glob_scope.py`
+(Gate G-8) — **PASSED**: "0 glob-scope violations in src/."
+
+**Belum dijalankan ulang pasca-correction**: `poetry run pytest` dengan
+fix `test_is_deferred_property_*` di atas belum di-re-run empiris oleh
+siapapun — arithmetic (1418 + 1 fix + 1 test baru = 1420 passed
+diharapkan) belum dikonfirmasi eksekusi nyata. Rekomendasi: jalankan
+ulang `poetry run pytest tests/ -q` sekali lagi untuk konfirmasi final
+sebelum menganggap package ini benar-benar selesai.
+
+---
+
 ## v1.12.1 — Decision C: Coverage Tranche (7/7 files) — Tiga Bug Nyata Ditemukan & Diperbaiki; pydantic Dihapus (Juli 2026)
 
 Dokumen referensi: `GMI_Decision_Document_v5.docx` §3 (Decision C — coverage

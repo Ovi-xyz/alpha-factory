@@ -133,81 +133,75 @@ class TestInstrumentLoaderLayer2:
         self.loader = get_loader()
 
     def test_all_context_default_count(self):
-        """all_context() default excludes deferred — 55 active (59 - 4 deferred),
-        post NICKEL's deferral (yfinance NI=F confirmed 404,
-        alpha-factory_preflight_logs 28 July 2026) added to TIN/CPO/RUBBER."""
+        """all_context() default excludes deferred — 59 active, 0 deferred, as
+        of ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026): CPO,
+        RUBBER, TIN, NICKEL all un-deferred via yfinance equity proxies
+        (F34.SI, STA.BK, AFM.V, NIC.AX) after tvdatafeed's full retirement
+        (ADR-029). include_deferred therefore makes no observable difference
+        today -- see test_all_context_include_deferred."""
         ctx = self.loader.all_context()
-        assert len(ctx) == 55
+        assert len(ctx) == 59
         assert all(i.context_available for i in ctx)
 
     def test_all_context_include_deferred(self):
         """all_context(include_deferred=True) returns all 59 — Extension v1.0
         §3.1 (52) extended by ADR-014 (+6 context_dollar_basket) and
-        ADR-024 (+1 context_fx_normalization)."""
+        ADR-024 (+1 context_fx_normalization). FIX ADR-030-033: with zero
+        currently-deferred Layer 2 instruments, this call is now equivalent
+        to the default (include_deferred=False) -- the mechanism itself
+        (excluding context_available=False rows) is still exercised by
+        TestInstrumentLoaderCoverageGaps' synthetic-data tests."""
         ctx = self.loader.all_context(include_deferred=True)
         assert len(ctx) == 59
         symbols = {i.symbol for i in ctx}
-        assert {"TIN", "CPO", "RUBBER"}.issubset(symbols)
+        assert {"TIN", "CPO", "RUBBER", "NICKEL"}.issubset(symbols)
         assert {"CNH", "KRW", "SGD", "HKD", "TWD", "NOK", "MYR"}.issubset(symbols)
 
     def test_count_context(self):
-        assert self.loader.count_context() == 55
+        assert self.loader.count_context() == 59
         assert self.loader.count_context(include_deferred=True) == 59
 
     def test_count_total(self):
-        """Layer 1 (640) + Layer 2 active (55) = 695 OHLCV-bearing instruments
-        (was 696 before NICKEL's deferral -- see test_all_context_default_count)."""
-        assert self.loader.count_total() == 695
+        """Layer 1 (640) + Layer 2 active (59) = 699 OHLCV-bearing instruments.
+        FIX ADR-030-033 (30 Jul 2026): was 695 (55 active) before CPO/RUBBER/
+        TIN/NICKEL were un-deferred -- see test_all_context_default_count."""
+        assert self.loader.count_total() == 699
 
-    def test_deferred_count_is_4(self):
-        """ADR-007: TIN, CPO, RUBBER deferred to Wave 2. NICKEL added this
-        thread (yfinance NI=F confirmed 404, alpha-factory_preflight_logs
-        28 July 2026 -- needs tvdatafeed LME routing like TIN, unverified).
-        ADR-023 corrected the blocking reason for TIN/RUBBER (ticker
-        verification, not MYR normalization) but did not change deferred
-        status. Now 4, not 3."""
-        assert self.loader.deferred_count() == 4
+    def test_deferred_count_is_0(self):
+        """FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
+        REPLACES test_deferred_count_is_4. tvdatafeed retired entirely
+        (ADR-029); CPO, RUBBER, TIN, NICKEL all un-deferred via yfinance
+        equity proxies. Zero deferred Layer 2 instruments remain."""
+        assert self.loader.deferred_count() == 0
 
-    def test_deferred_instruments_have_required_fields(self):
+    def test_no_deferred_instruments_remain(self):
         """
-        Extension v1.0 §8.3: deferred instruments MUST have deferred_reason
-        and planned_wave populated — validated structurally here, fully
-        enforced in scripts/validate_instruments.py.
-
-        UPD ADR-023 (GMI_Decision_Document_v2.docx): requires_fx_normalization
-        / base_currency are NOT uniform across all deferred instruments
-        anymore. Of TIN/CPO/RUBBER, only CPO is MYR-dependent; TIN (LME) and
-        RUBBER (SICOM/SGX) are USD-native and were previously mis-framed as
-        MYR-blocked. Checked per-symbol below rather than asserted uniformly.
-
-        UPD (this thread): NICKEL added as a 4th deferred instrument
-        (yfinance NI=F confirmed 404, alpha-factory_preflight_logs 28 July
-        2026) — checked separately below since its deferral reason is
-        ticker/exchange verification, not currency, so it isn't folded into
-        the CPO/TIN/RUBBER currency-specific assertions.
+        FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
+        REPLACES test_deferred_instruments_have_required_fields. That test's
+        entire premise (walk the live deferred set, check each one's
+        deferred_reason/planned_wave/currency fields) is now vacuous -- the
+        live deferred set is empty. The Extension v1.0 §8.3 STRUCTURAL rule
+        ("a deferred instrument must carry deferred_reason + planned_wave")
+        is still real and still enforced -- by scripts/validate_instruments.py
+        against whatever future instrument gets deferred, and exercisable via
+        synthetic data in TestInstrumentLoaderCoverageGaps if ever needed --
+        just no longer against live config, since there is currently nothing
+        live to check it against.
         """
         deferred = {
             i.symbol: i for i in self.loader.all_context(include_deferred=True)
             if not i.context_available
         }
-        assert len(deferred) == 4
-        for inst in deferred.values():
-            assert inst.deferred_reason, f"{inst.symbol} missing deferred_reason"
-            assert inst.planned_wave == 2, f"{inst.symbol} missing planned_wave"
+        assert deferred == {}, f"Expected zero deferred Layer 2 instruments, got: {sorted(deferred)}"
 
-        assert deferred["CPO"].meta.get("requires_fx_normalization") is True
-        assert deferred["CPO"].meta.get("base_currency") == "MYR"
-        for sym in ("TIN", "RUBBER"):
-            assert deferred[sym].meta.get("requires_fx_normalization") is False, (
-                f"{sym} should be USD-native per ADR-023 — not MYR-dependent"
+        for sym in ("CPO", "RUBBER", "TIN", "NICKEL"):
+            inst = self.loader.get_context(sym)
+            assert inst.context_available is True
+            assert inst.is_deferred is False
+            assert inst.meta.get("requires_fx_normalization") is not True, (
+                f"{sym} is now an equity proxy, not a raw currency-denominated "
+                "commodity feed -- requires_fx_normalization must not be True"
             )
-            assert deferred[sym].meta.get("base_currency") == "USD"
-
-        assert "nickel" in deferred["NICKEL"].deferred_reason.lower() or \
-            "yfinance" in deferred["NICKEL"].deferred_reason.lower(), (
-            "NICKEL's deferred_reason should name the actual finding (yfinance "
-            "404), not a generic placeholder"
-        )
 
     def test_get_context_vix(self):
         inst = self.loader.get_context("VIX")
@@ -244,7 +238,10 @@ class TestInstrumentLoaderLayer2:
         assert len(all_etf) == 25
 
     def test_by_context_group_commodity_total_11(self):
-        """Architecture Extension v1.0 §2.4: 11 commodity context (8 operational + 3 deferred)."""
+        """Architecture Extension v1.0 §2.4: 11 commodity context instruments.
+        FIX ADR-030-033 (30 Jul 2026): all 11 now operational (0 deferred) --
+        was 8 operational + 3 deferred, then 7 + 4 after NICKEL's deferral.
+        Total count is invariant to the active/deferred split either way."""
         all_commodity = self.loader.by_context_group("commodity")
         assert len(all_commodity) == 11
 
@@ -262,10 +259,18 @@ class TestInstrumentLoaderLayer2:
         assert "EIDO" in fc_symbols        # international — included
         assert "ARKK" in fc_symbols        # thematic — included
 
-    def test_forecast_context_excludes_deferred(self):
-        """Deferred instruments (CPO, RUBBER, TIN) must never appear in VAR input."""
+    def test_forecast_context_now_includes_former_deferred(self):
+        """FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
+        REPLACES test_forecast_context_excludes_deferred, whose premise (CPO/
+        RUBBER/TIN never appear in VAR input because they were deferred) no
+        longer holds -- all 4 (+ NICKEL) are now context_available=true AND
+        include_in_forecast=true (yfinance equity proxies). The general
+        exclusion MECHANISM (deferred -> absent from forecast_context()) is
+        unaffected and still real; it simply has no live example to exercise
+        it against right now. This test locks in the new reality as a
+        regression guard."""
         fc_symbols = {i.symbol for i in self.loader.forecast_context()}
-        assert not {"CPO", "RUBBER", "TIN"} & fc_symbols
+        assert {"CPO", "RUBBER", "TIN", "NICKEL"}.issubset(fc_symbols)
 
     def test_correlation_context_includes_deferred_excluded_instruments(self):
         """
@@ -277,7 +282,7 @@ class TestInstrumentLoaderLayer2:
         cc_symbols = {i.symbol for i in self.loader.correlation_context()}
         assert "SPY" in cc_symbols
         assert "XLK" in cc_symbols
-        assert len(cc_symbols) == 55
+        assert len(cc_symbols) == 59  # FIX ADR-030-033: 0 deferred (was 55/4 deferred)
 
     def test_subcategory_meta_dm_cb(self):
         """Data Source & Rates Adjustment v1.0 §6.1: 9 DM central banks via BIS."""
@@ -343,10 +348,21 @@ class TestInstrumentLoaderLayer2:
         assert l2_inst.is_layer1 is False
         assert l2_inst.is_layer2 is True
 
-    def test_is_deferred_property(self):
+    def test_is_deferred_property_false_for_active_instruments(self):
+        """FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
+        REPLACES test_is_deferred_property. Confirmed via a real
+        `poetry run pytest` run (poetry-logs_v1_13_0.txt) that TIN was
+        missed in the initial pass -- it asserted tin.is_deferred is True,
+        which broke the moment TIN was un-deferred (AFM.V equity proxy).
+        Zero deferred Layer 2 instruments remain in the real config, so
+        the is_deferred==True branch is now dead against live data --
+        confirms False here for two always-active real instruments; the
+        True branch is covered via synthetic data instead, see
+        TestInstrumentLoaderCoverageGaps.test_is_deferred_property_true_for_deferred_instrument.
+        """
         tin = self.loader.get_context("TIN")
         copper = self.loader.get_context("COPPER")
-        assert tin.is_deferred is True
+        assert tin.is_deferred is False
         assert copper.is_deferred is False
 
     def test_context_instrument_is_frozen(self):
@@ -449,29 +465,37 @@ class TestGMIDecisionDocumentsV1V2:
         assert myr.yfinance_symbol == "MYR=X"
         assert hkd.yfinance_symbol == "USDHKD=X"
 
-    def test_adr023_only_cpo_is_myr_dependent(self):
-        """ADR-023 (GMI_Decision_Document_v2.docx): of the three Wave 2
-        deferred commodities, only CPO requires MYR->USD normalization.
-        TIN (LME) and RUBBER (SICOM/SGX) are USD-native — the original
-        Architecture Extension v1.0 framing (all three MYR-blocked) was
-        superseded by Architecture v2.1 Addendum's more specific routing
-        decision, which this test locks in against future silent drift."""
+    def test_adr023_history_superseded_by_adr030_033(self):
+        """
+        FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
+        REPLACES test_adr023_only_cpo_is_myr_dependent. ADR-023's finding
+        (only CPO was MYR-dependent; TIN/RUBBER were USD-native but ticker-
+        blocked) was about the ORIGINAL raw-commodity-price sourcing plan
+        (Bursa Malaysia FCPO, LME SN, SICOM TSR20 — all via tvdatafeed).
+        tvdatafeed was retired entirely (ADR-029) before any of the three
+        got live wiring, and all three (+ NICKEL) were re-sourced as
+        yfinance equity proxies instead. The old assertions (cpo.is_deferred,
+        base_currency=="MYR", etc.) are no longer true of anything live --
+        this test locks in the NEW reality rather than deleting the history
+        outright.
+        """
         cpo = self.loader.get_context("CPO")
         tin = self.loader.get_context("TIN")
         rubber = self.loader.get_context("RUBBER")
+        nickel = self.loader.get_context("NICKEL")
 
-        assert cpo.meta.get("requires_fx_normalization") is True
-        assert cpo.meta.get("base_currency") == "MYR"
-
-        for inst in (tin, rubber):
-            assert inst.meta.get("requires_fx_normalization") is False, (
-                f"{inst.symbol} must be USD-native per ADR-023"
+        for inst in (cpo, tin, rubber, nickel):
+            assert inst.context_available is True
+            assert inst.is_deferred is False
+            assert inst.meta.get("requires_fx_normalization") is not True, (
+                f"{inst.symbol}: equity proxy, not a raw currency-denominated "
+                "commodity feed — requires_fx_normalization must not be True"
             )
-            assert inst.meta.get("base_currency") == "USD"
-            assert "MYR" not in (inst.deferred_reason or "")
 
-        # All three remain deferred — ADR-023 corrects the REASON, not the status
-        assert cpo.is_deferred and tin.is_deferred and rubber.is_deferred
+        assert cpo.yfinance_symbol == "F34.SI"
+        assert rubber.yfinance_symbol == "STA.BK"
+        assert tin.yfinance_symbol == "AFM.V"
+        assert nickel.yfinance_symbol == "NIC.AX"
 
     def test_all_subcategory_ids_includes_new_groups(self):
         ids = self.loader.all_subcategory_ids()
@@ -575,3 +599,45 @@ class TestInstrumentLoaderCoverageGaps:
         loader = InstrumentLoader(identity_path=id_path, taxonomy_path=tax_path)
         assert loader.all_context() == []
         assert loader.subcategory_meta("context_dollar") == {}
+
+    def test_is_deferred_property_true_for_deferred_instrument(self, tmp_path):
+        """FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
+        ADD -- companion to
+        TestInstrumentLoaderLayer2.test_is_deferred_property_false_for_active_instruments.
+        Real config has zero deferred Layer 2 instruments as of this thread
+        (CPO/RUBBER/TIN/NICKEL all un-deferred), so Instrument.is_deferred's
+        True branch is dead against live data. Synthetic pair constructs one
+        deferred + one active Layer 2 instrument to keep both branches
+        covered, matching this class's own stated purpose (targeted coverage
+        for branches the real config doesn't currently exercise). Verified
+        directly against InstrumentLoader before being written here (not
+        assumed) -- see dev-log/2026-07-30-tvdatafeed-retirement-adr029-033.md.
+        """
+        identity, taxonomy = self._base_pair()
+        identity["context"] = {
+            "dollar": {"instruments": [{"symbol": "FAKE_DEFERRED"}, {"symbol": "FAKE_ACTIVE"}]},
+        }
+        taxonomy["context"] = {
+            "dollar": {
+                "_meta": {"contributes_to": []},
+                "instruments": [
+                    {
+                        "symbol": "FAKE_DEFERRED", "layer": 2,
+                        "context_category": "context_dollar", "context_group": "dollar",
+                        "context_available": False,
+                        "deferred_reason": "synthetic test fixture", "planned_wave": 9,
+                    },
+                    {
+                        "symbol": "FAKE_ACTIVE", "layer": 2,
+                        "context_category": "context_dollar", "context_group": "dollar",
+                        "context_available": True,
+                    },
+                ],
+            },
+        }
+        id_path, tax_path = self._write_pair(tmp_path, identity, taxonomy)
+        loader = InstrumentLoader(identity_path=id_path, taxonomy_path=tax_path)
+        deferred_inst = loader.get_context("FAKE_DEFERRED")
+        active_inst = loader.get_context("FAKE_ACTIVE")
+        assert deferred_inst.is_deferred is True
+        assert active_inst.is_deferred is False

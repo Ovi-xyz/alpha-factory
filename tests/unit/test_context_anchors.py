@@ -45,9 +45,11 @@ class TestContextAnchorsResolve:
         resolve() must produce context_anchors_{date}.parquet using only
         InstrumentLoader (no Silver DuckDB query, no silver_1d_path argument
         even exists on this method's signature). We do NOT mock get_loader
-        here — it exercises the real InstrumentLoader against
-        instruments.yaml v1.5 (55 active context instruments post
-        NICKEL's deferral this thread, on top of ADR-014/024).
+        here — it exercises the real InstrumentLoader against live config.
+        FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026): 59
+        active context instruments (was 55) — CPO/RUBBER/TIN/NICKEL all
+        un-deferred (yfinance equity proxies replace tvdatafeed, which was
+        retired entirely, ADR-029). Zero deferred Layer 2 instruments remain.
         """
         resolver, output_path = _resolver_with_tmp_output(tmp_path, monkeypatch)
         run_date = date(2025, 3, 3)
@@ -56,18 +58,24 @@ class TestContextAnchorsResolve:
 
         context_parquet = output_path / f"context_anchors_{run_date.isoformat()}.parquet"
         assert context_parquet.exists(), "context_anchors_{date}.parquet must exist"
-        assert len(symbols) == 55, (
-            f"Expected 55 active Layer 2 instruments (59 - 4 deferred), got {len(symbols)}"
+        assert len(symbols) == 59, (
+            f"Expected 59 active Layer 2 instruments (0 deferred as of ADR-029-033), got {len(symbols)}"
         )
 
-    def test_resolve_excludes_deferred(self, tmp_path, monkeypatch):
-        """MOVED GMI-CTX-001 / ADR-007: TIN, CPO, RUBBER must not appear —
-        context_available=False (Wave 2 pending MYR normalization)."""
+    def test_resolve_no_instruments_currently_deferred(self, tmp_path, monkeypatch):
+        """FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
+        REPLACES test_resolve_excludes_deferred, which asserted TIN/CPO/
+        RUBBER were absent — no longer true now that all 4 previously-
+        deferred instruments (TIN, CPO, RUBBER, NICKEL) are context_available
+        via yfinance equity proxies (tvdatafeed retired, ADR-029). This test
+        asserts the opposite as a regression guard: if any of the 4 is ever
+        accidentally re-deferred, this should fail."""
         resolver, _ = _resolver_with_tmp_output(tmp_path, monkeypatch)
         symbols = resolver.resolve(date(2025, 3, 4))
-        assert "TIN"    not in symbols
-        assert "CPO"    not in symbols
-        assert "RUBBER" not in symbols
+        assert "TIN"     in symbols
+        assert "CPO"     in symbols
+        assert "RUBBER"  in symbols
+        assert "NICKEL"  in symbols
 
     def test_resolve_parquet_schema(self, tmp_path, monkeypatch):
         """MOVED GMI-CTX-001: output parquet must carry all required
@@ -124,7 +132,7 @@ class TestContextAnchorsLoad:
         symbols = resolver.load(run_date)
         assert isinstance(symbols, list)
         assert all(isinstance(s, str) for s in symbols)
-        assert len(symbols) == 55  # was 56 before NICKEL's deferral this thread
+        assert len(symbols) == 59  # FIX ADR-030-033: 0 deferred (was 55/4 deferred)
 
     def test_load_matches_resolve_output(self, tmp_path, monkeypatch):
         resolver, _ = _resolver_with_tmp_output(tmp_path, monkeypatch)
@@ -148,7 +156,7 @@ class TestContextAnchorsLoad:
 
         df = resolver.load_full(run_date)
         assert isinstance(df, pl.DataFrame)
-        assert len(df) == 55  # was 56 before NICKEL's deferral this thread
+        assert len(df) == 59  # FIX ADR-030-033: 0 deferred (was 55/4 deferred)
         required_cols = {
             "symbol", "context_category", "context_group", "layer",
             "include_in_forecast", "reliability_flag", "proxy_for",

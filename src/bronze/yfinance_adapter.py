@@ -6,14 +6,16 @@ Primary source for:
     US Stocks  — free tier, ~2000 req/hr
     Forex      — primary, with ForexDayCache fallback
     Commodity  — primary (=F suffix)
-    IDX        — fallback (.JK suffix) when tvdatafeed fails
+    IDX        — SOLE source (.JK suffix) since ADR-029 (GMI_Decision_
+                 Document_v7.docx, 30 Jul 2026) -- tvdatafeed retired
+                 entirely. See KNOWN_RISKS.md RISK-1 (RESOLVED).
     Index      — ^GSPC, ^VIX etc.
 
 Rate limit managed via SourceLimiters.yfinance (100/min conservative).
 
 Usage (via ChainedAdapter):
     us_chain  = ChainedAdapter([YFinanceAdapter(), PolygonAdapter()])
-    idx_chain = ChainedAdapter([TvDatafeedAdapter(), YFinanceJKAdapter()])
+    idx_chain = ChainedAdapter([YFinanceJKAdapter()])  # ADR-029: single-source
     fx_chain  = ChainedAdapter([YFinanceForexAdapter(), ForexDayCacheAdapter()])
 """
 
@@ -143,7 +145,9 @@ class YFinanceForexAdapter(SourceAdapter):
 
 class YFinanceJKAdapter(SourceAdapter):
     """
-    yfinance .JK adapter for IDX stocks (fallback from tvdatafeed).
+    yfinance .JK adapter for IDX stocks.
+    FIX ADR-029 (GMI_Decision_Document_v7.docx, 30 Jul 2026): docstring updated --
+    this is now IDX30's SOLE source (tvdatafeed retired), not a fallback.
     Appends .JK suffix if not already present.
     """
 

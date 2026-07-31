@@ -14,8 +14,8 @@
 # taxonomy-side fields — none were taxonomy-adjacent-only in identity).
 # Full field-classification table and rationale: CHANGELOG.md ADR-027.
 
-version: '1.6'
-last_updated: '2026-07-22'
+version: '1.7'
+last_updated: '2026-07-30'
 us_stocks:
   Technology:
   - symbol: AAPL
@@ -1115,26 +1115,29 @@ context:
         layer: 2
         context_category: context_commodity_metals
         context_group: commodity
-        # FIX (alpha-factory_preflight_logs 28 July 2026): NI=F confirmed
-        # 404 on live yfinance -- deferred following the exact TIN pattern
-        # (context_available=false) rather than pointing at a broken
-        # source. Like TIN, the correct fix is LME routing via tvdatafeed
-        # (scripts/preflight/check_tvdatafeed_symbols.py's ROUTING_TABLE
-        # does not yet cover NICKEL -- OD-C1 scope was CPO/RUBBER/TIN/
-        # COAL_NEWC only; extending it to NICKEL is a follow-up, not done
-        # here since the tvfeed_symbol/exchange pairing needs the same
-        # empirical verification the other four still need too).
-        context_available: false
-        include_in_forecast: false
+        # FIX ADR-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
+        # retired entirely (ADR-029) before NICKEL was ever added to its
+        # ROUTING_TABLE -- the planned LME-routing fix never became
+        # reachable. Adopted NIC.AX (Nickel Industries Ltd, ASX) as daily
+        # equity proxy instead -- confirmed live via
+        # check_yfinance_tickers.py --candidates (30 Jul 2026 verify-
+        # preflight log, 5 rows). structural_break retained below: the 2022
+        # LME suspension is still relevant nickel-market history even though
+        # the price feed is now an equity proxy, not the LME contract itself.
+        # proxy_for/proxy_correlation_expected deliberately NOT set --
+        # validate_instruments.py requires proxy_correlation_expected
+        # whenever proxy_for is present, and no empirical NIC.AX-vs-nickel-
+        # price correlation analysis exists yet (unlike VALE's ~0.81, which
+        # came from an actual study). Follow-up, not fabricated here.
+        context_available: true
+        include_in_forecast: true
         commodity_role: context
         commodity_subcategory: base_metals
-        deferred_reason: yfinance NI=F confirmed 404 (alpha-factory_preflight_logs 28 July 2026) — needs tvdatafeed LME routing, ticker/exchange unverified (same class of gap as OD-C1, not yet added to that routing table)
-        planned_wave: 2
         structural_break:
           date: '2022-03-07'
           severity: HIGH
           description: LME trading suspension — price +100% in hours
-        notes: EV/battery cycle indicator. yfinance NI=F confirmed broken (404) — deferred pending tvdatafeed LME routing, same as TIN.
+        notes: EV/battery cycle indicator. NIC.AX (Nickel Industries) equity proxy since ADR-033 — yfinance NI=F confirmed broken (404), tvdatafeed retired before LME routing was ever wired.
       - symbol: ALUMINIUM
         layer: 2
         context_category: context_commodity_metals
@@ -1174,21 +1177,24 @@ context:
         layer: 2
         context_category: context_commodity_metals
         context_group: commodity
-        context_available: false
-        include_in_forecast: false
+        context_available: true
+        include_in_forecast: true
         commodity_role: context
-        # FIX ADR-023 (GMI_Decision_Document_v2.docx): TIN is USD-native via
-        # LME (tvdatafeed LME|SN) — it does NOT require MYR->USD
-        # normalization. The original Architecture Extension v1.0 framing
-        # (grouping TIN with CPO/RUBBER as MYR-blocked) was superseded by
-        # Architecture v2.1 Addendum's more specific routing decision and is
-        # corrected here. Still deferred — blocked only on tvdatafeed
-        # ticker/exchange verification (Addendum §11 OD-C1), unrelated to
-        # currency.
+        # FIX ADR-032 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
+        # retired entirely (ADR-029) -- OD-C1 preflight (29 Jul 2026)
+        # confirmed LME:SN empty-result/timeout before the ticker/exchange
+        # verification this instrument was waiting on could even happen.
+        # Adopted AFM.V (Alphamin Resources, TSX Venture) as daily equity
+        # proxy instead -- confirmed live 30 Jul 2026 (5 rows).
+        # requires_fx_normalization stays false: ADR-023's finding (TIN was
+        # never currency-blocked, only ticker/exchange-blocked) remains true
+        # of the new equity proxy too. proxy_for/proxy_correlation_expected
+        # deliberately NOT set -- no empirical AFM.V-vs-tin-price correlation
+        # analysis exists yet; see NICKEL's comment above for the same
+        # validate_instruments.py pairing-requirement rationale.
         commodity_subcategory: base_metals
-        deferred_reason: tvdatafeed LME ticker/exchange verification pending (OD-C1) — not currency-related
-        planned_wave: 2
         requires_fx_normalization: false
+        notes: 'AFM.V (Alphamin Resources) equity proxy since ADR-032. Monitored risk: unverified "CIRO trade resumption" headline (~Jan 2026) surfaced during candidate research, not independently investigated.'
     agri:
       _meta:
         subcategory_id: context_commodity_agri
@@ -1196,41 +1202,61 @@ context:
         - score: score_inflation_pressure
           weight: 0.35
           aggregation: z_score_level
-        note: Weights normalized when context_available=False (Wave 2 deferred)
+        note: 'FIX ADR-030/031 (GMI_Decision_Document_v7.docx, 30 Jul 2026): both
+          agri instruments (CPO, RUBBER) are now context_available=true (yfinance
+          equity proxies replacing the tvdatafeed-blocked originals) -- the
+          "weights normalized when deferred" caveat no longer applies to this
+          subcategory (zero deferred instruments remain in agri). Left here for
+          audit-trail visibility rather than deleted outright.'
       instruments:
       - symbol: CPO
         layer: 2
         context_category: context_commodity_agri
         context_group: commodity
-        context_available: false
-        include_in_forecast: false
+        context_available: true
+        include_in_forecast: true
         commodity_role: context
-        # ADR-023: CPO is now the SOLE MYR-dependent Wave 2 instrument
-        # (Bursa Malaysia FCPO). Normalization will use the new MYR=X Layer 2
-        # anchor (ADR-024, context_fx_normalization) via a Silver-layer join
-        # once Wave 2 is implemented — not a general normalization framework.
+        # FIX ADR-030 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
+        # retired entirely (ADR-029) -- CPO's MYR->USD normalization
+        # requirement (ADR-023/024) applied to the original FCPO Bursa
+        # Malaysia raw commodity price plan, which never got live wiring
+        # (OD-C1 preflight, 29 Jul 2026, confirmed BMDI:FCPO1! empty-result/
+        # timeout regardless). Adopted F34.SI (Wilmar International, SGX) as
+        # daily equity proxy instead -- confirmed live 30 Jul 2026 (5 rows).
+        # requires_fx_normalization changed true -> false: this is now an
+        # equity-proxy pattern (matching IRON_ORE/VALE, COAL_NEWC/WHC.AX
+        # above), not a raw MYR-denominated commodity feed -- the MYR=X
+        # context_fx_normalization anchor (ADR-024) is no longer this
+        # instrument's consumer. That anchor's own entry is left in place
+        # (context.fx_normalization above) in case a genuine commodity-
+        # price-level use for it emerges later. proxy_for/
+        # proxy_correlation_expected deliberately NOT set -- see NICKEL's
+        # comment above for the validate_instruments.py pairing rationale.
         commodity_subcategory: agricultural
-        deferred_reason: MYR→USD normalization pipeline not yet implemented
-        planned_wave: 2
-        requires_fx_normalization: true
+        requires_fx_normalization: false
+        notes: F34.SI (Wilmar International) equity proxy since ADR-030 — no longer a raw MYR-denominated commodity feed.
       - symbol: RUBBER
         layer: 2
         context_category: context_commodity_agri
         context_group: commodity
-        context_available: false
-        include_in_forecast: false
+        context_available: true
+        include_in_forecast: true
         commodity_role: context
-        # FIX ADR-023 (GMI_Decision_Document_v2.docx): RUBBER is USD-native
-        # via SICOM/SGX (tvdatafeed SGX|SICOM_TSR20) — it does NOT require
-        # MYR->USD normalization. Architecture v2.1 Addendum §5.3 explicitly
-        # chose SICOM TSR20 (USD) over TOCOM RSS3 (JPY) specifically to avoid
-        # a currency-conversion timestamp/lookahead risk. Still deferred —
-        # blocked only on tvdatafeed ticker/exchange verification (Addendum
-        # §11 OD-C1), unrelated to currency.
+        # FIX ADR-031 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
+        # retired entirely (ADR-029) -- OD-C1 preflight (29 Jul 2026)
+        # confirmed SGX:SICOM_TSR20 empty-result/timeout. Adopted STA.BK (Sri
+        # Trang Agro-Industry, SET) as daily equity proxy instead -- confirmed
+        # live 30 Jul 2026, though with only 3 rows returned against a
+        # 5-trading-day request (most likely a Thai exchange holiday inside
+        # that window, not independently confirmed; recommend a longer-window
+        # re-check, e.g. --period 1mo, before this feeds a real Bronze run).
+        # requires_fx_normalization stays false: ADR-023's finding (RUBBER
+        # was never currency-blocked) remains true of the new proxy too.
+        # proxy_for/proxy_correlation_expected deliberately NOT set -- same
+        # pairing-requirement rationale as NICKEL/TIN/CPO above.
         commodity_subcategory: agricultural
-        deferred_reason: tvdatafeed SGX ticker/exchange verification pending (OD-C1) — not currency-related
-        planned_wave: 2
         requires_fx_normalization: false
+        notes: 'STA.BK (Sri Trang Agro-Industry) equity proxy since ADR-031. 3/5 rows on initial preflight -- recommend longer-window re-check before production Bronze ingestion.'
     coal:
       _meta:
         # FIX ADR-019: score_inflation_pressure entry (weight 0.22) removed.

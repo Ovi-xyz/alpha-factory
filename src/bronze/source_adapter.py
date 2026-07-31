@@ -8,7 +8,10 @@ Prinsip Layer Independence:
   - ChainedAdapter: coba primary, fallback ke berikutnya jika gagal
 
 Usage:
-    idx_chain = ChainedAdapter([TvDatafeedAdapter(), YFinanceJKAdapter()])
+    # FIX ADR-029 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
+    # retired entirely -- yfinance .JK is IDX30's sole source now, not a
+    # fallback. See KNOWN_RISKS.md RISK-1 (RESOLVED).
+    idx_chain = ChainedAdapter([YFinanceJKAdapter()])
     df = idx_chain.fetch("BBCA", "1D", start_date, end_date)
 """
 
@@ -69,7 +72,7 @@ class ChainedAdapter(SourceAdapter):
     Setiap adapter yang sukses menambahkan kolom '_source' ke DataFrame.
 
     Pattern:
-        idx_chain = ChainedAdapter([TvDatafeedAdapter(), YFinanceJKAdapter()])
+        idx_chain = ChainedAdapter([YFinanceJKAdapter()])  # ADR-029: single-source
         fx_chain  = ChainedAdapter([YFinanceForexAdapter(), ForexDayCacheAdapter()])
     """
 

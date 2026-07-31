@@ -140,56 +140,52 @@ class TestCheckYfinanceTickers:
         monkeypatch.setattr(sys, "argv", ["check_yfinance_tickers.py", "--symbol", "NOT_A_REAL_SYMBOL"])
         assert mod.main() == 1
 
+    def test_candidate_proxy_tickers_has_4_entries(self):
+        """Locks in the 4 not-yet-decided proxy candidates researched to
+        replace tvdatafeed for CPO/RUBBER/TIN/NICKEL (30 Jul 2026 thread)."""
+        import check_yfinance_tickers as mod
+        assert mod.CANDIDATE_PROXY_TICKERS == {
+            "CPO": "F34.SI", "RUBBER": "STA.BK", "TIN": "AFM.V", "NICKEL": "NIC.AX",
+        }
 
-class TestCheckTvdatafeedSymbols:
-    """NEW -- these 2 scripts (this class + TestCheckBisEerWeights below)
-    had zero test coverage since their own authoring thread; added now
-    while already touching this file for the BIS endpoint / MXN->IDR
-    fixes, matching the pattern established for the other 3 scripts."""
-
-    def test_routing_table_has_4_entries(self):
-        """OD-C1 scope: CPO, RUBBER, TIN (blocking) + COAL_NEWC (informational)."""
-        import check_tvdatafeed_symbols as mod
-        assert set(mod.ROUTING_TABLE) == {"CPO", "RUBBER", "TIN", "COAL_NEWC"}
-        assert mod.INFORMATIONAL_ONLY == frozenset({"COAL_NEWC"})
-
-    def test_main_returns_1_without_credentials(self, monkeypatch):
-        import check_tvdatafeed_symbols as mod
-        monkeypatch.delenv("TV_USERNAME", raising=False)
-        monkeypatch.delenv("TV_PASSWORD", raising=False)
-        monkeypatch.setattr(sys, "argv", ["check_tvdatafeed_symbols.py"])
-        assert mod.main() == 1
-
-    def test_main_returns_1_for_unknown_symbol_filter(self, monkeypatch):
-        import check_tvdatafeed_symbols as mod
-        monkeypatch.setenv("TV_USERNAME", "fake")
-        monkeypatch.setenv("TV_PASSWORD", "fake")
-        monkeypatch.setattr(sys, "argv", ["check_tvdatafeed_symbols.py", "--symbol", "NOT_REAL"])
-        # TV_AVAILABLE gates before argument validation if tvDatafeed isn't
-        # installed in this environment -- either a clean 1 (no routing
-        # entry) or a clean 1 (package not installed) is an acceptable
-        # outcome here; what matters is it never raises.
-        assert mod.main() == 1
-
-    def test_check_one_returns_false_for_empty_result(self):
-        import check_tvdatafeed_symbols as mod
-        client = MagicMock()
-        client.get_hist.return_value = None
-        ok, msg = mod._check_one("SN", "LME", client)
-        assert ok is False
-        assert "empty" in msg.lower()
-
-    def test_check_one_returns_true_for_valid_ohlcv(self):
-        import check_tvdatafeed_symbols as mod
+    def test_candidates_flag_independent_of_instrument_loader(self, monkeypatch):
+        """--candidates must never touch InstrumentLoader/config -- that
+        independence is the entire point (verify before deciding, not
+        after). A broken/missing config must not block this check."""
+        import check_yfinance_tickers as mod
         import pandas as pd
+
+        def _boom(*a, **k):
+            raise AssertionError("get_loader() must not be called in --candidates mode")
+
+        monkeypatch.setattr("src.config.instrument_loader.get_loader", _boom)
         df = pd.DataFrame({
-            "open": [1.0], "high": [1.1], "low": [0.9],
-            "close": [1.05], "volume": [1000],
+            "Open": [1.0], "High": [1.1], "Low": [0.9], "Close": [1.05], "Volume": [1000],
         })
-        client = MagicMock()
-        client.get_hist.return_value = df
-        ok, msg = mod._check_one("SN", "LME", client)
-        assert ok is True
+        with patch("yfinance.download", return_value=df):
+            monkeypatch.setattr(sys, "argv", ["check_yfinance_tickers.py", "--candidates"])
+            assert mod.main() == 0
+
+    def test_candidates_flag_returns_1_if_any_candidate_fails(self):
+        import check_yfinance_tickers as mod
+        import pandas as pd
+
+        good = pd.DataFrame({
+            "Open": [1.0], "High": [1.1], "Low": [0.9], "Close": [1.05], "Volume": [1000],
+        })
+
+        def _fake_download(symbol, **kwargs):
+            return pd.DataFrame() if symbol == "AFM.V" else good
+
+        with patch("yfinance.download", side_effect=_fake_download):
+            assert mod._check_candidates() == 1
+
+
+# REMOVED FIX ADR-029 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
+# TestCheckTvdatafeedSymbols deleted -- tvdatafeed retired entirely,
+# scripts/preflight/check_tvdatafeed_symbols.py archived to
+# scripts/archive/check_tvdatafeed_symbols.py (no longer imported/tested).
+# See KNOWN_RISKS.md RISK-1 (RESOLVED).
 
 
 class TestCheckBisEerWeights:

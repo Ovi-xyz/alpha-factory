@@ -267,8 +267,9 @@ class TestFullSystemPipeline:
         FIX GMI-IL-001: was == 643. Architecture Extension v1.0 ADR-003
         reclassifies SPX, VIX, DXY out of Layer 1 into Layer 2 context.
         Layer 1 'unchanged' now means 640 (the new stable baseline) plus
-        a separate, independently-asserted Layer 2 count of 55 active /
-        59 with deferred — see test_l7_layer2_context_universe_present.
+        a separate, independently-asserted Layer 2 count of 59 active / 0
+        deferred (FIX ADR-030-033, 30 Jul 2026) — see
+        test_l7_layer2_context_universe_present.
         """
         from src.config.instrument_loader import get_loader
         assert get_loader().count() == 640
@@ -277,16 +278,15 @@ class TestFullSystemPipeline:
         """ADD GMI-IL-001: Layer 2 context anchors — Extension v1.0 §3.1 total
         52, extended to 59 by GMI_Decision_Document_v1.docx ADR-014
         (context_dollar_basket, +6) and GMI_Decision_Document_v2.docx
-        ADR-024 (context_fx_normalization, +1). deferred_count() now 4, not
-        3 — NICKEL added this thread (yfinance NI=F confirmed 404,
-        alpha-factory_preflight_logs 28 July 2026) alongside TIN/CPO/RUBBER;
-        ADR-023 corrected TIN/RUBBER's blocking reason (no longer
-        MYR-dependent) but did not change their deferred status."""
+        ADR-024 (context_fx_normalization, +1). FIX ADR-030-033
+        (GMI_Decision_Document_v7.docx, 30 Jul 2026): deferred_count() now 0,
+        not 4 — tvdatafeed retired entirely (ADR-029); CPO, RUBBER, TIN,
+        NICKEL all un-deferred via yfinance equity proxies."""
         from src.config.instrument_loader import get_loader
         loader = get_loader()
-        assert loader.count_context() == 55
+        assert loader.count_context() == 59
         assert loader.count_context(include_deferred=True) == 59
-        assert loader.deferred_count() == 4
+        assert loader.deferred_count() == 0
 
     def test_l7_all_markets_represented(self):
         """

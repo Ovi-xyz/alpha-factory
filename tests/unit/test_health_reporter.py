@@ -118,8 +118,10 @@ class TestHealthReporter:
             ],
             "total_runs": 1, "total_failed": 0, "total_rows": 1000,
             "storage_free_gb": 120.5, "storage_alert": False, "storage_warn": True,
-            "idx_total": 30, "idx_tvdatafeed_count": 25, "idx_fallback_count": 3,
-            "idx_missing_count": 2, "idx_coverage_pct": 83.3, "idx_coverage_alert": False,
+            # FIX ADR-029: idx_tvdatafeed_count/idx_fallback_count removed --
+            # reworked to presence-vs-missing (tvdatafeed retired).
+            "idx_total": 30, "idx_present_count": 28,
+            "idx_missing_count": 2, "idx_coverage_pct": 93.3, "idx_coverage_alert": False,
         }
         hr._print_report(report)   # must not raise
 
@@ -128,10 +130,11 @@ class TestSendTelegramAlert:
     """send_telegram_alert() message priority: storage > IDX coverage > failed-count > success."""
 
     def _base_report(self, **overrides):
+        # FIX ADR-029: idx_fallback_count removed -- presence-vs-missing schema.
         report = {
             "date": "2025-06-01", "total_runs": 10, "total_failed": 0, "total_rows": 5000,
             "storage_alert": False, "storage_free_gb": 200.0,
-            "idx_coverage_alert": False, "idx_fallback_count": 0,
+            "idx_coverage_alert": False, "idx_present_count": 30,
             "idx_missing_count": 0, "idx_total": 30, "idx_coverage_pct": 100.0,
         }
         report.update(overrides)
@@ -155,7 +158,7 @@ class TestSendTelegramAlert:
             lambda url, json, timeout: captured.update(json) or _FakeResponse(),
         )
         report = self._base_report(
-            idx_coverage_alert=True, idx_fallback_count=4, idx_missing_count=3,
+            idx_coverage_alert=True, idx_present_count=23, idx_missing_count=7,
             idx_coverage_pct=76.7,
         )
         hr.send_telegram_alert(report, "tok", "chat")
@@ -171,7 +174,7 @@ class TestSendTelegramAlert:
         )
         report = self._base_report(
             storage_alert=True, storage_free_gb=40.0,
-            idx_coverage_alert=True, idx_fallback_count=10, idx_missing_count=5,
+            idx_coverage_alert=True, idx_present_count=15, idx_missing_count=15,
         )
         hr.send_telegram_alert(report, "tok", "chat")
         assert "Storage ALERT" in captured["text"]
@@ -185,11 +188,16 @@ class _FakeResponse:
 
 class TestIDXCoverageAlert:
     """
-    FIX GAP-10 [P3] (Production Readiness Assessment v1.7.2, GD §9.1):
-    tvdatafeed is an unofficial, reverse-engineered API with no runtime
-    degradation mitigation prior to this fix. These tests build a synthetic
-    Bronze IDX fixture (real Parquet on disk, via tmp_path) to exercise the
-    full DuckDB read -> per-symbol source resolution -> alert threshold path.
+    FIX ADR-029 (GMI_Decision_Document_v7.docx, 30 Jul 2026): reworked from
+    tvdatafeed-vs-fallback to presence-vs-missing after tvdatafeed's
+    retirement (KNOWN_RISKS.md RISK-1 -> RESOLVED; originally FIX GAP-10
+    [P3], Production Readiness Assessment v1.7.2, GD §9.1). yfinance .JK is
+    now IDX30's SOLE source, so a source-of-origin distinction is no longer
+    meaningful -- under the OLD schema every present symbol would show as
+    "fallback", permanently over-tripping the alert on every healthy run.
+    These tests build a synthetic Bronze IDX fixture (real Parquet on disk,
+    via tmp_path) to exercise the full DuckDB read -> presence resolution ->
+    alert threshold path.
     """
 
     @staticmethod
@@ -199,8 +207,8 @@ class TestIDXCoverageAlert:
         out_dir.mkdir(parents=True, exist_ok=True)
         pl.DataFrame(rows).write_parquet(out_dir / "fixture.parquet")
 
-    def test_full_tvdatafeed_coverage_no_alert(self, tmp_path, monkeypatch):
-        """All 30 IDX symbols on tvdatafeed -> 100% coverage, no alert."""
+    def test_full_coverage_no_alert(self, tmp_path, monkeypatch):
+        """All 30 IDX symbols present -> 100% coverage, no alert."""
         import src.utils.health_reporter as hr
         monkeypatch.chdir(tmp_path)
 
@@ -210,21 +218,20 @@ class TestIDXCoverageAlert:
         ingested_at = "2025-06-15T03:00:00"
 
         rows = [
-            {"_symbol": s, "_source": "tvdatafeed", "_ingested_at": ingested_at, "close": 100.0}
+            {"_symbol": s, "_ingested_at": ingested_at, "close": 100.0}
             for s in idx_symbols
         ]
         self._write_idx_fixture(tmp_path, rows)
 
         result = hr._check_idx_coverage(run_date)
         assert result["idx_total"] == len(idx_symbols)
-        assert result["idx_tvdatafeed_count"] == len(idx_symbols)
-        assert result["idx_fallback_count"] == 0
+        assert result["idx_present_count"] == len(idx_symbols)
         assert result["idx_missing_count"] == 0
         assert result["idx_coverage_pct"] == 100.0
         assert result["idx_coverage_alert"] is False
 
     def test_degraded_coverage_triggers_alert(self, tmp_path, monkeypatch):
-        """> 5 symbols degraded (fallback + missing) -> alert fires."""
+        """> 5 symbols missing -> alert fires."""
         import src.utils.health_reporter as hr
         monkeypatch.chdir(tmp_path)
 
@@ -236,22 +243,18 @@ class TestIDXCoverageAlert:
         rows = []
         for i, sym in enumerate(idx_symbols):
             if i < 22:
-                source = "tvdatafeed"
-            elif i < 27:
-                source = "yfinance_jk"   # fallback
+                rows.append({"_symbol": sym, "_ingested_at": ingested_at, "close": 100.0})
             else:
-                continue   # missing entirely (3 symbols)
-            rows.append({"_symbol": sym, "_source": source, "_ingested_at": ingested_at, "close": 100.0})
+                continue   # missing entirely (8 symbols)
         self._write_idx_fixture(tmp_path, rows)
 
         result = hr._check_idx_coverage(run_date)
-        assert result["idx_tvdatafeed_count"] == 22
-        assert result["idx_fallback_count"]   == 5
-        assert result["idx_missing_count"]    == 3
-        assert result["idx_coverage_alert"] is True   # 5 + 3 = 8 > threshold (5)
+        assert result["idx_present_count"] == 22
+        assert result["idx_missing_count"] == 8
+        assert result["idx_coverage_alert"] is True   # 8 > threshold (5)
 
     def test_below_threshold_no_alert(self, tmp_path, monkeypatch):
-        """<= 5 symbols degraded -> alert must NOT fire (boundary case)."""
+        """<= 5 symbols missing -> alert must NOT fire (boundary case)."""
         import src.utils.health_reporter as hr
         monkeypatch.chdir(tmp_path)
 
@@ -262,12 +265,13 @@ class TestIDXCoverageAlert:
 
         rows = []
         for i, sym in enumerate(idx_symbols):
-            source = "yfinance_jk" if i < 5 else "tvdatafeed"   # exactly 5 fallback
-            rows.append({"_symbol": sym, "_source": source, "_ingested_at": ingested_at, "close": 100.0})
+            if i < 5:
+                continue   # exactly 5 missing
+            rows.append({"_symbol": sym, "_ingested_at": ingested_at, "close": 100.0})
         self._write_idx_fixture(tmp_path, rows)
 
         result = hr._check_idx_coverage(run_date)
-        assert result["idx_fallback_count"] + result["idx_missing_count"] == 5
+        assert result["idx_missing_count"] == 5
         assert result["idx_coverage_alert"] is False   # exactly at threshold, not over
 
     def test_no_bronze_data_graceful(self, tmp_path, monkeypatch):
@@ -302,7 +306,7 @@ class TestIDXCoverageAlert:
 
         report = hr.generate_daily_report(date(2025, 5, 22))
         for key in (
-            "idx_total", "idx_tvdatafeed_count", "idx_fallback_count",
+            "idx_total", "idx_present_count",
             "idx_missing_count", "idx_coverage_pct", "idx_coverage_alert",
         ):
             assert key in report, f"Missing IDX coverage key: {key}"

@@ -11,8 +11,8 @@
 # taxonomy/routing fields here — see instruments_taxonomy.yaml instead.
 # Full field-classification table and rationale: CHANGELOG.md ADR-027.
 
-version: '1.6'
-last_updated: '2026-07-22'
+version: '1.7'
+last_updated: '2026-07-30'
 us_stocks:
   Technology:
   - symbol: AAPL
@@ -857,18 +857,17 @@ context:
         yfinance_symbol: HG=F
         timezone: UTC
       - symbol: NICKEL
-        # FIX (alpha-factory_preflight_logs 28 July 2026): NI=F returns
-        # HTTP 404 on live yfinance ("possibly delisted"). This was
-        # flagged from day one as needing empirical verification
-        # (Architecture v2.1 Addendum OD-C2, "verify ticker") -- now
-        # confirmed it does not work. Unlike COPPER (HG=F, COMEX-listed,
-        # reliable on yfinance), Nickel is LME-primary and yfinance does
-        # not carry a working LME nickel futures contract. Nulled to
-        # match TIN's existing pattern rather than leave a known-broken
-        # value in place; see taxonomy.yaml for the context_available
-        # change and rationale.
-        yfinance_symbol: null
-        timezone: UTC
+        # FIX ADR-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026): NI=F
+        # confirmed 404 on live yfinance (28 Jul 2026 preflight log; deferred
+        # then). Adopted NIC.AX (Nickel Industries Ltd, ASX) as daily equity
+        # proxy -- confirmed live via check_yfinance_tickers.py --candidates
+        # (30 Jul 2026 verify-preflight log, 5 rows returned). Same pattern
+        # as IRON_ORE/VALE and COAL_NEWC/WHC.AX below -- no base_currency
+        # flag, consistent with those two (equity proxy, not a raw
+        # currency-denominated commodity feed).
+        yfinance_symbol: NIC.AX
+        proxy_instrument: NIC.AX
+        timezone: Australia/Sydney
       - symbol: ALUMINIUM
         yfinance_symbol: ALI=F
         timezone: UTC
@@ -880,16 +879,49 @@ context:
         proxy_instrument: VALE
         timezone: America/New_York
       - symbol: TIN
-        yfinance_symbol: null
-        base_currency: USD
+        # FIX ADR-032 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
+        # retired (ADR-029) before TIN ever got live wiring -- OD-C1 preflight
+        # (29 Jul 2026) confirmed LME:SN empty-result/timeout. Adopted AFM.V
+        # (Alphamin Resources, TSX Venture) as daily equity proxy -- confirmed
+        # live 30 Jul 2026 (5 rows). base_currency dropped (was USD, for the
+        # LME contract) -- following the IRON_ORE/VALE, COAL_NEWC/WHC.AX
+        # precedent of no currency flag for equity-proxy entries. Monitored
+        # risk: an unverified "CIRO trade resumption" headline (~Jan 2026)
+        # surfaced during candidate research -- a PASS here confirms the
+        # ticker resolves and returns correctly-shaped OHLCV, not continuous
+        # uninterrupted trading history.
+        yfinance_symbol: AFM.V
+        proxy_instrument: AFM.V
+        timezone: America/Toronto
     agri:
       instruments:
       - symbol: CPO
-        yfinance_symbol: null
-        base_currency: MYR
+        # FIX ADR-030 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
+        # retired (ADR-029) -- CPO never had live tvdatafeed wiring
+        # (context_available was false throughout; OD-C1 preflight 29 Jul
+        # 2026 confirmed BMDI:FCPO1! empty-result/timeout regardless).
+        # Adopted F34.SI (Wilmar International, SGX) as daily equity proxy --
+        # confirmed live 30 Jul 2026 (5 rows). base_currency changed from MYR
+        # (the original FCPO plan) -- this is now an equity-proxy pattern
+        # matching IRON_ORE/VALE and COAL_NEWC/WHC.AX above, not a raw
+        # commodity price feed, so no base_currency flag is set (see
+        # instruments_taxonomy.yaml for the requires_fx_normalization change).
+        yfinance_symbol: F34.SI
+        proxy_instrument: F34.SI
+        timezone: Asia/Singapore
       - symbol: RUBBER
-        yfinance_symbol: null
-        base_currency: USD
+        # FIX ADR-031 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
+        # retired (ADR-029). Adopted STA.BK (Sri Trang Agro-Industry, SET) as
+        # daily equity proxy -- confirmed live 30 Jul 2026, though with only
+        # 3 rows returned against a 5-trading-day request (most likely a Thai
+        # exchange holiday inside that window, not a data-quality failure --
+        # not independently confirmed; recommend a longer-window re-check,
+        # e.g. --period 1mo, before this feeds a real Bronze run).
+        # base_currency dropped (was USD, for the SICOM contract) -- equity-
+        # proxy precedent, same as TIN above.
+        yfinance_symbol: STA.BK
+        proxy_instrument: STA.BK
+        timezone: Asia/Bangkok
     coal:
       instruments:
       - symbol: COAL_NEWC
