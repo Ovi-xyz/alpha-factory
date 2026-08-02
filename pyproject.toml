@@ -1,6 +1,14 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.13.1"
+version = "1.13.2"
+# FIX BIS-1 continued (Ovi, same thread): HKD/TWD/NOK added to
+# check_bis_eer_weights.py's Broad Dollar basket (13/13 currencies
+# complete); endpoint key refactored to derive from
+# BROAD_DOLLAR_REF_AREAS.values() rather than a hand-duplicated literal.
+# FIX BIS-1's core fix (WS_CBPOL/WS_EER) confirmed LIVE on the M1 this
+# thread -- KNOWN_RISKS.md RISK-16 -> RESOLVED. PATCH bump: bug fix +
+# scope completion, no interface-contract or Silver/Gold schema change.
+#
 # FIX BIS-1 (Ovi, 1 Aug 2026): PATCH bump -- root-cause fix for the BIS
 # CBPOL/EER 404/501s (config/bis_cb_rates.yaml, src/bronze/
 # bis_rates_ingester.py, scripts/preflight/check_bis_cbpol_d.py,

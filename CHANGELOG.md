@@ -1,5 +1,89 @@
 # CHANGELOG — Data Platform
 
+## v1.13.2 — FIX BIS-1 Confirmed Live + HKD/TWD/NOK Dollar Basket Completion (Agustus 2026)
+
+Dokumen referensi: tidak ada decision document terpisah — kelanjutan
+langsung dari v1.13.1 dalam thread yang sama. Ovi menjalankan 4 preflight
+module di M1 hardware, menghasilkan bukti live pertama untuk fix BIS-1,
+lalu meminta penyelesaian gap HKD/TWD/NOK yang sudah diflag sejak thread
+28 Jul 2026.
+
+Total: **1 konfirmasi live** (BIS CBPOL/EER endpoint terbukti benar
+terhadap live API, bukan hanya test suite) | **1 gap ditutup** (HKD/TWD/
+NOK, 10→13 currency di Broad Dollar basket) | **1 structural fix
+tambahan** (endpoint key sekarang derive dari dict, bukan literal
+terpisah) | **1426 → 1427 passed / 0 failed / 0 error**.
+
+### CONFIRM BIS-1 [KNOWN_RISKS.md RISK-16] — BIS CBPOL/EER Endpoint Terkonfirmasi Live, Bukan Hanya Lolos Test Suite
+
+Ovi menjalankan seluruh 4 preflight module di M1 (`check_yfinance_tickers.py`,
+`check_finnhub_shape.py`, `check_bis_eer_weights.py`, `check_bis_cbpol_d.py`)
+terhadap kode yang sudah diperbaiki v1.13.1. Hasil: **`check_bis_cbpol_d.py`
+— seluruh 12 REF_AREA code PASS dengan `daily-resolution=True`**, observation
+count nyata (6.775–24.850 per negara) dan tanggal terkini (hingga
+2026-07-29). **`check_bis_eer_weights.py --discover` — berhasil**, fetch
+568.951 byte struktur dataflow nyata dari endpoint `structure/dataflow/
+BIS/WS_EER/1.0` (sebelumnya 501). **`check_bis_eer_weights.py` — seluruh
+10 REF_AREA code (versi sebelum ekspansi HKD/TWD/NOK) PASS**, 182.410
+byte per check.
+
+Ini menutup temuan sampingan v1.13.1 yang mengkhawatirkan: sampling awal
+via `data.bis.org` portal (4 dari 12 CB kita — GB/CH/NO/JP) tampak
+Monthly-only, berlawanan dengan rasional ADR-010. Query API nyata
+(dengan FREQ wildcard sesuai desain fix) ternyata mengembalikan data
+Daily untuk seluruh 12 CB termasuk ECB/XM — rasional ADR-010 kini
+terkonfirmasi benar secara empiris, bukan hanya diasumsikan atau
+sebagian bertentangan seperti dikhawatirkan sebelumnya.
+
+**KNOWN_RISKS.md RISK-16 status**: FIXED (code), pending live confirmation
+→ **RESOLVED (confirmed live)**.
+
+### FIX BIS-1-cont [scripts/preflight/check_bis_eer_weights.py] — HKD/TWD/NOK Melengkapi Broad Dollar Basket (10→13 Currency)
+
+**Root cause**: thread 28 Jul 2026 secara eksplisit meng-flag bahwa
+desain Broad Dollar basket saat ini (per komentar `instruments_taxonomy.yaml`
+`dollar` + `dollar_basket` groups) sebenarnya 13 currency (6 asli + IDR +
+6 currency `context_dollar_basket`: CNH/KRW/SGD/HKD/TWD/NOK), bukan 10
+yang di-cover script saat itu — tapi sengaja TIDAK ditambahkan karena
+"Ovi's instruction was specifically MXN->IDR". Ovi kini meminta gap ini
+ditutup secara eksplisit.
+
+**Fix**: `BROAD_DOLLAR_REF_AREAS` ditambah HKD→HK, TWD→TW, NOK→NO (13
+total). **Ditemukan sekaligus diperbaiki dalam proses**: endpoint key
+(`BIS_EER_ENDPOINT_MONTHLY`) sebelumnya berupa literal string terpisah
+dari dict — menambah entry ke dict saja TANPA fix ini akan membuat 3
+currency baru permanen tidak pernah ter-fetch, sementara `_check_one()`
+tetap percaya diri melaporkan "not present" — tidak bisa dibedakan dari
+kegagalan API sungguhan. Endpoint key sekarang dibangun langsung dari
+`BROAD_DOLLAR_REF_AREAS.values()` (`"+".join(...)`), membuat seluruh
+kelas bug drift-antara-dict-dan-key ini mustahil terjadi lagi secara
+struktural.
+
+**Diverifikasi empiris**: diuji di sandbox clone yang sama (Python 3.12)
+sebelum diterapkan ke repo nyata via filesystem connector. Full suite:
+1426 → 1427 passed, 0 failed (1 test baru). Coverage: 81.43% (tidak
+berubah, > gate 80%). **Belum di-re-run live terhadap versi 13-currency**
+— konfirmasi live di atas mencakup versi 10-currency yang sudah
+ditest; ekspansi +3 sudah diperbaiki di kode dan diverifikasi test
+(termasuk test dinamis yang otomatis mencakup currency baru tanpa
+perubahan test, plus 1 guard eksplisit baru) tapi belum dikonfirmasi
+ulang secara live.
+
+**Test baru**: `test_preflight_scripts.py::TestCheckBisEerWeights::
+test_hkd_twd_nok_completes_dollar_basket` (kunci sengaja dibuat
+eksplisit per-currency, bukan hanya mengandalkan test dinamis
+`test_key_wildcards_freq_and_fixes_broad_basket` yang sudah otomatis
+mencakup entry baru apapun di dict).
+
+**Catatan proses**: penempatan awal test baru ini sempat salah masuk ke
+class `TestCheckBisCbpolD` (bukan `TestCheckBisEerWeights`) karena nama
+method `test_endpoint_uses_correct_dataflow_id` muncul di kedua class
+dan string match pendek tidak unik — terdeteksi dan diperbaiki sebelum
+verifikasi akhir, dicatat di sini untuk transparansi proses, bukan
+disembunyikan.
+
+---
+
 ## v1.13.1 — FIX BIS-1: BIS CBPOL/EER Endpoint Root-Cause Correction (Agustus 2026)
 
 Dokumen referensi: tidak ada decision document terpisah — root cause

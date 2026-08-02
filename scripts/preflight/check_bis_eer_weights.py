@@ -33,18 +33,20 @@ own comments as part of the *current* Broad Dollar basket design
 ("plus USD_IDR (Layer 1, weight logic changes per ADR-018)"), and BI
 (Bank Indonesia) is already BIS-covered via context_rates_em_cb.
 
-NOTE -- found while making that fix, not silently expanded: the *current*
-Broad Dollar basket design (per instruments_taxonomy.yaml's own dollar/
-dollar_basket comments) is actually EUR/JPY/GBP/CAD/CHF/AUD + IDR (all
-Layer 1) + the 6-currency context_dollar_basket group (CNH/KRW/SGD/HKD/
-TWD/NOK) -- 13 currencies, not the 9 below (was 10 with MXN). This
-script still only covers the original Architecture v2.0 §7.2 list minus
-MXN plus IDR; it does not yet check HKD/TWD/NOK. Flagged here rather
-than silently fixed -- Ovi's instruction was specifically MXN->IDR, and
-guessing BIS REF_AREA codes for the other three without being asked risks
-introducing new unverified values in the same pass as fixing old ones.
+RESOLVED (Ovi, this thread, following up on the flag below): HKD/TWD/NOK
+added to BROAD_DOLLAR_REF_AREAS. The *current* Broad Dollar basket design
+(per instruments_taxonomy.yaml's own dollar/dollar_basket comments) is
+EUR/JPY/GBP/CAD/CHF/AUD + IDR (all Layer 1) + the 6-currency
+context_dollar_basket group (CNH/KRW/SGD/HKD/TWD/NOK) -- 13 currencies.
+This script previously covered only 10 -- flagged as a known gap rather
+than guessed at ("Ovi's instruction was specifically MXN->IDR") pending
+explicit instruction, which has now been given. All 13 currencies are
+covered as of this thread; BIS_EER_ENDPOINT_MONTHLY's key is now built
+FROM BROAD_DOLLAR_REF_AREAS.values() rather than hand-duplicated, so this
+class of drift-between-dict-and-key cannot recur (see the FIX comment
+above that constant).
 
-Same authoring/execution split as the other four scripts in this
+Same authoring/execution split as the other three scripts in this
 directory: this sandbox's network allowlist has no route to
 stats.bis.org. Authoring does not require network access; running it
 does.
@@ -122,17 +124,16 @@ load_dotenv()
 # "Broad Dollar Index" directly. Not live-tested from this sandbox (no
 # route to stats.bis.org in any sandbox on this project) -- run for real
 # to close the loop.
-BIS_EER_ENDPOINT_MONTHLY = (
-    "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_EER/1.0/"
-    "M..B.XM+JP+GB+CA+CH+AU+ID+CN+KR+SG"
-)
-BIS_EER_DATAFLOW_STRUCTURE_URL = "https://stats.bis.org/api/v2/structure/dataflow/BIS/WS_EER/1.0"
-
 # Architecture v2.0 §7.2 BIS_WEIGHTS currencies, MXN removed / IDR added
-# per Ovi's explicit instruction (see module docstring for full context,
-# including the note on HKD/TWD/NOK being part of the *current* design
-# but out of scope for this specific fix). Mapped to BIS REF_AREA codes
-# matching config/bis_cb_rates.yaml's ref_area_map convention.
+# (28 Jul 2026); HKD/TWD/NOK added (Ovi, this thread) to complete the
+# *current* Broad Dollar basket design per instruments_taxonomy.yaml's
+# dollar/dollar_basket comments -- previously flagged as a known gap
+# ("Ovi's instruction was specifically MXN->IDR") rather than guessed at,
+# now closed on explicit instruction. This dict is the single source of
+# truth for BIS_EER_ENDPOINT_MONTHLY's key below (built from its values,
+# not hand-duplicated) and for every currency _check_one() validates.
+# Mapped to BIS REF_AREA codes matching config/bis_cb_rates.yaml's
+# ref_area_map convention.
 BROAD_DOLLAR_REF_AREAS: dict[str, str] = {
     "EUR": "XM",  # Euro area
     "JPY": "JP",
@@ -144,7 +145,28 @@ BROAD_DOLLAR_REF_AREAS: dict[str, str] = {
     "CNH": "CN",  # onshore CNY EER is BIS's only option; CNH itself isn't a BIS REF_AREA
     "KRW": "KR",
     "SGD": "SG",
+    "HKD": "HK",  # NEW (Ovi, this thread) -- Hong Kong, pegged currency (reliability_flag pattern, same as SSEC/BOJ YCC)
+    "TWD": "TW",  # NEW -- Taiwan
+    "NOK": "NO",  # NEW -- Norway
 }
+
+# FIX (Ovi, this thread): endpoint key is built FROM BROAD_DOLLAR_REF_AREAS
+# .values() -- not a separately hardcoded literal. A hardcoded literal is
+# exactly how the HKD/TWD/NOK gap happened in the first place, and how it
+# could silently recur: adding entries to the dict alone, without this,
+# leaves them permanently unfetched while _check_one() keeps confidently
+# reporting "not present" -- indistinguishable from a genuine API
+# failure. This makes that whole bug class structurally impossible from
+# here on; the dict above is the only place currency membership is
+# declared. CONFIRMED LIVE (Ovi, M1, this thread, 10-currency version
+# before this expansion): --discover fetched 568951 bytes of real
+# dataflow structure; the data query returned 182410 bytes with all 10
+# REF_AREA codes present. Not yet re-run against the 13-currency version.
+BIS_EER_ENDPOINT_MONTHLY = (
+    "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_EER/1.0/"
+    "M..B." + "+".join(BROAD_DOLLAR_REF_AREAS.values())
+)
+BIS_EER_DATAFLOW_STRUCTURE_URL = "https://stats.bis.org/api/v2/structure/dataflow/BIS/WS_EER/1.0"
 
 
 def _fetch_csv(url: str) -> str:
@@ -171,7 +193,7 @@ def _check_one(ref_area: str) -> tuple[bool, str]:
 
 
 def _discover() -> int:
-    """Fetch the WS_EER_M dataflow structure and print its dimension list --
+    """Fetch the WS_EER dataflow structure and print its dimension list --
     the honest way to find out whether a weight-bearing dimension exists,
     rather than guessing the query-key syntax (see module docstring)."""
     try:
@@ -196,7 +218,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--discover", action="store_true",
-        help="Fetch the WS_EER_M dataflow structure instead of querying index values",
+        help="Fetch the WS_EER dataflow structure instead of querying index values",
     )
     parser.add_argument("--currency", default=None, help="Only check one currency (e.g. KRW)")
     args = parser.parse_args()

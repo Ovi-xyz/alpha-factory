@@ -226,6 +226,19 @@ class TestCheckBisEerWeights:
         assert "MXN" not in mod.BROAD_DOLLAR_REF_AREAS
         assert mod.BROAD_DOLLAR_REF_AREAS["IDR"] == "ID"
 
+    def test_hkd_twd_nok_completes_dollar_basket(self):
+        """Ovi (this thread): HKD/TWD/NOK were explicitly flagged as a
+        known gap on 28 Jul ("Ovi's instruction was specifically
+        MXN->IDR") rather than guessed at, then explicitly requested this
+        thread. Locks in all 13 currencies of the *current*
+        context_dollar_basket design (instruments_taxonomy.yaml) so the
+        gap can't silently reopen."""
+        import check_bis_eer_weights as mod
+        assert mod.BROAD_DOLLAR_REF_AREAS["HKD"] == "HK"
+        assert mod.BROAD_DOLLAR_REF_AREAS["TWD"] == "TW"
+        assert mod.BROAD_DOLLAR_REF_AREAS["NOK"] == "NO"
+        assert len(mod.BROAD_DOLLAR_REF_AREAS) == 13
+
     def test_endpoint_uses_correct_dataflow_id(self):
         """Regression guard for the dataflow-ID root-cause fix (FIX BIS-1,
         1 Aug 2026): the flow is WS_EER, not WS_EER_M. The "_M" was a

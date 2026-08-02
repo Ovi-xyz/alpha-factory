@@ -1105,15 +1105,16 @@ isn't built.
 
 ---
 
-## RISK-16 (NEW): BIS CBPOL/EER endpoints used the wrong dataflow ID, not just the wrong URL structure — FIXED (code), pending live confirmation
+## RISK-16 (NEW): BIS CBPOL/EER endpoints used the wrong dataflow ID, not just the wrong URL structure — RESOLVED (confirmed live)
 
-**Status:** ✅ **FIXED at the code/logic level, verified via full test
-suite (1426 passed, 0 failed) and all CI gates (G-1/G-2/G-3/G-8) — ⏳ NOT
-yet confirmed against the live BIS API from any sandbox on this project
-(stats.bis.org has never been in any sandbox's network allowlist).**
-Fixed via FIX BIS-1 (1 Aug 2026), superseding the 28 July "v1->v2 path
-structure" fix, which was necessary but not sufficient — confirmed by
-the 29 July preflight log still showing 404/501 after that fix landed.
+**Status:** ✅ **RESOLVED — confirmed live on the M1** (all 4 preflight
+modules run, logs reviewed this thread). Fixed via FIX BIS-1 (1 Aug
+2026), superseding the 28 July "v1->v2 path structure" fix, which was
+necessary but not sufficient — confirmed by the 29 July preflight log
+still showing 404/501 after that fix landed. The corrected endpoints
+were run for real immediately after the code fix and returned genuine
+data, closing the "pending live confirmation" gap this entry originally
+carried.
 
 **GD Reference:** Data Source & Rates Adjustment v1.0 §3.2 (BIS API
 specification), ADR-010/011/012 (CB rate coverage), ADR-017/018 (Broad
@@ -1130,10 +1131,11 @@ client's dataflow listing" — a claim that was never actually verified
 against live BIS and turned out to be false, as the 29 Jul live run (with
 the v2 path fix already applied) still 404'd on both.
 
-Root cause, found this thread via web research (BIS has no route from any
-sandbox on this project, so this was confirmed via `data.bis.org`'s own
-publicly indexed pages and independent third-party working code examples,
-not a live API call): the dataflow IDs are `WS_CBPOL` and `WS_EER` — not
+Root cause, found via web research (BIS has no route from any sandbox on
+this project, so this was confirmed via `data.bis.org`'s own publicly
+indexed pages and independent third-party working code examples, not a
+live API call — the live API call came *after* the fix, see "Live
+confirmation" below): the dataflow IDs are `WS_CBPOL` and `WS_EER` — not
 `WS_CBPOL_D` / `WS_EER_M`. The "_D"/"_M" suffixes were daily/monthly
 cadence labels mistaken for part of the dataflow identifier, most likely
 traceable to a v1-era academic example (fgeerolf.com) that already used a
@@ -1146,7 +1148,7 @@ dataflow/...`), which is consistent with the 501 it was actually
 returning (a malformed/unrecognized v2 path) rather than the clean 404 a
 bad key alone would produce.
 
-### Evidence trail
+### Evidence trail (pre-fix research)
 
 - `data.bis.org` central-bank-policy-rate pages for 8 countries
   (AR/BR/GB/CH/DK/NO/JP/CL), all served under
@@ -1163,75 +1165,110 @@ bad key alone would produce.
   for a third sibling dataflow (`WS_XRU`), independently confirming BOTH
   the data-query shape (`/api/v2/data/dataflow/...`) AND the
   structure/discovery shape (`/api/v2/structure/dataflow/...?references=all`).
-- A genuine, unplanned finding along the way: the 4 central banks in our
-  own 12-CB list that were sampled (GB/BOE, CH/SNB, NO/NORGES, JP/BOJ) all
-  came back **Monthly**, not Daily, in the samples — contradicting
-  ADR-010's original "BIS provides daily where FRED only has monthly"
-  rationale for at least some of the 12 non-FED CBs (ECB/XM itself, the
-  bank ADR-010 was specifically about, was not directly sampled). Not
-  resolved here — flagged for review once the corrected endpoint is
-  confirmed live; see "What this does NOT resolve" below.
 
-### Fix
+### Live confirmation (Ovi, M1, this thread — 4 preflight modules run)
 
-`config/bis_cb_rates.yaml`, `src/bronze/bis_rates_ingester.py` (production
-ingester — hardcodes its own copy of the endpoint, does not read the
-config file, so needed an independent fix), `scripts/preflight/
-check_bis_cbpol_d.py`, and `scripts/preflight/check_bis_eer_weights.py`
-all updated to the corrected dataflow IDs, corrected key construction
-(FREQ wildcarded rather than hardcoded — see the Monthly-frequency finding
-above — and REF_AREA codes joined with `+`), and (EER only) the corrected
-`structure/` discovery path. `_daily_resolution()`'s pass/fail semantics
-in `check_bis_cbpol_d.py` were deliberately left UNCHANGED — the script
-will now report genuinely honest per-country findings against real data,
-which is a legitimate empirical question for ADR-010 review, not
-something to paper over by relaxing the check unilaterally.
+All four current preflight scripts were run for real against the
+corrected endpoints, immediately closing the gap this entry originally
+flagged as open:
+
+- **`check_bis_cbpol_d.py`** — **all 12 REF_AREA codes PASS with
+  `daily-resolution=True`**, real observation counts (6,775–24,850 per
+  country) and current dates (latest = 2026-07-01 through 2026-07-29
+  depending on country). This resolves the "unplanned finding" flagged
+  below more favorably than the pre-fix web research suggested: the 4
+  central banks sampled from `data.bis.org`'s portal (GB/CH/NO/JP)
+  appeared to be Monthly-only from that sampling, but the real API query
+  — with FREQ wildcarded, per the fix's own design — returns Daily data
+  for all 12, ECB/XM included. ADR-010's original "BIS is daily where
+  FRED is monthly" rationale is now empirically confirmed correct for the
+  full 12-CB set, not just asserted or partially contradicted.
+- **`check_bis_eer_weights.py --discover`** — succeeded, fetching 568,951
+  bytes of real dataflow structure from the corrected
+  `structure/dataflow/BIS/WS_EER/1.0` endpoint (was a 501 pre-fix).
+- **`check_bis_eer_weights.py`** — all 10 REF_AREA codes (the pre-
+  HKD/TWD/NOK-completion set) PASS, 182,410 bytes returned per check.
+
+This confirms the endpoint/key construction is genuinely correct, not
+just plausible — the CBPOL script in particular had to correctly *parse*
+real response data to report per-country observation counts and dates,
+which a merely-reachable-but-malformed response could not have produced.
+
+### HKD/TWD/NOK added (Ovi, same thread, following up)
+
+Separately, Ovi pointed out `BROAD_DOLLAR_REF_AREAS` in
+`check_bis_eer_weights.py` was still missing 3 currencies — a gap the 28
+Jul thread had explicitly flagged rather than guessed at ("Ovi's
+instruction was specifically MXN->IDR"). Added: HKD→HK, TWD→TW, NOK→NO,
+completing all 13 currencies of the *current* Broad Dollar basket design
+(`instruments_taxonomy.yaml`'s `dollar` + `dollar_basket` groups). While
+fixing this, found and corrected a second, structural issue: the
+endpoint's key was a hand-duplicated literal string separate from the
+`BROAD_DOLLAR_REF_AREAS` dict — adding entries to the dict alone would
+have left them permanently unfetched while `_check_one()` kept
+confidently reporting "not present," indistinguishable from a genuine API
+failure. The endpoint key is now built FROM `BROAD_DOLLAR_REF_AREAS
+.values()` (`"+".join(...)`), making this whole bug class structurally
+impossible going forward. **Not yet re-run live against the 13-currency
+version** — the live confirmation above covers the 10-currency set that
+was live-tested; the +3 expansion is code-fixed and test-verified
+(dynamic test `test_key_wildcards_freq_and_fixes_broad_basket` and a new
+explicit guard `test_hkd_twd_nok_completes_dollar_basket`) but not yet
+empirically re-confirmed.
 
 ### What this does NOT resolve
 
-This is a code fix verified against the *test suite*, not against the
-live BIS API — no sandbox on this project has ever had network access to
-`stats.bis.org`. The corrected endpoints must be run for real
-(`scripts/preflight/check_bis_cbpol_d.py`, `check_bis_eer_weights.py`,
-and ultimately `bronze_bis_rates` itself) before this can be called fully
-closed. Also unresolved: whether the mixed Monthly/Daily finding above
-affects ADR-010's rationale for any specific CB; Gate 1 (ADR-017/018 exact
-Broad Dollar basket weight *components*, as opposed to the EER index
-values themselves) — per GMI v6's own framing, BIS's EER methodology
-publishes basket weights as a periodic Quarterly Review appendix, not
-necessarily a queryable SDMX series, and the corrected endpoint does not
-change that; and TYPE (Real vs Nominal) for the EER query, left
-deliberately wildcarded rather than decided.
+Gate 1 (ADR-017/018 exact Broad Dollar basket weight *components*, as
+opposed to the EER index values themselves) remains open — per GMI v6's
+own framing, BIS's EER methodology publishes basket weights as a
+periodic Quarterly Review appendix, not necessarily a queryable SDMX
+series, and confirming the index is reachable does not change that; the
+568,951-byte `--discover` structure payload has not been manually
+inspected for a weight-bearing dimension. TYPE (Real vs Nominal) for the
+EER query remains deliberately wildcarded rather than decided. The
+13-currency EER expansion has not yet been live-re-run (see above). The
+production `bronze_bis_rates` ingester's own CSV-parsing path
+(`_parse_csv()`) has not been run end-to-end against a real BIS response
+— only the preflight scripts' lighter-weight parsing has been confirmed
+live; the two are different code paths.
 
 ### Verification
 
-6 new regression-guard tests locking in the corrected dataflow IDs/key
-structure across all three touch points (production ingester, both
-preflight scripts) — `tests/unit/test_bis_rates_ingester.py::TestBisEndpoint`,
+7 regression-guard tests locking in the corrected dataflow IDs/key
+structure and the HKD/TWD/NOK completion across all three touch points
+(production ingester, both preflight scripts) —
+`tests/unit/test_bis_rates_ingester.py::TestBisEndpoint`,
 `tests/unit/test_preflight_scripts.py::TestCheckBisCbpolD::test_endpoint_uses_correct_dataflow_id`
 / `test_endpoint_key_wildcards_freq_and_includes_all_ref_areas`,
 `TestCheckBisEerWeights::test_endpoint_uses_correct_dataflow_id` /
 `test_structure_endpoint_uses_structure_prefix` /
-`test_key_wildcards_freq_and_fixes_broad_basket`. One pre-existing test
+`test_key_wildcards_freq_and_fixes_broad_basket` /
+`test_hkd_twd_nok_completes_dollar_basket`. One pre-existing test
 (`test_endpoint_uses_v2_path_structure`) asserted the now-superseded
 `WS_EER_M` value and was rewritten, not deleted, with a docstring
-explaining why. Full suite: 1426 passed, 0 failed (up from 1420) — zero
-regressions in the 24 pre-existing ingester tests or 22 pre-existing
-preflight-script tests, confirmed by running both files before AND after
-the fix. Coverage: 81.43% (was 81.41%). Gates G-1/G-2/G-3/G-8 all re-run
-clean. Reproduced twice: once in an isolated sandbox clone (Python 3.12,
-fresh `poetry install --with dev`), once by re-reading every edited file
-back after applying the identical changes to the real repo via the
-filesystem connector.
+explaining why. Full suite: 1427 passed, 0 failed (up from 1420 pre-fix)
+— zero regressions in the 24 pre-existing ingester tests or 22
+pre-existing preflight-script tests, confirmed by running both files
+before AND after the fix. Coverage: 81.43% (was 81.41%). Gates
+G-1/G-2/G-3/G-8 all re-run clean. Code changes reproduced twice: once in
+an isolated sandbox clone (Python 3.12, fresh `poetry install --with
+dev`), once applied to the real repo via the filesystem connector. The
+endpoint correctness itself was then independently confirmed a third way
+— against the actual live BIS API, on real hardware.
 
 ---
 
-*Last updated: v1.13.1 — FIX BIS-1 (1 Aug 2026): BIS CBPOL/EER endpoints
+*Last updated: v1.13.2 — HKD/TWD/NOK added to `check_bis_eer_weights.py`'s
+Broad Dollar basket (13/13 currencies complete); endpoint key refactored
+to derive from `BROAD_DOLLAR_REF_AREAS` rather than a hand-duplicated
+literal, closing that drift risk structurally. FIX BIS-1's core fix
+(WS_CBPOL/WS_EER dataflow correction) confirmed LIVE on the M1 — RISK-16
+→ RESOLVED. August 2026.
+Prior entry: v1.13.1 — FIX BIS-1 (1 Aug 2026): BIS CBPOL/EER endpoints
 corrected — the real root cause was the dataflow IDs themselves
 (WS_CBPOL_D → WS_CBPOL, WS_EER_M → WS_EER), not just the v1→v2 URL path
 structure the 28 Jul thread fixed. RISK-16 (NEW) — fixed at the code
-level, pending live confirmation (no sandbox on this project has network
-access to stats.bis.org). July/August 2026.
+level, pending live confirmation. July/August 2026.
 Prior entry: v1.13.0 — ADR-029–033 (`GMI_Decision_Document_v7.docx`):
 tvdatafeed retired entirely (RISK-1 → RESOLVED); CPO/RUBBER/TIN/NICKEL
 un-deferred via yfinance equity proxies (F34.SI/STA.BK/AFM.V/NIC.AX);
