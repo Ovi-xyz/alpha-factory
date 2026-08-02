@@ -1,6 +1,13 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.13.0"
+version = "1.13.1"
+# FIX BIS-1 (Ovi, 1 Aug 2026): PATCH bump -- root-cause fix for the BIS
+# CBPOL/EER 404/501s (config/bis_cb_rates.yaml, src/bronze/
+# bis_rates_ingester.py, scripts/preflight/check_bis_cbpol_d.py,
+# scripts/preflight/check_bis_eer_weights.py, + tests). No interface-
+# contract or Silver/Gold schema change -- PATCH, not MINOR. See
+# CHANGELOG.md and KNOWN_RISKS.md RISK-16 for the full evidence trail.
+#
 # FIX ADR-029/030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026): version
 # bump folds in both this thread's work (tvdatafeed retirement, 4 Layer 2
 # proxy activations) AND a catch-up for several prior threads that landed

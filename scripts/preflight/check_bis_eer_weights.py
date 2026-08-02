@@ -8,28 +8,17 @@ PARTIALLY GATED -- blocked on BIS EER weight-component data availability
 gate for the IDR basket-weight override magnitude.
 
 UPD (alpha-factory_preflight_logs, 28 July 2026): this script was actually
-run. Findings, both now fixed here:
-
-  1. Every request 404'd -- WS_EER_D (daily) AND the --discover dataflow-
-     structure query for WS_EER_D. A 404 on the *structure* query too
-     (not just the data query) is a much stronger signal than a data-only
-     404 would be: it means WS_EER_D does not exist as a dataflow at all,
-     not merely "wrong query key syntax." Removed the daily-first/monthly-
-     fallback logic entirely -- WS_EER_M (confirmed to exist via a live
-     working example found this thread, see below) is now the only
-     target. BIS's EER daily-data claim (published since Sept 2016 "to
-     complement the monthly" series) evidently lives under a different
-     dataflow ID than the WS_CBPOL_D/WS_CBPOL_M naming convention would
-     suggest, or isn't exposed via this API path -- not resolved further
-     here; WS_EER_M is sufficient for what Gate 1 actually needs (basket
-     weight components, which per BIS's own methodology page are revised
-     every 2-3 years, not daily).
-  2. Same root cause as check_bis_cbpol_d.py's identical failure: the v1
-     URL path structure is gone. Fixed to the v2 shape here too -- see
-     that script's docstring for the full evidence trail (this thread's
-     "related observation, not acted on" from before is now acted on,
-     since the live run turned inconclusive evidence into confirmed
-     404s).
+run and found every request 404ing (data) or 501ing (--discover). Fixed
+at the time to the /api/v2/ path structure -- necessary, but as of the
+29 July live re-run, NOT sufficient (still 404/501). See the FIX BIS-1
+block above the endpoint constants for the actual root cause found 1 Aug
+2026: the dataflow ID itself was wrong (WS_EER_M -> WS_EER) and the
+--discover query was missing the "structure/" path segment entirely
+(explaining the 501, which is a different failure signature than the
+plain 404 a bad key alone would produce). WS_EER_D still does not appear
+anywhere in confirmed evidence (BIS's own portal only shows Monthly EER
+across every country sampled) -- WS_EER remains the only target, now
+correctly named.
 
 UPD (Ovi, same thread): MXN removed from the currency set below,
 replaced with IDR. MXN (Mexican Peso) was carried over unmodified from
@@ -101,15 +90,43 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from dotenv import load_dotenv
 load_dotenv()
 
-# FIX (alpha-factory_preflight_logs 28 July 2026): v1 -> v2 path structure,
-# same evidence trail as check_bis_cbpol_d.py. WS_EER_D removed entirely --
-# both its data query AND its dataflow-structure query 404'd live,
-# indicating the dataflow itself doesn't exist under this name/path, not
-# just a key-syntax problem. WS_EER_M is confirmed to exist (a real,
-# working v1-style example query was found for it this thread); only the
-# URL path prefix needed the same v1->v2 correction as WS_CBPOL_D.
-BIS_EER_ENDPOINT_MONTHLY = "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_EER_M/1.0/all"
-BIS_EER_DATAFLOW_STRUCTURE_URL = "https://stats.bis.org/api/v2/dataflow/BIS/WS_EER_M/1.0"
+# FIX BIS-1 (Ovi, 1 Aug 2026): same root-cause class as check_bis_cbpol_d.py
+# -- the 28 July v1->v2 path fix was necessary but not sufficient. Two
+# further errors, both fixed here:
+#
+# 1. Dataflow ID: WS_EER, not WS_EER_M. The "_M" was a monthly-cadence
+#    label mistaken for part of the identifier -- same pattern as
+#    WS_CBPOL_D, confirmed independently against data.bis.org's own
+#    indexed pages ("topics/EER/BIS,WS_EER,1.0/{FREQ}.{TYPE}.{BASKET}.
+#    {REF_AREA}", 7 countries checked: US/AE/CN/KR/XM/JP, both Real and
+#    Nominal baskets seen). The old WS_EER_M name traces back to a v1-era
+#    academic example (fgeerolf.com) whose flow name was itself already a
+#    guess from before this project's v1->v2 migration -- both the flow
+#    name and the path needed correcting together, not just the path.
+# 2. Structure/discovery queries use a DIFFERENT prefix than data queries
+#    -- "/api/v2/structure/dataflow/..." not "/api/v2/dataflow/...". The
+#    old URL was missing "structure/" entirely, which is consistent with
+#    the 501 (not 404) it was actually returning -- a malformed/
+#    unrecognized v2 path, not a clean "not found". Confirmed via a real
+#    SDMX 2025 conference paper (sdmx2025.org) showing both the data
+#    query and structure query shapes for a third sibling dataflow
+#    (WS_XRU), independently agreeing with the WS_CBTA data-query example
+#    above.
+#
+# Key = {FREQ}.{TYPE}.{BASKET}.{REF_AREA}. FREQ=M (monthly is what BIS
+# publishes EER at -- confirmed across all 7 sampled countries, no daily
+# EER variant found). TYPE left wildcarded (empty -- returns both Real
+# and Nominal) since neither this platform's Broad Dollar Index design
+# nor Gate 1 has settled which one it wants; narrowing that is a separate
+# call, not bundled into this endpoint fix. BASKET=B (broad), matching
+# "Broad Dollar Index" directly. Not live-tested from this sandbox (no
+# route to stats.bis.org in any sandbox on this project) -- run for real
+# to close the loop.
+BIS_EER_ENDPOINT_MONTHLY = (
+    "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_EER/1.0/"
+    "M..B.XM+JP+GB+CA+CH+AU+ID+CN+KR+SG"
+)
+BIS_EER_DATAFLOW_STRUCTURE_URL = "https://stats.bis.org/api/v2/structure/dataflow/BIS/WS_EER/1.0"
 
 # Architecture v2.0 §7.2 BIS_WEIGHTS currencies, MXN removed / IDR added
 # per Ovi's explicit instruction (see module docstring for full context,

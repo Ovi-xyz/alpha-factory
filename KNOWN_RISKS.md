@@ -1105,7 +1105,134 @@ isn't built.
 
 ---
 
-*Last updated: v1.13.0 — ADR-029–033 (`GMI_Decision_Document_v7.docx`):
+## RISK-16 (NEW): BIS CBPOL/EER endpoints used the wrong dataflow ID, not just the wrong URL structure — FIXED (code), pending live confirmation
+
+**Status:** ✅ **FIXED at the code/logic level, verified via full test
+suite (1426 passed, 0 failed) and all CI gates (G-1/G-2/G-3/G-8) — ⏳ NOT
+yet confirmed against the live BIS API from any sandbox on this project
+(stats.bis.org has never been in any sandbox's network allowlist).**
+Fixed via FIX BIS-1 (1 Aug 2026), superseding the 28 July "v1->v2 path
+structure" fix, which was necessary but not sufficient — confirmed by
+the 29 July preflight log still showing 404/501 after that fix landed.
+
+**GD Reference:** Data Source & Rates Adjustment v1.0 §3.2 (BIS API
+specification), ADR-010/011/012 (CB rate coverage), ADR-017/018 (Broad
+Dollar basket weights, blocked on this).
+
+### What the risk was
+
+Three threads (GMI v6, the 28 Jul preflight-fixes thread, and the 29 Jul
+live preflight run) all treated the BIS 404/501s as a URL *path
+structure* problem (v1 → v2) and fixed only that. The 28 Jul thread went
+further and explicitly claimed the dataflow IDs themselves (`WS_CBPOL_D`,
+`WS_EER_M`) were independently confirmed correct via "a BIS SDMX Python
+client's dataflow listing" — a claim that was never actually verified
+against live BIS and turned out to be false, as the 29 Jul live run (with
+the v2 path fix already applied) still 404'd on both.
+
+Root cause, found this thread via web research (BIS has no route from any
+sandbox on this project, so this was confirmed via `data.bis.org`'s own
+publicly indexed pages and independent third-party working code examples,
+not a live API call): the dataflow IDs are `WS_CBPOL` and `WS_EER` — not
+`WS_CBPOL_D` / `WS_EER_M`. The "_D"/"_M" suffixes were daily/monthly
+cadence labels mistaken for part of the dataflow identifier, most likely
+traceable to a v1-era academic example (fgeerolf.com) that already used a
+guessed flow name before this project's v1→v2 migration. Frequency is a
+KEY dimension (`FREQ.REF_AREA` for CBPOL, `FREQ.TYPE.BASKET.REF_AREA` for
+EER), not part of the flow name. A second, independent error in the EER
+`--discover` endpoint: it was missing the `structure/` path segment
+entirely (`/api/v2/dataflow/...` instead of `/api/v2/structure/
+dataflow/...`), which is consistent with the 501 it was actually
+returning (a malformed/unrecognized v2 path) rather than the clean 404 a
+bad key alone would produce.
+
+### Evidence trail
+
+- `data.bis.org` central-bank-policy-rate pages for 8 countries
+  (AR/BR/GB/CH/DK/NO/JP/CL), all served under
+  `topics/CBPOL/BIS,WS_CBPOL,1.0/{FREQ}.{REF_AREA}` — no `_D` anywhere.
+- `data.bis.org` effective-exchange-rate pages for 7 countries
+  (US/AE/CN/KR/XM/JP), all served under
+  `topics/EER/BIS,WS_EER,1.0/{FREQ}.{TYPE}.{BASKET}.{REF_AREA}` — no `_M`
+  anywhere; both Real and Nominal baskets observed.
+- A live, working third-party code example (jamelsaadaoui.com/EconMacro
+  blog, comments dated Aug 2024, site posting through Jul 2026) for the
+  sibling dataflow `WS_CBTA`, using the identical
+  `/api/v2/data/dataflow/BIS/<FLOW>/1.0/<key>?format=csv` shape.
+- A real SDMX 2025 conference paper (sdmx2025.org) with worked examples
+  for a third sibling dataflow (`WS_XRU`), independently confirming BOTH
+  the data-query shape (`/api/v2/data/dataflow/...`) AND the
+  structure/discovery shape (`/api/v2/structure/dataflow/...?references=all`).
+- A genuine, unplanned finding along the way: the 4 central banks in our
+  own 12-CB list that were sampled (GB/BOE, CH/SNB, NO/NORGES, JP/BOJ) all
+  came back **Monthly**, not Daily, in the samples — contradicting
+  ADR-010's original "BIS provides daily where FRED only has monthly"
+  rationale for at least some of the 12 non-FED CBs (ECB/XM itself, the
+  bank ADR-010 was specifically about, was not directly sampled). Not
+  resolved here — flagged for review once the corrected endpoint is
+  confirmed live; see "What this does NOT resolve" below.
+
+### Fix
+
+`config/bis_cb_rates.yaml`, `src/bronze/bis_rates_ingester.py` (production
+ingester — hardcodes its own copy of the endpoint, does not read the
+config file, so needed an independent fix), `scripts/preflight/
+check_bis_cbpol_d.py`, and `scripts/preflight/check_bis_eer_weights.py`
+all updated to the corrected dataflow IDs, corrected key construction
+(FREQ wildcarded rather than hardcoded — see the Monthly-frequency finding
+above — and REF_AREA codes joined with `+`), and (EER only) the corrected
+`structure/` discovery path. `_daily_resolution()`'s pass/fail semantics
+in `check_bis_cbpol_d.py` were deliberately left UNCHANGED — the script
+will now report genuinely honest per-country findings against real data,
+which is a legitimate empirical question for ADR-010 review, not
+something to paper over by relaxing the check unilaterally.
+
+### What this does NOT resolve
+
+This is a code fix verified against the *test suite*, not against the
+live BIS API — no sandbox on this project has ever had network access to
+`stats.bis.org`. The corrected endpoints must be run for real
+(`scripts/preflight/check_bis_cbpol_d.py`, `check_bis_eer_weights.py`,
+and ultimately `bronze_bis_rates` itself) before this can be called fully
+closed. Also unresolved: whether the mixed Monthly/Daily finding above
+affects ADR-010's rationale for any specific CB; Gate 1 (ADR-017/018 exact
+Broad Dollar basket weight *components*, as opposed to the EER index
+values themselves) — per GMI v6's own framing, BIS's EER methodology
+publishes basket weights as a periodic Quarterly Review appendix, not
+necessarily a queryable SDMX series, and the corrected endpoint does not
+change that; and TYPE (Real vs Nominal) for the EER query, left
+deliberately wildcarded rather than decided.
+
+### Verification
+
+6 new regression-guard tests locking in the corrected dataflow IDs/key
+structure across all three touch points (production ingester, both
+preflight scripts) — `tests/unit/test_bis_rates_ingester.py::TestBisEndpoint`,
+`tests/unit/test_preflight_scripts.py::TestCheckBisCbpolD::test_endpoint_uses_correct_dataflow_id`
+/ `test_endpoint_key_wildcards_freq_and_includes_all_ref_areas`,
+`TestCheckBisEerWeights::test_endpoint_uses_correct_dataflow_id` /
+`test_structure_endpoint_uses_structure_prefix` /
+`test_key_wildcards_freq_and_fixes_broad_basket`. One pre-existing test
+(`test_endpoint_uses_v2_path_structure`) asserted the now-superseded
+`WS_EER_M` value and was rewritten, not deleted, with a docstring
+explaining why. Full suite: 1426 passed, 0 failed (up from 1420) — zero
+regressions in the 24 pre-existing ingester tests or 22 pre-existing
+preflight-script tests, confirmed by running both files before AND after
+the fix. Coverage: 81.43% (was 81.41%). Gates G-1/G-2/G-3/G-8 all re-run
+clean. Reproduced twice: once in an isolated sandbox clone (Python 3.12,
+fresh `poetry install --with dev`), once by re-reading every edited file
+back after applying the identical changes to the real repo via the
+filesystem connector.
+
+---
+
+*Last updated: v1.13.1 — FIX BIS-1 (1 Aug 2026): BIS CBPOL/EER endpoints
+corrected — the real root cause was the dataflow IDs themselves
+(WS_CBPOL_D → WS_CBPOL, WS_EER_M → WS_EER), not just the v1→v2 URL path
+structure the 28 Jul thread fixed. RISK-16 (NEW) — fixed at the code
+level, pending live confirmation (no sandbox on this project has network
+access to stats.bis.org). July/August 2026.
+Prior entry: v1.13.0 — ADR-029–033 (`GMI_Decision_Document_v7.docx`):
 tvdatafeed retired entirely (RISK-1 → RESOLVED); CPO/RUBBER/TIN/NICKEL
 un-deferred via yfinance equity proxies (F34.SI/STA.BK/AFM.V/NIC.AX);
 RISK-15 (NEW, OPEN) — pre-existing FRED Track 2 supplement gap found

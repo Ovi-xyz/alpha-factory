@@ -40,24 +40,45 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from dotenv import load_dotenv
 load_dotenv()
 
-# FIX (alpha-factory_preflight_logs 28 July 2026): the v1 endpoint below
-# now returns a bare HTTP 404 -- confirmed empirically when this script
-# was actually run. Web search this thread found: (1) BIS's own current
-# help/legal page (data.bis.org/help/legal) points exclusively at
-# stats.bis.org/api-doc/v2/ -- v1 is not mentioned at all, consistent
-# with it having been retired; (2) a real, working v2 query example for a
-# different BIS dataflow (WS_CBTA) using the
-# /api/v2/data/dataflow/BIS/<FLOW>/1.0/<key> shape; (3) the SDMX-REST
-# spec confirms an empty/omitted key -- or the literal keyword "all" --
-# means "return everything," matching this script's existing intent.
-# WS_CBPOL_D itself (the dataflow ID) is unaffected -- confirmed via a
-# second independent source (a BIS SDMX Python client's dataflow listing)
-# that "WS_CBPOL_D" is the correct, existing daily dataflow ID; only the
-# URL *path structure* was wrong, not the dataset name. Still worth a
-# live confirmation the next time this actually runs (same as everything
-# else in this file) -- this is stronger evidence than a guess, not a
-# certainty this sandbox can fully close.
-BIS_ENDPOINT = "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_CBPOL_D/1.0/all"
+# FIX BIS-1 (Ovi, 1 Aug 2026): the 28 July fix above (still visible in git
+# blame) corrected the v1->v2 *path structure* but kept "WS_CBPOL_D" as
+# the dataflow ID -- and its claim that a "BIS SDMX Python client's
+# dataflow listing" independently confirmed that name was never actually
+# verified against live BIS. It was wrong: the 29 July preflight log
+# (this script, run for real) shows a 404 even with that fix applied.
+# Also wrong: "all" as a literal key segment is not valid SDMX key
+# syntax -- the earlier fix's own claim that "all" means "return
+# everything" doesn't hold up against a real working example (see below).
+#
+# Root cause, this thread: the dataflow ID is WS_CBPOL, not WS_CBPOL_D.
+# Confirmed against data.bis.org's own indexed pages -- 8 countries
+# checked (AR/BR/GB/CH/DK/NO/JP/CL), every one served under
+# "topics/CBPOL/BIS,WS_CBPOL,1.0/{FREQ}.{REF_AREA}" -- and a real, live,
+# working third-party code example (jamelsaadaoui.com/EconMacro, comments
+# dated Aug 2024, site posting through Jul 2026) for the sibling dataflow
+# WS_CBTA using the identical /api/v2/data/dataflow/BIS/<FLOW>/1.0/<key>
+# shape. The "_D" was a "daily cadence" label mistaken for part of the
+# dataflow identifier, not a real suffix -- frequency is a KEY dimension
+# (FREQ.REF_AREA), not part of the flow name. This explains every BIS
+# 404 across this project's last three threads, not just a v1/v2 detail.
+#
+# Key wildcards FREQ (leading empty segment = "any frequency" -- SDMX
+# empty-segment wildcard semantics, confirmed via a live blog comment
+# doing the same thing for REF_AREA) and joins all 12 REF_AREA codes with
+# "+". FREQ is deliberately left wildcarded rather than hardcoded to "D":
+# the sampled countries return a MIX -- GB/CH/NO/JP (all 4 in our 12) came
+# back Monthly, only BR/DK (not in our 12) came back Daily in the sample.
+# This script's own _daily_resolution() check below is UNCHANGED and will
+# now report per-country findings honestly against real data -- if some
+# of our 12 come back non-daily, that is a genuine empirical finding for
+# ADR-010's daily-resolution rationale to be reviewed against, not a
+# preflight bug to silently paper over. Not live-tested from this sandbox
+# (stats.bis.org has never been in any sandbox's network allowlist on
+# this project) -- run this for real to close the loop, same as always.
+BIS_ENDPOINT = (
+    "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_CBPOL/1.0/"
+    ".XM+GB+JP+CA+AU+NZ+CH+KR+NO+SE+CN+ID"
+)
 
 # config/bis_cb_rates.yaml's ref_area_map, duplicated here deliberately
 # (not imported) so this pre-flight check does not silently pass if the

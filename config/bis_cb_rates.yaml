@@ -9,12 +9,28 @@
 # ADR-010: ECB source dikoreksi dari FRED (monthly) ke BIS CBPOL_D (daily)
 # ADR-011: DM/EM split — context_rates_dm_cb (9 CBs) vs context_rates_em_cb (3 CBs)
 # ADR-012: PBOC = 7-day reverse repo rate ONLY (MLF/LPR not in free tier — accepted)
+#
+# FIX BIS-1 (Ovi, 1 Aug 2026): endpoint corrected — the real BIS dataflow
+# ID is WS_CBPOL, not WS_CBPOL_D ("_D" was a daily-cadence label mistaken
+# for part of the identifier; frequency is the FREQ key dimension, not
+# part of the flow name — confirmed against data.bis.org's own indexed
+# URLs and a live third-party code example for the sibling WS_CBTA
+# dataflow using the identical shape). This is the root cause of every
+# BIS CBPOL 404 seen across preflight runs on 28/29 July — the earlier
+# v1->v2 path fix was necessary but insufficient on its own. Not
+# live-tested from any sandbox (stats.bis.org unreachable from every
+# sandbox used on this project) — confirm via
+# scripts/preflight/check_bis_cbpol_d.py on real hardware.
+# NOTE: sampled countries show a MIX of Monthly/Daily base frequency on
+# BIS (not uniformly daily as ADR-010's original rationale assumed) — key
+# below wildcards FREQ rather than hardcoding "D" for this reason. Worth
+# reviewing against ADR-010 once the corrected endpoint is confirmed live.
 
-version: "1.0"
-last_updated: "2026-06-30"
+version: "1.1"
+last_updated: "2026-08-01"
 
-# ── BIS API Endpoint (Data Source & Rates Adjustment v1.0 §3.2) ──────────────
-endpoint: "https://stats.bis.org/api/v1/data/WS_CBPOL_D/all"
+# ── BIS API Endpoint (Data Source & Rates Adjustment v1.0 §3.2, corrected FIX BIS-1) ──
+endpoint: "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_CBPOL/1.0/.XM+GB+JP+CA+AU+NZ+CH+KR+NO+SE+CN+ID"
 format: "csv"
 # No API key required — BIS CBPOL_D is free, no registration
 api_key_required: false

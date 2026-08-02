@@ -2,9 +2,13 @@
 bis_rates_ingester.py — Bronze Layer — BIS CB Policy Rates Ingester
 Data Source & Rates Adjustment v1.0 §8.1
 
-Ingest BIS Statistics Warehouse CBPOL_D dataset — daily central bank
-policy rates for 12 non-FED CBs. ADR-010: ECB source corrected from
-FRED (monthly) to BIS (daily). ADR-011: DM/EM CB split established.
+Ingest BIS Statistics Warehouse WS_CBPOL dataset (internal label:
+CBPOL_D, kept as-is for schema/path continuity — see FIX BIS-1 below
+for why the dataflow ID itself is WS_CBPOL, not WS_CBPOL_D) — central
+bank policy rates for 12 non-FED CBs at whatever base frequency BIS
+reports per country (mixed daily/monthly, not uniformly daily).
+ADR-010: ECB source corrected from FRED (monthly) to BIS. ADR-011:
+DM/EM CB split established.
 
 Hierarki: Grand Design v1.2 > Supplementary Design v1.1 > IDD v1.0 >
            Architecture v2.0 > Architecture Extension v1.0 >
@@ -46,17 +50,40 @@ from src.bronze.schema_validator import SchemaValidator
 
 # ── Konfigurasi ──────────────────────────────────────────────────────────────
 
-# FIX (alpha-factory_preflight_logs 28 July 2026): v1 endpoint confirmed
-# 404 via check_bis_cbpol_d.py's actual run against live BIS -- this
-# ingester hardcodes its own copy of the endpoint (does NOT read
-# config/bis_cb_rates.yaml's `endpoint:` field, confirmed by grep), so the
-# same fix must land here independently, not just in the preflight
-# script or the yaml doc. See check_bis_cbpol_d.py's docstring for the
-# full v1->v2 evidence trail (BIS's own current docs, a working v2
-# example for a different dataflow, SDMX-REST spec for empty-key
-# semantics). WS_CBPOL_D itself is unaffected -- only the URL path
-# structure changed.
-_BIS_ENDPOINT = "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_CBPOL_D/1.0/all"
+# FIX BIS-1 (Ovi, 1 Aug 2026): the 28 July "v1->v2" fix only corrected the
+# URL *path structure* -- it kept using "WS_CBPOL_D" as the dataflow ID,
+# which was itself wrong, not just the path around it. That prior thread's
+# claim that WS_CBPOL_D was independently confirmed correct ("a BIS SDMX
+# Python client's dataflow listing") was never actually verified against
+# live BIS and turned out to be false: the 29 July preflight log shows a
+# 404 even after that "fix" landed.
+#
+# Root cause, confirmed this thread against data.bis.org's own indexed
+# pages (8 countries checked: AR/BR/GB/CH/DK/NO/JP/CL, all served under
+# the path "topics/CBPOL/BIS,WS_CBPOL,1.0/{FREQ}.{REF_AREA}") and a real,
+# working third-party code example (jamelsaadaoui.com/EconMacro blog,
+# live comments dated Aug 2024, site active through Jul 2026) for the
+# sibling dataflow WS_CBTA using the identical URL shape. The dataflow ID
+# is WS_CBPOL -- the "_D" was a "daily cadence" label mistaken for part of
+# the identifier and propagated through this project's docs, config, and
+# code since the original Data Source & Rates Adjustment v1.0. Frequency
+# is a KEY dimension (FREQ.REF_AREA), not part of the flow name.
+#
+# Key below wildcards FREQ (leading empty segment -- confirmed wildcard
+# semantics per a live blog comment: "leaving the reference area field
+# empty" -- here applied to FREQ instead) and joins all 12 REF_AREA codes
+# with "+", since the sampled countries show a MIX of Monthly and Daily
+# base frequency (GB/CH/NO/JP -- all in our 12 -- came back Monthly in
+# the sample; BR/DK came back Daily) -- hardcoding FREQ=D risked
+# re-introducing a different 404/empty-result for the monthly ones.
+# NOT live-tested against stats.bis.org from any sandbox on this project
+# (no route in the network allowlist) -- needs confirmation via
+# scripts/preflight/check_bis_cbpol_d.py on real hardware, same as every
+# other BIS/tvdatafeed fix in this project's history.
+_BIS_ENDPOINT = (
+    "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_CBPOL/1.0/"
+    ".XM+GB+JP+CA+AU+NZ+CH+KR+NO+SE+CN+ID"
+)
 _FORMAT_PARAM  = "?format=csv"
 _TIMEOUT_SEC   = 60
 _MAX_RETRIES   = 3
@@ -90,7 +117,8 @@ _OUTPUT_SUBPATH = Path("macro") / "bis_cb_rates"
 
 class BISCBRatesIngester(BronzeIngester):
     """
-    Ingester untuk BIS Statistics Warehouse CBPOL_D dataset.
+    Ingester untuk BIS Statistics Warehouse WS_CBPOL dataset (central
+    bank policy rates — internal label "CBPOL_D" unchanged, see FIX BIS-1).
     Mengimplementasikan GD §3.5 SourceAdapter pattern via requests (no chain
     needed — BIS is a single authoritative source with no free-tier fallback).
     """

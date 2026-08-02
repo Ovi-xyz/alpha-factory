@@ -16,8 +16,30 @@ import pytest
 
 from src.bronze.bis_rates_ingester import (
     BISCBRatesIngester,
+    _BIS_ENDPOINT,
     _REF_AREA_MAP,
 )
+
+
+class TestBisEndpoint:
+    """Regression guard for FIX BIS-1 (1 Aug 2026) -- the production
+    ingester hardcodes its own copy of the endpoint (does not read
+    config/bis_cb_rates.yaml), so this must be locked in independently of
+    the config-file and preflight-script guards. Root cause: the real BIS
+    dataflow ID is WS_CBPOL, not WS_CBPOL_D -- confirmed against
+    data.bis.org's own indexed URLs and a live third-party code example
+    for the sibling WS_CBTA dataflow. See module-level FIX BIS-1 comment
+    for the full evidence trail."""
+
+    def test_uses_correct_dataflow_id(self):
+        assert "/data/dataflow/BIS/WS_CBPOL/1.0/" in _BIS_ENDPOINT
+        assert "WS_CBPOL_D" not in _BIS_ENDPOINT
+
+    def test_key_wildcards_freq_and_includes_all_ref_areas(self):
+        key = _BIS_ENDPOINT.rsplit("/", 1)[-1]
+        assert key.startswith(".")
+        for ref_area in _REF_AREA_MAP:
+            assert ref_area in key
 
 
 def _mock_resp(csv_text: str) -> MagicMock:

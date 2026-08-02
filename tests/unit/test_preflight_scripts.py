@@ -55,6 +55,31 @@ class TestCheckBisCbpolD:
         monkeypatch.setattr(mod, "_fetch_csv", raise_error)
         assert mod.main() == 1
 
+    def test_endpoint_uses_correct_dataflow_id(self):
+        """Regression guard for FIX BIS-1 (1 Aug 2026): the dataflow is
+        WS_CBPOL, not WS_CBPOL_D -- confirmed against data.bis.org's own
+        indexed URLs (BIS,WS_CBPOL,1.0) across 8 countries, and a live
+        third-party code example for the sibling WS_CBTA dataflow. A
+        prior thread (28 Jul) claimed WS_CBPOL_D was independently
+        confirmed correct; that claim was never actually verified and the
+        29 Jul live preflight run still 404'd, disproving it."""
+        import check_bis_cbpol_d as mod
+        assert "/data/dataflow/BIS/WS_CBPOL/1.0/" in mod.BIS_ENDPOINT
+        assert "WS_CBPOL_D" not in mod.BIS_ENDPOINT
+
+    def test_endpoint_key_wildcards_freq_and_includes_all_ref_areas(self):
+        """Key must wildcard FREQ (leading empty segment) rather than
+        hardcode a frequency -- sampled countries show a MIX of Monthly
+        and Daily base cadence on BIS, and 4 of our 12 (GB/CH/NO/JP) came
+        back Monthly, not Daily, in the sample. "all" as a literal key
+        segment (the previous value) is not valid SDMX key syntax."""
+        import check_bis_cbpol_d as mod
+        key = mod.BIS_ENDPOINT.rsplit("/", 1)[-1]
+        assert key.startswith(".")
+        assert "all" not in key.split(".")
+        for ref_area in mod.EXPECTED_REF_AREAS:
+            assert ref_area in key
+
 
 class TestCheckFinnhubShape:
 
@@ -201,14 +226,42 @@ class TestCheckBisEerWeights:
         assert "MXN" not in mod.BROAD_DOLLAR_REF_AREAS
         assert mod.BROAD_DOLLAR_REF_AREAS["IDR"] == "ID"
 
-    def test_endpoint_uses_v2_path_structure(self):
-        """Regression guard for the v1->v2 BIS API fix -- both the daily
-        variant (WS_EER_D) and the old /api/v1/ shape are confirmed gone;
-        WS_EER_M is the only remaining target."""
+    def test_endpoint_uses_correct_dataflow_id(self):
+        """Regression guard for the dataflow-ID root-cause fix (FIX BIS-1,
+        1 Aug 2026): the flow is WS_EER, not WS_EER_M. The "_M" was a
+        monthly-cadence label mistaken for part of the dataflow
+        identifier -- the previous "v1->v2 path fix" (28 Jul) corrected
+        the URL shape but kept this wrong name, which is why it still
+        404'd on the 29 Jul live run. Confirmed against data.bis.org's own
+        indexed URLs (BIS,WS_EER,1.0) across 7 countries."""
         import check_bis_eer_weights as mod
         assert "/api/v2/" in mod.BIS_EER_ENDPOINT_MONTHLY
-        assert "WS_EER_M" in mod.BIS_EER_ENDPOINT_MONTHLY
+        assert "/data/dataflow/BIS/WS_EER/1.0/" in mod.BIS_EER_ENDPOINT_MONTHLY
+        assert "WS_EER_M" not in mod.BIS_EER_ENDPOINT_MONTHLY
         assert not hasattr(mod, "BIS_EER_ENDPOINT_DAILY")
+
+    def test_structure_endpoint_uses_structure_prefix(self):
+        """FIX BIS-1: the --discover endpoint was missing the "structure/"
+        path segment entirely (/api/v2/dataflow/... instead of
+        /api/v2/structure/dataflow/...), which is why it 501'd rather
+        than 404'd -- a malformed v2 path, not a clean not-found. Confirmed
+        against a real SDMX 2025 conference paper's worked example for a
+        sibling BIS dataflow (WS_XRU) using this exact structure/dataflow
+        shape."""
+        import check_bis_eer_weights as mod
+        assert "/api/v2/structure/dataflow/BIS/WS_EER/1.0" in mod.BIS_EER_DATAFLOW_STRUCTURE_URL
+
+    def test_key_wildcards_freq_and_fixes_broad_basket(self):
+        """The key must wildcard FREQ (BIS only publishes EER monthly --
+        no daily variant found in any sampled country) and fix
+        BASKET=B (broad), matching "Broad Dollar Index" directly. TYPE is
+        deliberately left wildcarded -- Real vs Nominal is an unresolved
+        design question, not something to bake into this endpoint fix."""
+        import check_bis_eer_weights as mod
+        key = mod.BIS_EER_ENDPOINT_MONTHLY.rsplit("/", 1)[-1]
+        assert key.startswith("M..B.")
+        for ref_area in mod.BROAD_DOLLAR_REF_AREAS.values():
+            assert ref_area in key
 
     def test_main_returns_1_for_unknown_currency_filter(self, monkeypatch):
         import check_bis_eer_weights as mod

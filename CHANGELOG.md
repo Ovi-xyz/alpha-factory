@@ -1,5 +1,104 @@
 # CHANGELOG — Data Platform
 
+## v1.13.1 — FIX BIS-1: BIS CBPOL/EER Endpoint Root-Cause Correction (Agustus 2026)
+
+Dokumen referensi: tidak ada decision document terpisah — root cause
+ditemukan dan diperbaiki dalam satu thread langsung, dipicu oleh
+permintaan eksplisit Ovi ("resolving BIS issues") setelah dua thread
+sebelumnya (GMI v6, thread 28 Jul 2026) gagal menutup 404/501 yang
+sama. Menggunakan `alpha-factory_preflight_logs___29_July_2026.txt`
+sebagai bukti bahwa fix "v1→v2" sebelumnya TIDAK cukup.
+
+Total: **1 root cause ditemukan** (dataflow ID salah, bukan hanya
+struktur URL) | **4 file source diperbaiki** (config/bis_cb_rates.yaml,
+src/bronze/bis_rates_ingester.py, 2 preflight script) | **2 file test
+diperbarui** (1 test lama direvisi, 6 test baru ditambahkan) | **1420
+→ 1426 passed / 0 failed / 0 error**.
+
+### FIX BIS-1 [config/bis_cb_rates.yaml, src/bronze/bis_rates_ingester.py, scripts/preflight/check_bis_cbpol_d.py, scripts/preflight/check_bis_eer_weights.py] — Dataflow ID Salah, Bukan Hanya Struktur URL
+
+**Root cause**: thread 28 Jul 2026 memperbaiki struktur path v1→v2 tapi
+mengklaim dataflow ID `WS_CBPOL_D`/`WS_EER_M` sudah "independently
+confirmed correct" via sumber yang tidak spesifik ("a BIS SDMX Python
+client's dataflow listing") — klaim ini tidak pernah benar-benar
+diverifikasi, dan preflight log 29 Jul membuktikannya salah (404/501
+tetap terjadi meski fix v1→v2 sudah diterapkan). Root cause sebenarnya,
+ditemukan thread ini via web research (bukan live API call — tidak ada
+sandbox proyek ini yang punya akses ke stats.bis.org): dataflow ID yang
+benar adalah `WS_CBPOL` dan `WS_EER` — bukan `WS_CBPOL_D`/`WS_EER_M`.
+Suffix "_D"/"_M" adalah label cadence (daily/monthly) yang salah
+dikira bagian dari dataflow identifier; frekuensi sebenarnya adalah
+KEY dimension (`FREQ.REF_AREA` untuk CBPOL, `FREQ.TYPE.BASKET.REF_AREA`
+untuk EER), bukan bagian nama flow. Error kedua, independen: endpoint
+`--discover` EER hilang segment path `structure/` sepenuhnya
+(`/api/v2/dataflow/...` alih-alih `/api/v2/structure/dataflow/...`) —
+konsisten dengan 501 (bukan 404 bersih) yang benar-benar dikembalikan.
+
+**Evidence trail**: `data.bis.org` (portal resmi BIS) menampilkan 8
+halaman negara untuk CBPOL (`topics/CBPOL/BIS,WS_CBPOL,1.0/{FREQ}.
+{REF_AREA}`) dan 7 halaman untuk EER (`topics/EER/BIS,WS_EER,1.0/
+{FREQ}.{TYPE}.{BASKET}.{REF_AREA}`), semuanya tanpa suffix "_D"/"_M".
+Dikonfirmasi independen via contoh kode working nyata (blog
+jamelsaadaoui.com/EconMacro, komentar live, untuk dataflow sibling
+WS_CBTA) dan paper konferensi SDMX 2025 resmi (sdmx2025.org, untuk
+dataflow sibling WS_XRU) — keduanya memakai bentuk URL yang identik
+dengan yang sekarang dipakai di sini.
+
+**Temuan sampingan, bukan diselesaikan thread ini**: dari 4 central
+bank di 12-CB list kita yang ter-sample (GB/BOE, CH/SNB, NO/NORGES,
+JP/BOJ), semuanya kembali sebagai Monthly, bukan Daily — berlawanan
+dengan rasional asli ADR-010 ("BIS provides daily where FRED only has
+monthly"). ECB/XM sendiri (bank yang jadi fokus ADR-010) tidak
+ter-sample langsung. Diflag untuk review setelah endpoint yang
+diperbaiki dikonfirmasi live, tidak diselesaikan di sini — lihat
+KNOWN_RISKS.md RISK-16.
+
+**Fix**: endpoint dikoreksi di 3 titik independen (config YAML +
+production ingester yang hardcode endpoint-nya sendiri, tidak baca
+config + 2 preflight script) menjadi
+`https://stats.bis.org/api/v2/data/dataflow/BIS/WS_CBPOL/1.0/.XM+GB+
+JP+CA+AU+NZ+CH+KR+NO+SE+CN+ID` (CBPOL) dan
+`https://stats.bis.org/api/v2/data/dataflow/BIS/WS_EER/1.0/M..B.XM+
+JP+GB+CA+CH+AU+ID+CN+KR+SG` (EER, key = FREQ.TYPE.BASKET.REF_AREA,
+FREQ=M fixed karena tidak ditemukan varian daily, TYPE wildcarded
+karena Real vs Nominal belum diputuskan, BASKET=B fixed sesuai "Broad
+Dollar Index"). Endpoint `--discover` EER dikoreksi ke
+`/api/v2/structure/dataflow/BIS/WS_EER/1.0`. Key CBPOL wildcard FREQ
+(leading empty segment) alih-alih hardcode "D" — literal "all" sebagai
+key segment (nilai lama) bukan sintaks SDMX key yang valid, dan
+sampel negara menunjukkan campuran Monthly/Daily. Semantik pass/fail
+`_daily_resolution()` di `check_bis_cbpol_d.py` DIBIARKAN TIDAK
+BERUBAH secara sengaja — script sekarang akan melaporkan temuan per-
+negara yang jujur terhadap data nyata, bukan sesuatu yang perlu
+dilonggarkan sepihak.
+
+**Diverifikasi empiris**: fix diterapkan dan diuji dua kali — sekali di
+sandbox clone terisolasi (`git clone` dari GitHub, dikonfirmasi in-sync
+dengan filesystem lokal via perbandingan `pyproject.toml`; Python 3.12,
+`poetry install --with dev` bersih, 113 paket), sekali diterapkan
+langsung ke repo nyata via filesystem connector setelah verifikasi
+sandbox lulus. Full suite (sandbox): 1420 passed (baseline, sebelum
+fix) → 1426 passed, 0 failed (setelah fix + test baru). Coverage:
+81.41% → 81.43% (> gate 80%). Gate G-1 (164 file, 0 error), G-2 (0
+f-string SQL), G-3 (699 symbols, Layer 1=640, Layer 2=59), G-8 (0
+glob-scope violation) — semua PASS. **TIDAK dikonfirmasi terhadap
+live BIS API** — tidak ada sandbox proyek ini yang punya network
+access ke `stats.bis.org`; perlu dijalankan nyata via
+`check_bis_cbpol_d.py`/`check_bis_eer_weights.py` di hardware M1
+sebelum dianggap benar-benar closed. Lihat KNOWN_RISKS.md RISK-16
+untuk detail lengkap.
+
+**Test baru**: `test_bis_rates_ingester.py::TestBisEndpoint` (2 test),
+`test_preflight_scripts.py::TestCheckBisCbpolD::test_endpoint_uses_
+correct_dataflow_id` + `test_endpoint_key_wildcards_freq_and_includes_
+all_ref_areas` (2 test), `TestCheckBisEerWeights::test_endpoint_uses_
+correct_dataflow_id` + `test_structure_endpoint_uses_structure_prefix`
++ `test_key_wildcards_freq_and_fixes_broad_basket` (3 test, 1
+menggantikan `test_endpoint_uses_v2_path_structure` yang lama —
+direname, bukan dihapus, dengan docstring yang menjelaskan alasan).
+
+---
+
 ## v1.13.0 — ADR-029–033: tvdatafeed Retirement & Layer 2 Proxy Adoption; Version/CHANGELOG Catch-Up (Juli 2026)
 
 Dokumen referensi: `GMI_Decision_Document_v7.docx` (Decision I / ADR-029
