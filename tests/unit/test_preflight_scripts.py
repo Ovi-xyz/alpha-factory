@@ -248,9 +248,9 @@ class TestCheckBisEerWeights:
         404'd on the 29 Jul live run. Confirmed against data.bis.org's own
         indexed URLs (BIS,WS_EER,1.0) across 7 countries."""
         import check_bis_eer_weights as mod
-        assert "/api/v2/" in mod.BIS_EER_ENDPOINT_MONTHLY
-        assert "/data/dataflow/BIS/WS_EER/1.0/" in mod.BIS_EER_ENDPOINT_MONTHLY
-        assert "WS_EER_M" not in mod.BIS_EER_ENDPOINT_MONTHLY
+        assert "/api/v2/" in mod.BIS_EER_ENDPOINT
+        assert "/data/dataflow/BIS/WS_EER/1.0/" in mod.BIS_EER_ENDPOINT
+        assert "WS_EER_M" not in mod.BIS_EER_ENDPOINT
         assert not hasattr(mod, "BIS_EER_ENDPOINT_DAILY")
 
     def test_structure_endpoint_uses_structure_prefix(self):
@@ -264,17 +264,28 @@ class TestCheckBisEerWeights:
         import check_bis_eer_weights as mod
         assert "/api/v2/structure/dataflow/BIS/WS_EER/1.0" in mod.BIS_EER_DATAFLOW_STRUCTURE_URL
 
-    def test_key_wildcards_freq_and_fixes_broad_basket(self):
-        """The key must wildcard FREQ (BIS only publishes EER monthly --
-        no daily variant found in any sampled country) and fix
-        BASKET=B (broad), matching "Broad Dollar Index" directly. TYPE is
-        deliberately left wildcarded -- Real vs Nominal is an unresolved
-        design question, not something to bake into this endpoint fix."""
+    def test_key_fixes_type_nominal_and_wildcards_freq(self):
+        """Ovi (3 Aug 2026 thread): TYPE decided (Nominal, not Real) --
+        matches DXY's own nominal-index nature, and BIS confirms daily-
+        frequency EER exists only for Nominal indices, never Real, which
+        this platform's Daily Layer-2 cadence design needs. FREQ is
+        wildcarded rather than fixed to M or D -- inverted from the
+        pre-decision version of this key, which fixed FREQ=M and
+        wildcarded TYPE. BASKET stays fixed at B (broad)."""
         import check_bis_eer_weights as mod
-        key = mod.BIS_EER_ENDPOINT_MONTHLY.rsplit("/", 1)[-1]
-        assert key.startswith("M..B.")
+        key = mod.BIS_EER_ENDPOINT.rsplit("/", 1)[-1]
+        assert key.startswith(".N.B.")
         for ref_area in mod.BROAD_DOLLAR_REF_AREAS.values():
             assert ref_area in key
+
+    def test_weights_file_url_targets_broad_basket(self):
+        """Gate 1 (ADR-017/018): the actual weight components, found this
+        thread -- not a queryable SDMX series, a plain .xlsx download
+        linked from data.bis.org/topics/EER's own Methodology section.
+        Broad (64 economies), not Narrow (26/27 -- would exclude IDR/HKD/
+        TWD)."""
+        import check_bis_eer_weights as mod
+        assert mod.BIS_EER_WEIGHTS_BROAD_URL == "https://www.bis.org/statistics/eer/weightsb.xlsx"
 
     def test_main_returns_1_for_unknown_currency_filter(self, monkeypatch):
         import check_bis_eer_weights as mod
@@ -292,3 +303,70 @@ class TestCheckBisEerWeights:
         monkeypatch.setattr(mod, "_fetch_csv", lambda url: "REF_AREA,TIME_PERIOD,OBS_VALUE\nID,2026-01-01,101.2\n")
         ok, msg = mod._check_one("ID")
         assert ok is True
+
+    def test_discover_weights_returns_1_on_download_failure(self, monkeypatch):
+        import check_bis_eer_weights as mod
+
+        class _FakeHttpx:
+            @staticmethod
+            def get(*a, **kw):
+                raise ConnectionError("simulated: no network access to www.bis.org")
+
+        monkeypatch.setitem(sys.modules, "httpx", _FakeHttpx)
+        assert mod._discover_weights() == 1
+
+    def test_discover_weights_returns_1_on_unparseable_content(self, monkeypatch):
+        """Downloaded bytes that aren't a real xlsx (e.g. an HTML error
+        page instead of the file) must fail cleanly, not crash."""
+        import check_bis_eer_weights as mod
+
+        class _FakeResponse:
+            content = b"not a real xlsx file"
+            def raise_for_status(self): pass
+
+        class _FakeHttpx:
+            @staticmethod
+            def get(*a, **kw): return _FakeResponse()
+
+        monkeypatch.setitem(sys.modules, "httpx", _FakeHttpx)
+        assert mod._discover_weights() == 1
+
+    def test_discover_weights_scans_synthetic_workbook_for_ref_areas(self, monkeypatch, capsys):
+        """Validates the actual scanning logic against a real (synthetic)
+        xlsx -- the real bis.org layout is unknown from this sandbox (no
+        network route), so this proves the parsing/scanning code itself
+        is correct, not that it matches BIS's specific real-world layout."""
+        import check_bis_eer_weights as mod
+        from io import BytesIO
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Broad weights"
+        ws.append(["Country", "2017-19"])
+        ws.append(["ID", 0.014])
+        ws.append(["XM", 0.187])
+        buf = BytesIO()
+        wb.save(buf)
+        xlsx_bytes = buf.getvalue()
+
+        class _FakeResponse:
+            content = xlsx_bytes
+            def raise_for_status(self): pass
+
+        class _FakeHttpx:
+            @staticmethod
+            def get(*a, **kw): return _FakeResponse()
+
+        monkeypatch.setitem(sys.modules, "httpx", _FakeHttpx)
+        result = mod._discover_weights()
+        captured = capsys.readouterr()
+        assert result == 0
+        assert "Broad weights" in captured.out
+        assert "'ID'" in captured.out or '"ID"' in captured.out
+
+    def test_cli_discover_weights_flag_calls_discover_weights(self, monkeypatch):
+        import check_bis_eer_weights as mod
+        monkeypatch.setattr(sys, "argv", ["check_bis_eer_weights.py", "--discover-weights"])
+        monkeypatch.setattr(mod, "_discover_weights", lambda: 0)
+        assert mod.main() == 0

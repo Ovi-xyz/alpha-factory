@@ -1166,41 +1166,48 @@ bad key alone would produce.
   the data-query shape (`/api/v2/data/dataflow/...`) AND the
   structure/discovery shape (`/api/v2/structure/dataflow/...?references=all`).
 
-### Live confirmation (Ovi, M1, this thread — 4 preflight modules run)
+### Live confirmation (Ovi, M1, this thread — 4 preflight modules run, re-run 3 Aug against the 13-currency expansion)
 
 All four current preflight scripts were run for real against the
 corrected endpoints, immediately closing the gap this entry originally
-flagged as open:
+flagged as open — and re-run again after the HKD/TWD/NOK expansion:
 
 - **`check_bis_cbpol_d.py`** — **all 12 REF_AREA codes PASS with
   `daily-resolution=True`**, real observation counts (6,775–24,850 per
   country) and current dates (latest = 2026-07-01 through 2026-07-29
-  depending on country). This resolves the "unplanned finding" flagged
-  below more favorably than the pre-fix web research suggested: the 4
-  central banks sampled from `data.bis.org`'s portal (GB/CH/NO/JP)
+  depending on country). Re-run 3 Aug: identical result, confirming
+  stability. This **fully closes** the "unplanned finding" flagged in the
+  original fix more favorably than the pre-fix web research suggested:
+  the 4 central banks sampled from `data.bis.org`'s portal (GB/CH/NO/JP)
   appeared to be Monthly-only from that sampling, but the real API query
   — with FREQ wildcarded, per the fix's own design — returns Daily data
-  for all 12, ECB/XM included. ADR-010's original "BIS is daily where
-  FRED is monthly" rationale is now empirically confirmed correct for the
-  full 12-CB set, not just asserted or partially contradicted.
-- **`check_bis_eer_weights.py --discover`** — succeeded, fetching 568,951
-  bytes of real dataflow structure from the corrected
+  for all 12, ECB/XM included, on both runs. **Answering the specific
+  question this entry originally deferred: no, the Monthly-vs-Daily
+  finding does not affect ADR-010 for any of the 12 CBs** — ADR-010's
+  original "BIS is daily where FRED is monthly" rationale is empirically
+  confirmed correct for the full set, not just asserted.
+- **`check_bis_eer_weights.py --discover`** — succeeded both runs,
+  fetching 568,951 real bytes of dataflow structure from the corrected
   `structure/dataflow/BIS/WS_EER/1.0` endpoint (was a 501 pre-fix).
-- **`check_bis_eer_weights.py`** — all 10 REF_AREA codes (the pre-
-  HKD/TWD/NOK-completion set) PASS, 182,410 bytes returned per check.
+- **`check_bis_eer_weights.py`** — first run (10 currencies, pre-HKD/TWD/
+  NOK): all 10 PASS, 182,410 bytes per check. **Re-run 3 Aug against the
+  full 13-currency expansion: all 13 PASS**, 237,188 bytes per check (the
+  larger response reflecting the wider currency key) — this closes the
+  "not yet re-run live against the 13-currency version" gap the previous
+  update to this entry left open.
 
 This confirms the endpoint/key construction is genuinely correct, not
 just plausible — the CBPOL script in particular had to correctly *parse*
 real response data to report per-country observation counts and dates,
 which a merely-reachable-but-malformed response could not have produced.
 
-### HKD/TWD/NOK added (Ovi, same thread, following up)
+### HKD/TWD/NOK added (Ovi, 1 Aug thread, following up) — now live-confirmed
 
-Separately, Ovi pointed out `BROAD_DOLLAR_REF_AREAS` in
-`check_bis_eer_weights.py` was still missing 3 currencies — a gap the 28
-Jul thread had explicitly flagged rather than guessed at ("Ovi's
-instruction was specifically MXN->IDR"). Added: HKD→HK, TWD→TW, NOK→NO,
-completing all 13 currencies of the *current* Broad Dollar basket design
+Ovi pointed out `BROAD_DOLLAR_REF_AREAS` in `check_bis_eer_weights.py`
+was still missing 3 currencies — a gap the 28 Jul thread had explicitly
+flagged rather than guessed at ("Ovi's instruction was specifically
+MXN->IDR"). Added: HKD→HK, TWD→TW, NOK→NO, completing all 13
+currencies of the *current* Broad Dollar basket design
 (`instruments_taxonomy.yaml`'s `dollar` + `dollar_basket` groups). While
 fixing this, found and corrected a second, structural issue: the
 endpoint's key was a hand-duplicated literal string separate from the
@@ -1209,28 +1216,76 @@ have left them permanently unfetched while `_check_one()` kept
 confidently reporting "not present," indistinguishable from a genuine API
 failure. The endpoint key is now built FROM `BROAD_DOLLAR_REF_AREAS
 .values()` (`"+".join(...)`), making this whole bug class structurally
-impossible going forward. **Not yet re-run live against the 13-currency
-version** — the live confirmation above covers the 10-currency set that
-was live-tested; the +3 expansion is code-fixed and test-verified
-(dynamic test `test_key_wildcards_freq_and_fixes_broad_basket` and a new
-explicit guard `test_hkd_twd_nok_completes_dollar_basket`) but not yet
-empirically re-confirmed.
+impossible going forward. **Confirmed live 3 Aug** (see above) — all 13
+currencies PASS against the real API.
+
+### TYPE decision (Ovi, 3 Aug 2026 thread) — Nominal, not Real
+
+Previously left deliberately wildcarded pending a decision. Now decided:
+**Nominal**. Two independent reasons converged: (1) DXY itself — the
+index this platform's Broad Dollar Index is explicitly designed as a
+companion/extension of (Architecture v2.0 §7.2) — is a nominal
+currency-value index, not inflation-adjusted; comparing Real EER against
+a Nominal DXY under one "Dollar strength" umbrella would conflate two
+different concepts. (2) BIS's own EER overview page
+(`data.bis.org/topics/EER`) states Daily-frequency EER data exists ONLY
+for Nominal indices, never Real ("the latter available only as nominal
+indices") — since this platform's Layer 2 anchors are specified at Daily
+cadence (Architecture v2.0 §7.2), Nominal is the only choice that can
+actually deliver that. Endpoint key's TYPE segment fixed to `N`; FREQ
+(previously fixed to `M`) is now wildcarded instead, mirroring the same
+reasoning already applied to `check_bis_cbpol_d.py` — request whatever
+frequency BIS actually has rather than assume, so genuinely-available
+daily data comes through without risking a false failure on currencies
+that may only have monthly EER. Constant renamed
+`BIS_EER_ENDPOINT_MONTHLY` → `BIS_EER_ENDPOINT` accordingly (no longer
+accurately "monthly-only"). **Not yet live-re-confirmed against this
+exact key shape** — the 3 Aug live confirmation above was against the
+prior `M..B.` key structure, before this decision was implemented.
+
+### Gate 1 (ADR-017/018 exact Broad Dollar weight components) — substantially advanced, not yet closed
+
+GMI v6 had framed this as possibly unresolvable via any API — "weights
+may be a documentation artifact, not necessarily a queryable SDMX
+series." This thread found the actual source: BIS's own
+`data.bis.org/topics/EER` page (server-rendered, unlike the SPA pages
+encountered elsewhere on this project) links directly, under its own
+"Methodology" section, to a downloadable weights table:
+`https://www.bis.org/statistics/eer/weightsb.xlsx` (Broad, 64 economies
+— confirmed the right one, since Narrow only covers 26/27 core economies
+and would exclude IDR/HKD/TWD). Confirmed reachable and genuinely an
+`.xlsx` (mime type `application/vnd.openxmlformats-officedocument.
+spreadsheetml.sheet`, not a redirect or error page) via `web_fetch` this
+thread. Also confirmed: weights are **time-varying on a 3-year basis**
+(vintages 1993-95 through 2017-19 per BIS's own FAQ; the 2017-19 vintage
+has been in continuous use for "the latest period" since, until BIS
+publishes the next update) — there is no single permanent "exact
+weight," but there is a specific, nameable current vintage.
+
+`check_bis_eer_weights.py` gained a new `--discover-weights` mode:
+downloads the file and reports its real sheet names, dimensions, a
+structural sample, and a scan for our own currency/REF_AREA codes —
+deliberately NOT assuming a row/column layout (openpyxl added as an
+explicit direct dependency, promoted from transitive the same way
+jsonschema was in Decision B Step 3). **Not yet run against the real
+file** — no sandbox on this project has network access to `bis.org`;
+tested only against a synthetic in-memory workbook constructed in the
+test suite, which validates the scanning logic itself but says nothing
+about BIS's actual internal layout. This is genuine progress (the file
+is located, confirmed real, and a tool exists to inspect it) but Gate 1
+is **not closed** — the exact weight value for each currency still
+requires a targeted extraction pass once the real layout is known from
+Ovi's next run.
 
 ### What this does NOT resolve
 
-Gate 1 (ADR-017/018 exact Broad Dollar basket weight *components*, as
-opposed to the EER index values themselves) remains open — per GMI v6's
-own framing, BIS's EER methodology publishes basket weights as a
-periodic Quarterly Review appendix, not necessarily a queryable SDMX
-series, and confirming the index is reachable does not change that; the
-568,951-byte `--discover` structure payload has not been manually
-inspected for a weight-bearing dimension. TYPE (Real vs Nominal) for the
-EER query remains deliberately wildcarded rather than decided. The
-13-currency EER expansion has not yet been live-re-run (see above). The
-production `bronze_bis_rates` ingester's own CSV-parsing path
-(`_parse_csv()`) has not been run end-to-end against a real BIS response
-— only the preflight scripts' lighter-weight parsing has been confirmed
-live; the two are different code paths.
+Gate 1's exact per-currency weight *values* (as opposed to locating and
+confirming the file) — see above, needs `--discover-weights` run for real
+first. The TYPE decision's new key shape has not been live-re-confirmed
+(see above). The production `bronze_bis_rates` ingester's own
+CSV-parsing path (`_parse_csv()`) has not been run end-to-end against a
+real BIS response — only the preflight scripts' lighter-weight parsing
+has been confirmed live; the two are different code paths.
 
 ### Verification
 
@@ -1258,7 +1313,16 @@ endpoint correctness itself was then independently confirmed a third way
 
 ---
 
-*Last updated: v1.13.2 — HKD/TWD/NOK added to `check_bis_eer_weights.py`'s
+*Last updated: v1.13.3 — Gate 1 (ADR-017/018) substantially advanced: BIS's
+actual Broad EER weights file located (data.bis.org/topics/EER's own
+Methodology section → bis.org/statistics/eer/weightsb.xlsx, confirmed
+real and reachable) with a new `--discover-weights` inspection mode
+(openpyxl). TYPE decided: Nominal (matches DXY; BIS confirms Daily EER
+exists only for Nominal). 13-currency EER expansion confirmed LIVE (3 Aug
+preflight re-run, 237,188 bytes, all 13 PASS) — closes the Monthly-
+vs-Daily/ADR-010 question definitively (all 12 CBs confirmed daily via
+live query). August 2026.
+Prior entry: v1.13.2 — HKD/TWD/NOK added to `check_bis_eer_weights.py`'s
 Broad Dollar basket (13/13 currencies complete); endpoint key refactored
 to derive from `BROAD_DOLLAR_REF_AREAS` rather than a hand-duplicated
 literal, closing that drift risk structurally. FIX BIS-1's core fix

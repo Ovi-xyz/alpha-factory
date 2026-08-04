@@ -1,5 +1,122 @@
 # CHANGELOG — Data Platform
 
+## v1.13.3 — Gate 1 Weights File Located, TYPE Decision (Nominal), 13-Currency Live Re-confirmation (Agustus 2026)
+
+Dokumen referensi: tidak ada decision document terpisah — kelanjutan
+langsung dari v1.13.2 dalam thread yang sama. Ovi meminta penyelesaian 3
+item yang masih terbuka: dampak temuan Monthly-vs-Daily terhadap
+ADR-010, Gate 1 (ADR-017/018 exact Broad Dollar weight components), dan
+keputusan TYPE (Real vs Nominal) untuk EER query.
+
+Total: **1 gap ditutup penuh** (13-currency EER live re-test, plus
+konfirmasi Monthly-vs-Daily tidak berdampak ke ADR-010 untuk CB manapun)
+| **1 progress substansial** (Gate 1 — file weight asli BIS ditemukan
+dan dikonfirmasi reachable, belum di-parse) | **1 keputusan arsitektur
+diambil** (TYPE=Nominal) | **1427 → 1432 passed / 0 failed / 0 error**.
+
+### CONFIRM BIS-1-cont [scripts/preflight] — 13-Currency EER Live Re-test + Penutupan Pertanyaan Monthly-vs-Daily/ADR-010
+
+Ovi menjalankan ulang preflight scripts terhadap kode v1.13.2. Hasil:
+**`check_bis_eer_weights.py` — seluruh 13 REF_AREA code PASS**, 237.188
+byte per check (naik dari 182.410 byte saat masih 10 currency —
+response lebih besar karena key lebih lebar). **`check_bis_cbpol_d.py`
+— hasil identik dengan run sebelumnya**, 12/12 `daily-resolution=True`,
+mengkonfirmasi stabilitas lintas run. Ini menutup gap "belum di-re-test
+terhadap 13 currency" dari v1.13.2 secara penuh, dan sekaligus **menjawab
+definitif pertanyaan yang dulu dibiarkan terbuka**: temuan Monthly-vs-
+Daily TIDAK berdampak ke rasional ADR-010 untuk CB manapun dari 12 CB —
+seluruhnya terkonfirmasi daily-resolution secara empiris pada dua run
+terpisah (1 Aug dan 3 Aug).
+
+### ADD Gate1 [scripts/preflight/check_bis_eer_weights.py, pyproject.toml] — File Weight BIS Asli Ditemukan (Belum Ditutup Penuh)
+
+**Root cause / temuan**: GMI v6 mengasumsikan weight components mungkin
+tidak bisa diakses via API apapun ("dokumentasi artifact, bukan queryable
+SDMX series"). Web research thread ini menemukan jawaban sebenarnya:
+halaman `data.bis.org/topics/EER` (server-rendered, berbeda dari
+halaman JS-SPA lain di proyek ini) link langsung, di section
+"Methodology"-nya sendiri, ke tabel weight yang bisa di-download:
+`https://www.bis.org/statistics/eer/weightsb.xlsx` (Broad, 64 economies
+— dikonfirmasi yang benar, karena Narrow hanya mencakup 26/27 economy
+inti dan akan mengecualikan IDR/HKD/TWD). Dikonfirmasi reachable dan
+genuinely .xlsx (mime type
+`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`,
+bukan redirect/error page) via `web_fetch`. Juga dikonfirmasi: weight
+bersifat **time-varying per 3 tahun** (vintage 1993-95 hingga 2017-19
+per FAQ resmi BIS; vintage 2017-19 dipakai terus-menerus untuk "periode
+terbaru" hingga update 3-tahunan berikutnya dipublikasikan) — tidak ada
+"exact weight" permanen tunggal, tapi ADA vintage spesifik yang bisa
+disebutkan.
+
+**Fix**: `check_bis_eer_weights.py` mendapat mode baru `--discover-weights`
+— download file, laporkan sheet name/dimension asli, sample struktur,
+dan scan untuk currency/REF_AREA code kita sendiri — sengaja TIDAK
+mengasumsikan layout row/column (menebak layout berisiko sama dengan
+masalah yang sudah 3x terjadi di thread BIS ini: WS_CBPOL_D, WS_EER_M,
+segment `structure/` yang hilang — tiga tebakan percaya diri yang
+ternyata salah). Pola two-phase discover-then-extract yang sama seperti
+`--discover` untuk struktur API. `openpyxl` dipromosikan dari transitive
+ke direct dependency eksplisit (pola yang sama seperti `jsonschema` di
+Decision B Step 3).
+
+**Belum ditutup**: TIDAK bisa parse isi xlsx sungguhan melalui tool yang
+tersedia — `web_fetch` mengembalikannya sebagai binary buram, dan
+`bis.org` tidak ada di network allowlist sandbox manapun di proyek ini.
+Ini progress nyata (file ditemukan, dikonfirmasi asli dan reachable)
+tapi BUKAN penutupan penuh — nilai weight exact per currency masih
+memerlukan seseorang dengan akses network untuk benar-benar membuka
+file-nya. `_discover_weights()` diuji hanya terhadap workbook sintetis
+di dalam test suite (membuktikan logic scanning-nya benar, bukan bahwa
+ia akan menemukan sesuatu yang berguna di layout asli BIS yang belum
+diketahui).
+
+### DECIDE TYPE [scripts/preflight/check_bis_eer_weights.py] — Nominal, Bukan Real
+
+**Keputusan**: TYPE dikunci ke Nominal, sebelumnya sengaja dibiarkan
+wildcard menunggu keputusan. Dua alasan independen yang saling
+memperkuat: (1) DXY sendiri — index yang secara eksplisit menjadi basis
+desain Broad Dollar Index platform ini (Architecture v2.0 §7.2) —
+adalah index nominal, bukan inflation-adjusted; memakai Real EER untuk
+Broad Dollar sementara DXY tetap Nominal akan membandingkan dua konsep
+berbeda di bawah satu payung "kekuatan Dollar". (2) Halaman
+`data.bis.org/topics/EER` yang sama menyatakan data EER frekuensi Daily
+HANYA tersedia untuk index Nominal, tidak pernah Real — dan Layer 2
+anchor platform ini didesain cadence Daily (Architecture v2.0 §7.2), jadi
+Nominal adalah satu-satunya pilihan yang bisa benar-benar memberikan itu.
+
+**Fix**: FREQ diubah dari fixed `M` menjadi wildcard (mencerminkan logic
+yang sama persis dengan `check_bis_cbpol_d.py`: minta frekuensi apapun
+yang BIS benar-benar punya per negara, bukan asumsi, sehingga data daily
+yang genuinely tersedia bisa masuk tanpa risiko false failure pada
+currency yang mungkin hanya punya EER bulanan). Constant di-rename
+`BIS_EER_ENDPOINT_MONTHLY` → `BIS_EER_ENDPOINT` (sudah tidak akurat
+disebut "monthly-only"). Key berubah dari `M..B.` menjadi `.N.B.`.
+
+**Belum diverifikasi live**: konfirmasi live 13-currency di atas memakai
+struktur key `M..B.` yang lama, sebelum keputusan TYPE ini
+diimplementasikan. Re-test terhadap key `.N.B.` yang baru adalah langkah
+berikutnya yang jelas.
+
+**Diverifikasi empiris**: diuji penuh di sandbox clone (Python 3.12)
+sebelum diterapkan ke repo nyata. Full suite: 1427 → 1432 passed, 0
+failed (5 test baru: 1 untuk URL file weight, 4 untuk `_discover_weights()`
+— download failure, unparseable content, synthetic-workbook scan,
+CLI wiring). Coverage: 81.43% (tidak berubah, > gate 80%). Gates
+G-1/G-2/G-3/G-8 semua re-run bersih. Diterapkan ke repo nyata via
+whole-file overwrite (bukan targeted edit) mengingat skala diff
+(~330 baris di script utama) — setelah insiden ambiguous-match di
+v1.13.2, ini dinilai jalur risiko lebih rendah untuk diff seukuran ini,
+bukan jalan pintas dari verifikasi.
+
+**Catatan proses**: dev-log thread ini sebelumnya salah menggabungkan
+konten v1.13.1/v1.13.2/v1.13.3 ke satu file yang terus di-edit,
+melanggar konvensi proyek sendiri ("satu file dev-log per rilis, tidak
+pernah dimodifikasi setelah dibuat"). Diperbaiki: dipecah menjadi 3 file
+terpisah, file gabungan yang salah dipindah ke `dev-log/archive/`
+(bukan dihapus). Dicatat di sini untuk transparansi, bukan disembunyikan.
+
+---
+
 ## v1.13.2 — FIX BIS-1 Confirmed Live + HKD/TWD/NOK Dollar Basket Completion (Agustus 2026)
 
 Dokumen referensi: tidak ada decision document terpisah — kelanjutan

@@ -1,6 +1,19 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.13.2"
+version = "1.13.3"
+# FIX BIS-1, Gate 1 progress + TYPE decision (Ovi, 3 Aug 2026): Gate 1
+# substantially advanced -- BIS's actual Broad EER weights file located
+# (data.bis.org/topics/EER's own Methodology section links directly to
+# bis.org/statistics/eer/weightsb.xlsx, confirmed real and reachable).
+# check_bis_eer_weights.py gets a new --discover-weights mode (openpyxl,
+# promoted to explicit dependency below). TYPE decided: Nominal, not Real
+# (matches DXY's own nominal nature; BIS confirms Daily EER exists only
+# for Nominal). FREQ now wildcarded (was fixed M) so daily data comes
+# through where it exists. Endpoint renamed BIS_EER_ENDPOINT_MONTHLY ->
+# BIS_EER_ENDPOINT (no longer accurately "monthly-only"). PATCH bump:
+# bug/gap-closure work, no interface-contract or Silver/Gold schema
+# change. See CHANGELOG.md and KNOWN_RISKS.md RISK-16 for full detail.
+#
 # FIX BIS-1 continued (Ovi, same thread): HKD/TWD/NOK added to
 # check_bis_eer_weights.py's Broad Dollar basket (13/13 currencies
 # complete); endpoint key refactored to derive from
@@ -80,6 +93,12 @@ pyyaml = "*"
 # dependency — declare what you import, matching the Poetry-single-
 # source-of-truth principle Decision A established.
 jsonschema = ">=4.0"
+# ADD FIX BIS-1 continued (Ovi, 3 Aug 2026): same treatment as jsonschema
+# above — was resolving only transitively (via polars[all]'s optional
+# read_excel backend), zero explicit import anywhere until
+# check_bis_eer_weights.py::_discover_weights() needed it directly to
+# inspect BIS's published Broad EER weights file (Gate 1, ADR-017/018).
+openpyxl = ">=3.1"
 tenacity = "*"
 python-dotenv = "*"
 hmmlearn = "*"

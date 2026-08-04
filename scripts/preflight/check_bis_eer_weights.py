@@ -51,28 +51,65 @@ directory: this sandbox's network allowlist has no route to
 stats.bis.org. Authoring does not require network access; running it
 does.
 
-What this script CANNOT resolve (unchanged from before -- documented so
-this isn't oversold as closing Gate 1 completely): BIS's own EER
-methodology page states basket WEIGHTS are revised roughly every 2-3
-years and were historically published as an appendix table in periodic
-BIS Quarterly Review papers -- a documentation artifact, not necessarily
-a queryable SDMX data series alongside the index values themselves. This
-script confirms the EER INDEX time series is reachable and correctly
-shaped; it does NOT confirm per-currency weight COMPONENTS are available
-in the same machine-readable form. If --discover finds no weight-bearing
-series in the dataflow's own dimension list, the honest next step is
-manually locating BIS's current weights publication (linked from
-https://www.bis.org/statistics/eer.htm) rather than assuming the API
-alone will yield it.
+UPD (Ovi, 3 Aug 2026 thread): Gate 1 substantially advanced. BIS's own
+data.bis.org/topics/EER page (server-rendered, unlike the SPA pages
+elsewhere on this project) links directly, under its own "Methodology"
+section, to a downloadable weights table:
+https://www.bis.org/statistics/eer/weightsb.xlsx (Broad, 64 economies --
+the one relevant here, since Narrow only covers 26/27 core economies and
+IDR/HKD/TWD would not be in it). Confirmed reachable and genuinely an
+.xlsx (mime type application/vnd.openxmlformats-officedocument.
+spreadsheetml.sheet, not a redirect or error page) -- Gate 1's weight
+COMPONENTS are real and machine-readable, just not via the SDMX API
+check_bis_eer_weights.py otherwise uses; they're a plain file download.
+Also confirmed via the same page: weights are TIME-VARYING on a 3-year
+basis (vintages 1993-95 through 2017-19 per BIS's own FAQ; the 2017-19
+vintage has been in continuous use for "the latest period" since, until
+BIS publishes the next 3-year update) -- there is no single permanent
+"exact weight," but there IS a specific, nameable current vintage, which
+is what --discover-weights below is for. See _discover_weights() -- same
+two-phase discover-then-extract pattern as --discover for the API
+structure, since this thread cannot inspect the file's actual internal
+layout (no network route to bis.org from any sandbox on this project;
+Ovi's next run on the M1 is what actually reveals row/column structure
+for a targeted extraction pass).
+
+What this script still CANNOT resolve on its own: the exact current
+weight VALUE for each of our 13 currencies specifically requires the
+file's internal layout to be known, which --discover-weights surfaces
+but does not yet parse into named values (deliberately -- guessing a
+layout risks silently extracting the wrong cell, which is worse than not
+extracting at all). A targeted extraction pass is the natural next step
+once this has been run for real.
+
+TYPE decision (Ovi, this thread -- was previously left wildcarded,
+pending): NOMINAL, not Real. Two independent reasons converged: (1) DXY
+itself -- the index this platform's Broad Dollar Index is explicitly
+designed as a companion/extension of (Architecture v2.0 §7.2) -- is a
+nominal currency-value index, not inflation-adjusted; using Real EER for
+Broad Dollar while DXY stays Nominal would compare two conceptually
+different things under one "Dollar strength" umbrella. (2) BIS's own EER
+overview page states Daily-frequency EER data exists ONLY for Nominal
+indices, never Real ("the latter available only as nominal indices") --
+since this platform's Layer 2 anchors are specified at Daily cadence
+(Architecture v2.0 §7.2: "Cadence: Daily (same as forex)"), Nominal is
+the only choice that can actually deliver that. FREQ is now wildcarded
+(empty segment) rather than hardcoded to M or D -- mirroring the exact
+same reasoning already applied to check_bis_cbpol_d.py's key: request
+whatever frequency BIS actually has per country rather than assume, and
+let genuinely-available daily data come through where it exists without
+risking a false failure on currencies that may only have monthly EER.
 
 Usage:
     python scripts/preflight/check_bis_eer_weights.py
     python scripts/preflight/check_bis_eer_weights.py --discover
+    python scripts/preflight/check_bis_eer_weights.py --discover-weights
 
 Exit code 0 = EER index data returned for all currencies in the Broad
 Dollar basket. Exit code 1 = at least one reference area failed, or
 (--discover) no weight-bearing series could be identified in the
-dataflow structure.
+dataflow structure, or (--discover-weights) the weights file could not
+be downloaded/parsed as xlsx.
 """
 
 from __future__ import annotations
@@ -121,9 +158,21 @@ load_dotenv()
 # and Nominal) since neither this platform's Broad Dollar Index design
 # nor Gate 1 has settled which one it wants; narrowing that is a separate
 # call, not bundled into this endpoint fix. BASKET=B (broad), matching
-# "Broad Dollar Index" directly. Not live-tested from this sandbox (no
-# route to stats.bis.org in any sandbox on this project) -- run for real
-# to close the loop.
+# "Broad Dollar Index" directly. CONFIRMED LIVE (Ovi, M1, this thread):
+# --discover fetched 568951 bytes of real dataflow structure; the data
+# query returned 182410 bytes with all 10 (now 13) REF_AREA codes
+# present.
+#
+# FIX (Ovi, this thread): endpoint key is now BUILT FROM
+# BROAD_DOLLAR_REF_AREAS.values() rather than a separately hardcoded
+# literal string. The literal-string version this replaces is exactly
+# how the HKD/TWD/NOK gap happened in the first place -- and how it could
+# have silently recurred: adding entries to the dict alone, without this
+# change, would leave them permanently unfetched while _check_one() keeps
+# confidently reporting "not present" -- indistinguishable from a genuine
+# API failure. Building the key from the dict's own values makes this
+# whole bug class structurally impossible from here on; the dict is now
+# the single source of truth.
 # Architecture v2.0 §7.2 BIS_WEIGHTS currencies, MXN removed / IDR added
 # (28 Jul 2026); HKD/TWD/NOK added (Ovi, this thread) to complete the
 # *current* Broad Dollar basket design per instruments_taxonomy.yaml's
@@ -158,15 +207,35 @@ BROAD_DOLLAR_REF_AREAS: dict[str, str] = {
 # reporting "not present" -- indistinguishable from a genuine API
 # failure. This makes that whole bug class structurally impossible from
 # here on; the dict above is the only place currency membership is
-# declared. CONFIRMED LIVE (Ovi, M1, this thread, 10-currency version
-# before this expansion): --discover fetched 568951 bytes of real
-# dataflow structure; the data query returned 182410 bytes with all 10
-# REF_AREA codes present. Not yet re-run against the 13-currency version.
-BIS_EER_ENDPOINT_MONTHLY = (
+# declared. CONFIRMED LIVE (Ovi, M1, 1 Aug 2026, 10-currency M..B. key):
+# --discover fetched 568951 bytes of real dataflow structure; the data
+# query returned 182410 bytes with all 10 REF_AREA codes present.
+# RE-CONFIRMED LIVE (Ovi, M1, 3 Aug 2026, full 13-currency version): all
+# 13 REF_AREA codes PASS, 237188 bytes returned per check -- the HKD/TWD/
+# NOK expansion is now empirically confirmed working live, not just
+# code-fixed and test-verified.
+#
+# UPD (Ovi, same 3 Aug thread): renamed from BIS_EER_ENDPOINT_MONTHLY --
+# TYPE is now fixed to N (Nominal, see module docstring for the two-part
+# rationale) and FREQ is now wildcarded rather than hardcoded to M, so
+# "_MONTHLY" was no longer an accurate name. Key changed from "M..B." to
+# ".N.B." -- FREQ wildcarded (was fixed M), TYPE fixed to N (was
+# wildcarded). Not yet re-confirmed live against this exact key shape --
+# the 3 Aug confirmation above was against the prior M..B. key structure.
+BIS_EER_ENDPOINT = (
     "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_EER/1.0/"
-    "M..B." + "+".join(BROAD_DOLLAR_REF_AREAS.values())
+    ".N.B." + "+".join(BROAD_DOLLAR_REF_AREAS.values())
 )
 BIS_EER_DATAFLOW_STRUCTURE_URL = "https://stats.bis.org/api/v2/structure/dataflow/BIS/WS_EER/1.0"
+
+# Gate 1 (ADR-017/018): the actual weight COMPONENTS, found this thread --
+# not a queryable SDMX series, but a plain file download linked from BIS's
+# own methodology page (data.bis.org/topics/EER). Broad (64 economies),
+# not Narrow (26/27 -- would not include IDR/HKD/TWD). Confirmed reachable
+# and genuinely an .xlsx this thread (mime type verified); internal layout
+# (which sheet/row/column holds which currency's weight) not yet known --
+# see _discover_weights().
+BIS_EER_WEIGHTS_BROAD_URL = "https://www.bis.org/statistics/eer/weightsb.xlsx"
 
 
 def _fetch_csv(url: str) -> str:
@@ -182,7 +251,7 @@ def _fetch_csv(url: str) -> str:
 
 def _check_one(ref_area: str) -> tuple[bool, str]:
     try:
-        text = _fetch_csv(BIS_EER_ENDPOINT_MONTHLY)
+        text = _fetch_csv(BIS_EER_ENDPOINT)
     except Exception as e:
         return False, f"request raised: {e}"
 
@@ -214,14 +283,99 @@ def _discover() -> int:
     return 0
 
 
+def _discover_weights() -> int:
+    """Download BIS's actual published Broad EER weights file and print its
+    real internal structure -- Gate 1's answer, found this thread: weights
+    are NOT in the SDMX API at all, they're a plain .xlsx download linked
+    from data.bis.org/topics/EER's own Methodology section. This function
+    does NOT assume a row/column layout (that would just be a new version
+    of the same guessing problem this whole thread has been fixing) -- it
+    downloads, opens the workbook, and reports sheet names/dimensions plus
+    a structural sample and a scan for our own currency/REF_AREA codes, so
+    a follow-up pass can write targeted extraction logic once the real
+    layout is confirmed. Same two-phase discover-then-extract pattern as
+    --discover for the API structure itself.
+    """
+    try:
+        import httpx
+        resp = httpx.get(BIS_EER_WEIGHTS_BROAD_URL, timeout=30.0, follow_redirects=True)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"FAIL: could not download weights file: {e}")
+        return 1
+
+    print(f"Downloaded {len(resp.content)} bytes from {BIS_EER_WEIGHTS_BROAD_URL}")
+
+    try:
+        from io import BytesIO
+        from openpyxl import load_workbook
+        wb = load_workbook(BytesIO(resp.content), read_only=True, data_only=True)
+    except Exception as e:
+        print(f"FAIL: downloaded but could not parse as xlsx: {e}")
+        return 1
+
+    print(f"Sheets found: {wb.sheetnames}")
+
+    # Search for our own currency/REF_AREA codes anywhere in each sheet's
+    # first 200 rows -- bounded scan, since we don't know the layout and
+    # some of these weight files span decades of vintages.
+    target_codes = set(BROAD_DOLLAR_REF_AREAS.keys()) | set(BROAD_DOLLAR_REF_AREAS.values())
+    any_matches = False
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        print(f"\n--- Sheet {sheet_name!r}: {ws.max_row} rows x {ws.max_column} cols ---")
+
+        sample_rows = min(10, ws.max_row or 0)
+        sample_cols = min(15, ws.max_column or 0)
+        if sample_rows and sample_cols:
+            print(f"First {sample_rows} rows x {sample_cols} cols:")
+            for row in ws.iter_rows(min_row=1, max_row=sample_rows, max_col=sample_cols, values_only=True):
+                print(f"  {row}")
+
+        scan_rows = min(200, ws.max_row or 0)
+        matches: list[tuple[int, int, object]] = []
+        if scan_rows:
+            for row_idx, row in enumerate(
+                ws.iter_rows(min_row=1, max_row=scan_rows, values_only=True), start=1
+            ):
+                for col_idx, cell in enumerate(row, start=1):
+                    if cell is not None and str(cell).strip() in target_codes:
+                        matches.append((row_idx, col_idx, cell))
+        if matches:
+            any_matches = True
+            print(f"Currency/REF_AREA code matches (row, col, value): {matches[:40]}")
+        else:
+            print(f"No direct currency-code matches in the first {scan_rows} rows "
+                  f"-- this sheet may use full country names instead of codes, "
+                  f"or the data may start further down.")
+
+    wb.close()
+
+    if not any_matches:
+        print("\nNo sheet matched a currency/REF_AREA code directly in the scanned")
+        print("range. The file may use country names or a different code convention")
+        print("-- inspect the printed row samples above manually before writing any")
+        print("targeted extraction logic.")
+
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--discover", action="store_true",
         help="Fetch the WS_EER dataflow structure instead of querying index values",
     )
+    parser.add_argument(
+        "--discover-weights", action="store_true",
+        help="Download and inspect BIS's published Broad EER weights xlsx (Gate 1)",
+    )
     parser.add_argument("--currency", default=None, help="Only check one currency (e.g. KRW)")
     args = parser.parse_args()
+
+    if args.discover_weights:
+        return _discover_weights()
 
     if args.discover:
         return _discover()
@@ -247,9 +401,9 @@ def main() -> int:
         return 1
 
     print(f"All {len(targets)} currencies' EER index data reachable.")
-    print("NOTE: this confirms INDEX availability only -- see module docstring")
-    print("for why weight COMPONENTS (Gate 1's actual blocker) may still need")
-    print("manual sourcing from BIS's published methodology tables.")
+    print("NOTE: this confirms INDEX availability only. Gate 1's actual weight")
+    print("COMPONENTS live in a separate file, not this API -- run with")
+    print("--discover-weights to fetch and inspect BIS's published Broad weights.")
     return 0
 
 

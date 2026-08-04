@@ -1,3 +1,13 @@
+> **SUPERSEDED — do not use.** This file incorrectly merged three
+> separate releases (v1.13.1, v1.13.2, v1.13.3) into one continuously-
+> edited dev-log entry, violating this project's own "one file per
+> release, never modified after creation" convention. Archived here for
+> audit-trail continuity rather than deleted. See the proper per-release
+> entries instead:
+> - `dev-log/2026-08-01-bis-endpoint-root-cause-fix.md` (v1.13.1)
+> - `dev-log/2026-08-02-bis-live-confirmation-dollar-basket-completion.md` (v1.13.2)
+> - `dev-log/2026-08-03-bis-gate1-weights-file-type-decision.md` (v1.13.3)
+
 # 2026-08-02 — BIS CBPOL/EER Endpoint Root-Cause Fix (FIX BIS-1)
 
 **Format note:** continuing the one-file-per-thread dev-log convention.
