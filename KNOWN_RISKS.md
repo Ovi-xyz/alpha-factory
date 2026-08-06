@@ -1239,9 +1239,15 @@ frequency BIS actually has rather than assume, so genuinely-available
 daily data comes through without risking a false failure on currencies
 that may only have monthly EER. Constant renamed
 `BIS_EER_ENDPOINT_MONTHLY` → `BIS_EER_ENDPOINT` accordingly (no longer
-accurately "monthly-only"). **Not yet live-re-confirmed against this
-exact key shape** — the 3 Aug live confirmation above was against the
-prior `M..B.` key structure, before this decision was implemented.
+accurately "monthly-only"). **Live-re-confirmed 4 Aug 2026** — Ovi
+re-ran `check_bis_eer_weights.py` against the current (`.N.B.`,
+wildcarded FREQ) code: all 13 currencies PASS at 3,813,875 bytes per
+currency, ~16x the 237,188 bytes recorded above under the old `M..B.`
+key. That jump is exactly what wildcarding FREQ should produce (daily
+instead of monthly-only data coming through) and is itself evidence
+the new key shape is live and working as designed, not just reachable.
+Full detail:
+`dev-log/2026-08-04-gate1-live-confirmation-poetry-lock-fix.md`.
 
 ### Gate 1 (ADR-017/018 exact Broad Dollar weight components) — substantially advanced, not yet closed
 
@@ -1267,25 +1273,35 @@ downloads the file and reports its real sheet names, dimensions, a
 structural sample, and a scan for our own currency/REF_AREA codes —
 deliberately NOT assuming a row/column layout (openpyxl added as an
 explicit direct dependency, promoted from transitive the same way
-jsonschema was in Decision B Step 3). **Not yet run against the real
-file** — no sandbox on this project has network access to `bis.org`;
-tested only against a synthetic in-memory workbook constructed in the
-test suite, which validates the scanning logic itself but says nothing
-about BIS's actual internal layout. This is genuine progress (the file
-is located, confirmed real, and a tool exists to inspect it) but Gate 1
-is **not closed** — the exact weight value for each currency still
-requires a targeted extraction pass once the real layout is known from
-Ovi's next run.
+jsonschema was in Decision B Step 3).
+**Run against the real file 4 Aug 2026** — Ovi ran `--discover-weights`
+on the M1 (the first sandbox on this project with a route to
+`bis.org`): `weightsb.xlsx` downloaded clean (492,941 bytes), 10
+sheets (`1993_1995` through `2020_2022`, confirming the stated 3-year
+vintage cadence directly — no vintage newer than 2020-22 exists yet).
+Every sheet is a symmetric "who weights whom" matrix (row = country,
+column = currency being weighted, cell = percent weight); the scan
+found all 13 `BROAD_DOLLAR_REF_AREAS` codes present as both row and
+column entries, at identical positions, in every one of the 10 sheets.
+This is genuine progress (the file is located, confirmed real, AND its
+internal layout is now fully characterized against the real data, not
+just a synthetic test workbook) but Gate 1 is **still not closed** —
+the scan gives coordinates, not values, and doesn't itself locate the
+US row (not one of the 13 target codes) whose weights-on-partners are
+what the Broad Dollar Index actually needs. The targeted extraction
+pass — find the US row, read its 13 target-column values, wire into
+`BIS_WEIGHTS` — is unblocked but not started. Full detail:
+`dev-log/2026-08-04-gate1-live-confirmation-poetry-lock-fix.md`.
 
 ### What this does NOT resolve
 
-Gate 1's exact per-currency weight *values* (as opposed to locating and
-confirming the file) — see above, needs `--discover-weights` run for real
-first. The TYPE decision's new key shape has not been live-re-confirmed
-(see above). The production `bronze_bis_rates` ingester's own
-CSV-parsing path (`_parse_csv()`) has not been run end-to-end against a
-real BIS response — only the preflight scripts' lighter-weight parsing
-has been confirmed live; the two are different code paths.
+Gate 1's exact per-currency weight *values* — the file's layout is now
+fully known (see above), but the values themselves have not been
+extracted into `BIS_WEIGHTS`. The production `bronze_bis_rates`
+ingester's own CSV-parsing path (`_parse_csv()`) has not been run
+end-to-end against a real BIS response — only the preflight scripts'
+lighter-weight parsing has been confirmed live; the two are different
+code paths.
 
 ### Verification
 
@@ -1313,7 +1329,17 @@ endpoint correctness itself was then independently confirmed a third way
 
 ---
 
-*Last updated: v1.13.3 — Gate 1 (ADR-017/018) substantially advanced: BIS's
+*Last updated: v1.13.4 — Gate 1 discovery phase live-confirmed on the
+M1: `weightsb.xlsx` downloaded for real (492,941 bytes, 10 sheets,
+1993-95 through 2020-22), all 13 target currency codes located in
+every sheet — layout now fully known, values not yet extracted (Gate
+1 stays open). TYPE=Nominal / `.N.B.` key shape live-confirmed
+(3,813,875 bytes per currency, ~16x the prior monthly-restricted
+figure). Unrelated: `poetry.lock` content-hash desync found and fixed
+(stale since the 3 Aug openpyxl edit; 113/113 packages unchanged, only
+the hash line differed). 1432 passed / 0 failed / 0 error, coverage
+81.43% unchanged. August 2026.
+Prior entry: v1.13.3 — Gate 1 (ADR-017/018) substantially advanced: BIS's
 actual Broad EER weights file located (data.bis.org/topics/EER's own
 Methodology section → bis.org/statistics/eer/weightsb.xlsx, confirmed
 real and reachable) with a new `--discover-weights` inspection mode

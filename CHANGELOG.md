@@ -1,5 +1,119 @@
 # CHANGELOG — Data Platform
 
+## v1.13.4 — Gate 1 Discovery Phase Live-Confirmed, Key Shape `.N.B.` Terverifikasi, poetry.lock Diperbaiki (Agustus 2026)
+
+Dokumen referensi: tidak ada decision document terpisah — kelanjutan
+langsung dari v1.13.3 dalam thread yang sama. Ovi menyerahkan log
+preflight M1 baru (4 Agustus 2026) sebagai bukti project-knowledge, dan
+terpisah melaporkan "isu baru pyproject.toml" tanpa pesan error
+terlampir.
+
+Total: **2 item dari RISK-16 ditutup** (Gate 1 discovery phase
+live-confirmed; key shape `.N.B.` live-re-confirmed) | **1 bug
+build-tooling ditemukan dan diperbaiki** (poetry.lock content-hash
+stale) | **1432 passed / 0 failed / 0 error** (baseline tidak berubah).
+
+### CONFIRM Gate1 [scripts/preflight/check_bis_eer_weights.py, KNOWN_RISKS.md] — `--discover-weights` Dijalankan Nyata di M1, Layout File Sekarang Diketahui Penuh
+
+Ovi menjalankan `check_bis_eer_weights.py --discover-weights` di M1 —
+pertama kalinya sandbox manapun di proyek ini punya rute ke `bis.org`.
+Hasil: `weightsb.xlsx` terunduh bersih (492.941 byte), 10 sheet
+(`1993_1995` hingga `2020_2022`, mengkonfirmasi langsung siklus revisi
+3-tahunan yang disebutkan FAQ BIS — belum ada vintage lebih baru dari
+2020-22). Setiap sheet adalah matrix simetris "siapa memberi bobot ke
+siapa" (baris = negara, kolom = mata uang yang diberi bobot, cell =
+persentase bobot); scan menemukan seluruh 13 kode
+`BROAD_DOLLAR_REF_AREAS` hadir sebagai baris MAUPUN kolom, di posisi
+identik, di seluruh 10 sheet.
+
+**Progress nyata, belum penutupan penuh**: scan ini membuktikan layout
+persis seperti yang didesain `_discover_weights()` untuk dideteksi
+tanpa asumsi, dan memberikan koordinat (row, col) yang diperlukan
+untuk ekstraksi tertarget. TIDAK memberikan nilai weight aktual untuk
+di-wire ke `BIS_WEIGHTS` — masih perlu pass lanjutan yang (a)
+menemukan baris "US" secara spesifik (bukan salah satu dari 13 kode
+target, sehingga tidak muncul di scan ini), dan (b) membaca nilai
+baris tersebut di 13 kolom target. Gate 1 tetap terbuka, bergeser dari
+"file ditemukan, layout tidak diketahui" menjadi "file ditemukan,
+layout terkarakterisasi penuh, siap untuk ekstraksi."
+
+### CONFIRM TypeKey [scripts/preflight/check_bis_eer_weights.py, KNOWN_RISKS.md] — Key Shape `.N.B.` Live-Terverifikasi
+
+Ovi menjalankan ulang `check_bis_eer_weights.py` polos (tanpa flag).
+Seluruh 13 currency PASS — tapi pada **3.813.875 byte per currency**,
+~16x dari 237.188 byte yang tercatat untuk check 13-currency yang sama
+di bawah key `M..B.` lama (KNOWN_RISKS.md, 3 Agustus). Lonjakan
+tersebut persis yang seharusnya dihasilkan wildcard FREQ (dibanding
+fix ke `M`): query sekarang mengambil frekuensi apapun yang
+benar-benar dimiliki BIS per negara — untuk 13 currency ini, itu
+daily — bukan dibatasi artifisial ke monthly. Ini menutup gap "belum
+live-re-confirmed terhadap key shape ini" dari v1.13.3 secara penuh;
+bukan sekadar re-test perilaku lama, delta byte-count itu sendiri
+adalah bukti key shape baru melakukan sesuatu yang struktural berbeda,
+ke arah yang diharapkan.
+
+`--discover` (structure endpoint) dan `check_bis_cbpol_d.py` juga
+dijalankan ulang: 568.951 byte dan 12/12 `daily-resolution=True` —
+byte-count structure endpoint identik dengan angka 3 Agustus yang
+sudah tercatat di KNOWN_RISKS.md, dan rentang obs-count CBPOL_D
+(minimum 6.775 KR, maksimum 24.850 JP) serta rentang tanggal terkini
+(hingga 2026-07-29) keduanya cocok persis dengan yang sudah tercatat.
+Konsisten dengan latency T+1–T+3 yang dinyatakan BIS sendiri, bukan
+artefak re-run — tidak ada observasi baru yang terpropagasi dalam
+selang satu hari untuk kedua belas central bank. Dibaca sebagai
+konfirmasi stabilitas, bukan informasi baru.
+
+### FIX poetry.lock [pyproject.toml, poetry.lock] — Content-Hash Stale, Ditemukan dan Diperbaiki
+
+**Root cause**: "isu baru pyproject.toml" yang dilaporkan Ovi tidak
+disertai error, jadi investigasi dimulai dari file itu sendiri, bukan
+stack trace. Komentar dependency `openpyxl` 3 Agustus (lihat v1.13.3)
+sudah memflag, di teksnya sendiri, bahwa edit pyproject.toml saja
+tidak akan meregenerasi `poetry.lock`, dan tidak ada session sampai
+titik itu yang punya akses shell untuk verifikasi atau perbaikan.
+Dikonfirmasi via timestamp modifikasi `poetry.lock` (31 Juli, satu
+hari SETELAH penghapusan tvdatafeed 30 Juli — run `poetry lock` manual
+sudah menghapus tvdatafeed dengan benar) yang mendahului edit
+`openpyxl` 3 Agustus. Direproduksi error sebenarnya di sandbox
+terisolasi (poetry 2.4.1, akses network PyPI) terhadap file live yang
+persis sama:
+
+```
+Error: pyproject.toml changed significantly since poetry.lock was last
+generated. Run `poetry lock` to fix the lock file.
+```
+
+**Fix**: `tvdatafeed` sudah benar tidak ada di lock (run 31 Juli sudah
+menanganinya); desync murni content-hash yang belum diregenerasi
+setelah edit `openpyxl` berikutnya. Diregenerasi dengan `poetry lock`;
+di-diff old vs new lock di level package: **113/113 package identik
+nama dan versi** — hanya baris metadata `content-hash` yang berubah.
+Tidak ada drift pandas/numpy/dll, tidak ada yang ter-upgrade diam-diam.
+Diterapkan ke repo live sebagai perubahan `edit_file` satu baris
+(dry-run di-diff, diterapkan, dibaca ulang, di-diff ulang terhadap
+copy yang sudah diverifikasi sandbox — byte-identical). Catatan
+provenance yang sudah tidak akurat ("not something this session can
+execute") di komentar penghapusan tvdatafeed juga dikoreksi di tempat
+untuk mencatat fix, metode, dan tanggal yang sebenarnya.
+
+**Diverifikasi empiris**: clone GitHub main (`fce8be9`) di-spot-check
+terhadap state lokal yang sudah diketahui benar sebelum dipercaya:
+versi 1.13.3, tvdatafeed sudah diarsipkan dengan benar, HKD/TWD/NOK
+hadir di kedua file config instrumen, `openpyxl` dideklarasikan —
+semua cocok. Hanya hash `poetry.lock` yang stale di sana juga, persis
+seperti diharapkan (fix belum di-push). `pyproject.toml`/`poetry.lock`
+yang sudah diverifikasi di-overlay ke clone tersebut dan dijalankan
+sungguhan, bukan dry-run: `poetry install --with dev` → seluruh 113
+package, `alpha-factory 1.13.4` terinstall editable, bersih. `poetry
+run pytest tests/ -q` → **1432 passed, 0 failed, 0 error** — cocok
+persis dengan `tests/COUNT_BASELINE.txt` (tidak berubah rilis ini,
+tidak ada test ditambah/dihapus). Coverage: 81.43%, tidak berubah,
+masih di atas gate 80%. Gates G-1 (164 file, 0 syntax error), G-2 (0
+f-string SQL), G-3 (699 symbols, tidak terpengaruh), G-8 (0
+glob-scope violations) semua di-re-run bersih terhadap install nyata.
+
+---
+
 ## v1.13.3 — Gate 1 Weights File Located, TYPE Decision (Nominal), 13-Currency Live Re-confirmation (Agustus 2026)
 
 Dokumen referensi: tidak ada decision document terpisah — kelanjutan

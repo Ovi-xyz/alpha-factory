@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.13.3"
+version = "1.13.4"
 # FIX BIS-1, Gate 1 progress + TYPE decision (Ovi, 3 Aug 2026): Gate 1
 # substantially advanced -- BIS's actual Broad EER weights file located
 # (data.bis.org/topics/EER's own Methodology section links directly to
@@ -64,10 +64,17 @@ yfinance = ">=0.2.36"
 # the tested ChainedAdapter fallback for IDX30 and is now its sole source.
 # TvDatafeedAdapter/TvDatafeedSessionManager archived to scripts/archive/
 # (see scripts/archive/README.md). See KNOWN_RISKS.md RISK-1 (RESOLVED).
-# NOTE: this pyproject.toml edit alone does not regenerate poetry.lock --
-# `poetry lock` (or `poetry install`) must be run locally to drop the
-# tvdatafeed entry and its transitive deps from the lockfile; not something
-# this session can execute (no shell access to Ovi's actual Poetry env).
+# NOTE: this pyproject.toml edit alone did not regenerate poetry.lock --
+# confirmed via a local `poetry lock` run 31 Jul 2026 that tvdatafeed and
+# its transitive deps WERE dropped then. The lock went stale again after
+# the 3 Aug openpyxl promotion below (content-hash no longer matched
+# pyproject.toml -- `poetry install`/`poetry check` hard-failed:
+# "pyproject.toml changed significantly since poetry.lock was last
+# generated"). FIXED 4 Aug 2026 via Filesystem MCP connector: regenerated
+# in an isolated sandbox with PyPI network access (poetry 2.4.1) against
+# the exact live files; `poetry check` + `poetry install --no-root
+# --dry-run` both verified clean. Diffed old vs new lock: 113/113 packages
+# identical name+version -- only the content-hash line changed.
 pandas = ">=2.0"
 # FIX ADR-020 (GMI_Decision_Document_v2.docx, 2026-07-11): pandas-ta -> pandas-ta-classic.
 # PyPI removed pandas-ta's entire 0.3.x line (incl. the stated floor 0.3.14);
