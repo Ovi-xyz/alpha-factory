@@ -1,5 +1,80 @@
 # CHANGELOG — Data Platform
 
+## v1.13.5 — `scripts/archive/` Dihapus Total, Test Suite Diperbaiki (Agustus 2026)
+
+Dokumen referensi: tidak ada decision document terpisah — kelanjutan
+dari v1.13.4, thread baru. Ovi melaporkan "G-6 — Coverage Gate failure
+karena archived items dibersihkan dari repository."
+
+Total: **1 root cause diklarifikasi** (bukan coverage, tapi test
+failure yang menumpang command yang sama) | **10 test usang
+ditertirkan, 1 test masih valid dipertahankan** | **1432 → 1422
+passed / 0 failed / 0 error**.
+
+### CLARIFY G6Label [tidak ada file diubah] — Bukan Coverage Gate, Tapi Test Pass Gate
+
+**Root cause**: menjalankan command CI-equivalent persis
+(`pytest tests/ --cov=src --cov-report=term-missing`) terhadap state
+nyata (`b013a6a`, sudah sync, tidak perlu overlay). Hasil: **coverage
+81.54%**, di atas gate 80% dengan jelas — pesan `Required test
+coverage of 80.0% reached` muncul eksplisit. Kegagalan sebenarnya:
+**7 failed, 1425 passed**, seluruhnya di satu file:
+`tests/unit/test_archived_migration_scripts.py`. Wrapper yang
+melaporkan ini sebagai "G-6" kemungkinan besar karena satu command
+gabungan `pytest --cov` menjalankan test SEKALIGUS mengukur coverage
+— test failure menjatuhkan exit code seluruh command meski angka
+coverage-nya sendiri lolos. Presisi penting di sini: ini masalah G-5
+(test pass) yang berlabel G-6, bukan regresi coverage sungguhan.
+
+### FIX ArchiveTests [tests/unit/test_archived_migration_scripts.py → tests/unit/test_makefile_safety_nets.py, tests/COUNT_BASELINE.txt] — Regression Guard yang Targetnya Sudah Tidak Ada, Diretired
+
+**Root cause**: `test_archived_migration_scripts.py` (RISK-11, 11
+test) adalah regression guard permanen yang memverifikasi KEBERADAAN
+archive — README ada, kedua script archived masih syntactically
+valid, bare `import scripts.archive.X` masih memicu guard
+`SystemExit("ARCHIVED ...")` yang spesifik. Ovi menghapus
+`scripts/archive/` total (9 file, ~3.309 baris) di commit yang sama
+dengan rilis v1.13.4 (`b013a6a`) sebagai cleanup lanjutan. 7 dari 11
+test gagal persis sesuai desainnya ketika precondition-nya jadi salah
+— `AssertionError` pada README yang hilang, `FileNotFoundError` pada
+`ast.parse()` yang membaca file yang tidak ada, dan
+`ModuleNotFoundError: No module named 'scripts.archive'` bukan
+`SystemExit` yang diharapkan.
+
+**Bukan regresi**: bug yang dijaga file test ini — destructive
+import-time write dari `migrate_instruments.py` /
+`build_instruments_v14.py` — sekarang mustahil secara struktural,
+bukan sekadar dinonaktifkan: file-nya tidak ada di manapun lagi, baik
+archived maupun tidak. Coverage sendiri tidak terpengaruh
+(`scripts/archive/` tidak pernah masuk
+`[tool.coverage.run] source = ["src"]`).
+
+**Fix**: dari 11 test, tepat 1 yang masih menguji sesuatu yang benar
+terlepas dari nasib archive — safety net `make migrate` (masih ada di
+Makefile, masih harus gagal keras). `test_archived_migration_scripts.py`
+di-overwrite in-place dengan hanya class tersebut
+(`TestMakefileMigrateTargetFailsLoudly`), lalu di-rename menjadi
+`test_makefile_safety_nets.py` agar nama file mencerminkan isinya yang
+sebenarnya sekarang. 10 test yang premisnya sudah tidak ada diretired.
+
+**Diverifikasi empiris**: divalidasi di sandbox terisolasi dulu (file
+trimmed dijalankan standalone — 1 passed) sebelum diterapkan ke repo
+live. Full suite setelah fix: **1422 passed, 0 failed**. Coverage:
+**81.43%**, tidak berubah (tidak ada `src/` yang disentuh rilis ini).
+Gates G-1 (156 file — turun dari 164, cocok persis dengan 8 file `.py`
+yang hilang dari `scripts/archive/`), G-2 (0 f-string SQL), G-3 (699
+symbols, tidak terpengaruh), G-8 (0 glob-scope violations) semua
+bersih. `tests/COUNT_BASELINE.txt` diupdate ke 1422.
+
+**Catatan proses**: satu `edit_file` call ke `KNOWN_RISKS.md` di
+rilis ini sempat submit tanpa `dryRun` eksplisit dan diam-diam tidak
+diterapkan (default tampaknya `true`) — ketahuan karena dibaca ulang
+dan di-grep untuk heading baru sebelum diasumsikan berhasil, bukan
+percaya diff yang dikembalikan begitu saja. Di-retry dengan
+`dryRun: false` eksplisit, lalu diverifikasi ulang via read-back.
+
+---
+
 ## v1.13.4 — Gate 1 Discovery Phase Live-Confirmed, Key Shape `.N.B.` Terverifikasi, poetry.lock Diperbaiki (Agustus 2026)
 
 Dokumen referensi: tidak ada decision document terpisah — kelanjutan

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.13.4"
+version = "1.13.5"
 # FIX BIS-1, Gate 1 progress + TYPE decision (Ovi, 3 Aug 2026): Gate 1
 # substantially advanced -- BIS's actual Broad EER weights file located
 # (data.bis.org/topics/EER's own Methodology section links directly to

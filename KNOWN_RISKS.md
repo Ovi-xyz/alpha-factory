@@ -798,7 +798,7 @@ failed.
 
 ---
 
-## RISK-11 (NEW): Two migration scripts executed a destructive `config/instruments.yaml` write at *import time*, with zero guard — RESOLVED (archived)
+## RISK-11 (NEW): Two migration scripts executed a destructive `config/instruments.yaml` write at *import time*, with zero guard — RESOLVED (archived, then fully removed 7 Aug 2026)
 
 **Status:** ✅ **FIXED.** Discovered while assessing
 `scripts/migrate_instruments.py` and `scripts/build_instruments_v14.py` for
@@ -875,6 +875,41 @@ for both scripts, confirms `config/instruments.yaml`'s content and mtime
 are byte-identical before/after both invocation paths, and confirms
 `make migrate` exits non-zero with an explanation. Full suite: 1300
 passed, 0 failed.
+
+### Update — 7 Aug 2026: archive removed entirely, regression guard retired
+
+Ovi deleted `scripts/archive/` outright (all 9 files, ~3,309 lines,
+including this fix's own `README.md` and both guarded scripts) as
+further cleanup, roughly a week after the archival above and the
+separate tvdatafeed retirement (RISK-1) it was bundled alongside in
+the same commit. Broke 7 of the 11 tests in
+`tests/unit/test_archived_migration_scripts.py` — all of them checks
+that the archive *existed* (README present, scripts still
+syntactically parseable, `import scripts.archive.X` failing with the
+specific "ARCHIVED" guard message rather than a plain
+`ModuleNotFoundError`), which is no longer true by construction.
+
+**Not a regression.** The bug this test file guarded against —
+destructive import-time writes from `migrate_instruments.py` /
+`build_instruments_v14.py` — is now structurally impossible, not just
+disabled: the files don't exist anywhere in the repo, archived or
+otherwise, so there's nothing left that could be dangerously imported.
+Coverage itself was unaffected (`scripts/archive/` was never in
+`[tool.coverage.run] source = ["src"]` scope, per the Fix section
+above) — the 7 failures were pure test breakage from testing a
+precondition Ovi had just deliberately removed, not a drop below the
+80% gate.
+
+Retired the 10 tests whose entire premise was the archive's existence.
+Preserved the one still-genuinely-relevant check —
+`TestMakefileMigrateTargetFailsLoudly` (the `make migrate` target is
+still kept in the Makefile as a muscle-memory safety net and still
+needs to fail loudly) — by moving it to a new, more accurately named
+file: `tests/unit/test_makefile_safety_nets.py`. Full suite re-verified:
+**1422 passed, 0 failed** (1432 -> 1422, net -10 matches 11 removed + 1
+preserved). Coverage 81.43%, unchanged. `tests/COUNT_BASELINE.txt`
+updated to 1422. Full detail:
+`dev-log/2026-08-07-scripts-archive-removed-test-suite-repair.md`.
 
 ---
 
