@@ -1,6 +1,31 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.13.5"
+version = "1.14.0"
+# FIX RISK-15 (Ovi, 8 Aug 2026): KNOWN_RISKS.md RISK-15 (FRED Track 2
+# commodity supplements, flagged 30 Jul 2026) resolved. config/
+# fred_series.yaml gained a new `commodity` domain -- 6 series: 2
+# pre-existing per Architecture Extension v1.0 ADR-005/006 (Iron Ore,
+# Coal Australia) that were decided but never actually added, + 4 new
+# per ADR-030-033 (Palm Oil/CPO, Rubber, Tin, Nickel -- the yfinance
+# proxy pairing from GMI_Decision_Document_v7.docx). All 6 series IDs
+# verified against live fred.stlouisfed.org this thread (web search,
+# not this sandbox's network -- api.stlouisfed.org has never been
+# reachable from here either). Found and corrected a real bug in the
+# process: Iron Ore's actual FRED series ID is PIORECRUSDM, not the
+# PIORECRORECUSDM both ADR-005 and KNOWN_RISKS.md itself had been
+# citing unverified since 25 Jun 2026 -- a duplicated "ORE" typo. src/
+# bronze/fred_ingester.py gained matching RELEASE_LAG_DAYS entries (25d
+# each, matching the existing PPI-series precedent and the ~24d
+# publication lag observed live). New preflight script authored:
+# scripts/preflight/check_fred_commodity_series.py (none of the 4
+# existing scripts in that directory covered FRED). MINOR bump (not
+# PATCH) -- judgment call: this activates real new data flow into
+# Bronze on the next bronze_macro_weekly run ("new indicator" per this
+# project's own CI/CD Ops Guide versioning semantics), even though no
+# live Gold-layer consumer exists yet (ForecastModule/CrossAssetEngine
+# not built). 1422 -> 1432 tests (+10), coverage unchanged. See
+# CHANGELOG.md and KNOWN_RISKS.md RISK-15 for full detail.
+#
 # FIX BIS-1, Gate 1 progress + TYPE decision (Ovi, 3 Aug 2026): Gate 1
 # substantially advanced -- BIS's actual Broad EER weights file located
 # (data.bis.org/topics/EER's own Methodology section links directly to

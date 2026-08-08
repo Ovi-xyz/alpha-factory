@@ -76,6 +76,19 @@ RELEASE_LAG_DAYS: dict[str, int] = {
     "UMCSENT": 3,  "CSCICP03USM665S": 5,
     "PSAVERT": 30,  "PCE": 30,
     "DRSFRMACBS": 45,  "TOTALSL": 30,
+    # Commodity (RISK-15 fix, Ovi 8 Aug 2026) -- IMF Primary Commodity
+    # Price series via FRED, monthly. Empirically observed lag on
+    # fred.stlouisfed.org this thread: Feb-2026 period data showed
+    # "Updated: Mar 24, 2026" across all 6 series checked -- ~24 days
+    # from period-end. 25d matches the existing PPI-series precedent
+    # above (PPIFIS/PPIFGS/PPIACO) exactly and rounds up from the ~24d
+    # observed figure, consistent with this dict's stated conservative
+    # bias. Not used by macro regime (regime_input: false on all 6 in
+    # fred_series.yaml) -- lag correctness matters for the day a real
+    # PIT-aware consumer (ForecastModule) is built, not today.
+    "PIORECRUSDM": 25,  "PCOALAUUSDM": 25,
+    "PPOILUSDM": 25,    "PRUBBUSDM": 25,
+    "PTINUSDM": 25,     "PNICKUSDM": 25,
 }
 _DEFAULT_RELEASE_LAG = 7  # conservative default for unknown series
 

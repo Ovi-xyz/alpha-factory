@@ -1,5 +1,8 @@
 # config/fred_series.yaml — IDD §5: FRED Series Registry
-# 60 series prioritas dikelompokkan per domain macro
+# 67 series dikelompokkan per domain macro (60 IDD §5 asli + VIXCLS +
+# 6 commodity Track 2 — RISK-15 fix, 8 Aug 2026; komentar count sebelumnya
+# sudah stale di 60 bahkan sebelum perubahan ini, VIXCLS tidak pernah
+# dihitung ulang saat ditambahkan)
 # Dibaca oleh src/bronze/fred_ingester.py
 
 version: "1.0"
@@ -90,3 +93,28 @@ series:
 
   # ── VIX (special — via FRED proxy) ────────────────────────────────────────
   - {id: VIXCLS,         domain: volatility, frequency: daily,  cadence: daily, regime_input: true, description: CBOE Volatility Index VIX — regime primary input}
+
+  # ── 7. Commodity — Track 2 (6) ─────────────────────────────────────────────────────────
+  # ADD RISK-15 fix (Ovi, 8 Aug 2026): Architecture Extension v1.0 ADR-005/006
+  # decided PIORECRORECUSDM (Iron Ore) and PCOALAUUSDM (Coal Australia) as
+  # monthly FRED supplements to the daily equity proxies (VALE, WHC.AX) —
+  # never actually added to this file. GMI_Decision_Document_v7.docx
+  # (ADR-030-033, 30 Jul 2026) implied 4 more of the same shape for the
+  # CPO/RUBBER/TIN/NICKEL proxy adoption — also never added. All 6
+  # verified against live FRED (web search, fred.stlouisfed.org) this
+  # thread: 5 confirmed correct as documented, 1 corrected — Iron Ore's
+  # real series ID is PIORECRUSDM, not PIORECRORECUSDM (the latter does
+  # not exist; a duplicated "ORE" typo carried across Architecture
+  # Extension v1.0 and this project's own KNOWN_RISKS.md RISK-15 entry,
+  # unverified until now). regime_input: false for all six — these are
+  # Track 2 supplements for the future ForecastModule (GMI Wave 1 Cycle
+  # 4, not yet built), not macro-regime inputs. No live Silver/Gold
+  # consumer yet — fred_ingester.py and macro_processor.py are both
+  # domain-agnostic (confirmed by direct read this thread), so this is a
+  # pure config addition, no source changes required to activate ingestion.
+  - {id: PIORECRUSDM, domain: commodity, frequency: monthly, cadence: weekly, regime_input: false, description: Global price of Iron Ore — Track 2 supplement for IRON_ORE/VALE proxy (ADR-005)}
+  - {id: PCOALAUUSDM, domain: commodity, frequency: monthly, cadence: weekly, regime_input: false, description: Global price of Coal Australia — Track 2 supplement for COAL_NEWC/WHC.AX proxy (ADR-006)}
+  - {id: PPOILUSDM,   domain: commodity, frequency: monthly, cadence: weekly, regime_input: false, description: Global price of Palm Oil — Track 2 supplement for CPO/F34.SI proxy (ADR-030)}
+  - {id: PRUBBUSDM,   domain: commodity, frequency: monthly, cadence: weekly, regime_input: false, description: Global price of Rubber — Track 2 supplement for RUBBER/STA.BK proxy (ADR-031)}
+  - {id: PTINUSDM,    domain: commodity, frequency: monthly, cadence: weekly, regime_input: false, description: Global price of Tin — Track 2 supplement for TIN/AFM.V proxy (ADR-032)}
+  - {id: PNICKUSDM,   domain: commodity, frequency: monthly, cadence: weekly, regime_input: false, description: Global price of Nickel — Track 2 supplement for NICKEL/NIC.AX proxy (ADR-033)}

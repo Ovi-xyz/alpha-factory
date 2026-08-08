@@ -370,3 +370,120 @@ class TestCheckBisEerWeights:
         monkeypatch.setattr(sys, "argv", ["check_bis_eer_weights.py", "--discover-weights"])
         monkeypatch.setattr(mod, "_discover_weights", lambda: 0)
         assert mod.main() == 0
+
+
+class TestCheckFredCommoditySeries:
+
+    def test_expected_series_has_6_entries(self):
+        """Locks in the 6-series Track 2 commodity universe -- RISK-15
+        (KNOWN_RISKS.md). 2 pre-existing (ADR-005/006, decided but never
+        added anywhere) + 4 new (ADR-030-033 proxy pairing, 30 Jul 2026)."""
+        import check_fred_commodity_series as mod
+        assert len(mod.EXPECTED_COMMODITY_SERIES) == 6
+        assert set(mod.EXPECTED_COMMODITY_SERIES) == {
+            "PIORECRUSDM", "PCOALAUUSDM", "PPOILUSDM",
+            "PRUBBUSDM", "PTINUSDM", "PNICKUSDM",
+        }
+
+    def test_iron_ore_series_id_is_not_the_documented_typo(self):
+        """Regression guard for the actual bug found this thread:
+        Architecture Extension v1.0 ADR-005 and this project's own
+        (pre-fix) KNOWN_RISKS.md RISK-15 entry both cite
+        PIORECRORECUSDM -- a series ID that does not exist on FRED. The
+        real one, confirmed against fred.stlouisfed.org directly, is
+        PIORECRUSDM (no duplicated "ORE")."""
+        import check_fred_commodity_series as mod
+        assert "PIORECRUSDM" in mod.EXPECTED_COMMODITY_SERIES
+        assert "PIORECRORECUSDM" not in mod.EXPECTED_COMMODITY_SERIES
+
+    def test_main_returns_1_without_api_key(self, monkeypatch):
+        import check_fred_commodity_series as mod
+        monkeypatch.delenv("FRED_API_KEY", raising=False)
+        monkeypatch.setattr(sys, "argv", ["check_fred_commodity_series.py"])
+        assert mod.main() == 1
+
+    def test_check_one_returns_true_for_valid_observations(self, monkeypatch):
+        import check_fred_commodity_series as mod
+
+        def _fake_fetch(series_id, api_key):
+            return {"observations": [
+                {"date": "2026-02-01", "value": "1033.76839"},
+                {"date": "2026-01-01", "value": "1004.34182"},
+            ]}
+
+        monkeypatch.setattr(mod, "_fetch_observations", _fake_fetch)
+        ok, msg = mod._check_one("PPOILUSDM", "fake-key")
+        assert ok is True
+        assert "2026-02-01" in msg
+
+    def test_check_one_returns_false_when_all_observations_are_missing_marker(self, monkeypatch):
+        """FRED uses the literal string '.' for a missing observation in
+        a given period -- distinct from an empty response entirely."""
+        import check_fred_commodity_series as mod
+
+        def _fake_fetch(series_id, api_key):
+            return {"observations": [{"date": "2026-02-01", "value": "."}]}
+
+        monkeypatch.setattr(mod, "_fetch_observations", _fake_fetch)
+        ok, msg = mod._check_one("PPOILUSDM", "fake-key")
+        assert ok is False
+
+    def test_check_one_returns_false_on_fetch_exception(self, monkeypatch):
+        import check_fred_commodity_series as mod
+
+        def _raise(*a, **kw):
+            raise ConnectionError("simulated: no network access to api.stlouisfed.org")
+
+        monkeypatch.setattr(mod, "_fetch_observations", _raise)
+        ok, msg = mod._check_one("PPOILUSDM", "fake-key")
+        assert ok is False
+
+    def test_main_returns_1_for_unknown_series_filter(self, monkeypatch):
+        import check_fred_commodity_series as mod
+        monkeypatch.setenv("FRED_API_KEY", "fake-key")
+        monkeypatch.setattr(
+            sys, "argv",
+            ["check_fred_commodity_series.py", "--series", "NOT_REAL"],
+        )
+        assert mod.main() == 1
+
+    def test_main_checks_single_series_when_filtered(self, monkeypatch):
+        import check_fred_commodity_series as mod
+        monkeypatch.setenv("FRED_API_KEY", "fake-key")
+        calls = []
+
+        def _fake_fetch(series_id, api_key):
+            calls.append(series_id)
+            return {"observations": [{"date": "2026-02-01", "value": "1.0"}]}
+
+        monkeypatch.setattr(mod, "_fetch_observations", _fake_fetch)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["check_fred_commodity_series.py", "--series", "PTINUSDM"],
+        )
+        assert mod.main() == 0
+        assert calls == ["PTINUSDM"]
+
+    def test_main_all_pass_returns_0(self, monkeypatch):
+        import check_fred_commodity_series as mod
+        monkeypatch.setenv("FRED_API_KEY", "fake-key")
+
+        def _fake_fetch(series_id, api_key):
+            return {"observations": [{"date": "2026-02-01", "value": "100.0"}]}
+
+        monkeypatch.setattr(mod, "_fetch_observations", _fake_fetch)
+        monkeypatch.setattr(sys, "argv", ["check_fred_commodity_series.py"])
+        assert mod.main() == 0
+
+    def test_main_one_failure_returns_1(self, monkeypatch):
+        import check_fred_commodity_series as mod
+        monkeypatch.setenv("FRED_API_KEY", "fake-key")
+
+        def _fake_fetch(series_id, api_key):
+            if series_id == "PTINUSDM":
+                raise ConnectionError("simulated failure")
+            return {"observations": [{"date": "2026-02-01", "value": "100.0"}]}
+
+        monkeypatch.setattr(mod, "_fetch_observations", _fake_fetch)
+        monkeypatch.setattr(sys, "argv", ["check_fred_commodity_series.py"])
+        assert mod.main() == 1

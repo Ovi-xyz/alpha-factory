@@ -1081,12 +1081,12 @@ the fix. Full suite: 16/16 in this file, no regressions elsewhere.
 
 ---
 
-## RISK-15 (NEW): ADR-005/006's FRED Track 2 monthly supplements (`PIORECRORECUSDM`, `PCOALAUUSDM`) were never actually added to `config/fred_series.yaml`
+## RISK-15 (RESOLVED): ADR-005/006's FRED Track 2 monthly supplements (`PIORECRORECUSDM`, `PCOALAUUSDM`) were never actually added to `config/fred_series.yaml`
 
-**Status:** ⚠️ **OPEN — flagged, not fixed.** Discovered incidentally while
-implementing ADR-030–033 (30 Jul 2026, `GMI_Decision_Document_v7.docx`) —
-not the focus of that thread, so deliberately not fixed in the same pass
-(see "Why not fixed now" below).
+**Status:** ✅ **RESOLVED (8 Aug 2026).** Closed in a dedicated thread,
+answering all 3 questions this entry's own "Suggested next step" left
+open, and surfacing one previously-unknown bug along the way (see
+"What was found while closing it").
 
 **GD Reference:** Architecture Extension v1.0 ADR-005 (Iron Ore — VALE
 proxy + FRED `PIORECRORECUSDM` monthly supplement), ADR-006 (Newcastle
@@ -1095,48 +1095,103 @@ describe a "Track 2" two-track design: a daily equity proxy (implemented,
 live) plus a monthly official FRED series as a lower-frequency supplement
 for `ForecastModule`.
 
-### What the risk is
+### What the risk was
 
 `config/fred_series.yaml` (60-series IDD §5 registry: monetary_policy,
-inflation, growth, labor, credit, housing, volatility domains) has **no
-`commodity` domain at all**, confirmed by reading the live file directly
-this thread. Neither `PIORECRORECUSDM` nor `PCOALAUUSDM` — both
-explicitly specified in ADR-005/006's own "Consequences" sections — exist
-anywhere in it. Track 1 (the equity proxies, VALE/WHC.AX) is fully live;
-Track 2 (the FRED monthly supplements) was apparently never implemented
-despite being decided, and this gap went unnoticed across at least three
-subsequent design/decision documents that reference IRON_ORE/COAL_NEWC.
-This is the same class of gap `GMI_Decision_Document_v3.docx` found for
-Architecture v2.1 Addendum's commodity taxonomy ("decided, described down
-to the code, zero occurrences in the live file") — a documentation-vs-
-reality gap, not a code bug.
+inflation, growth, labor, credit, housing, volatility domains) had **no
+`commodity` domain at all**. Neither `PIORECRORECUSDM` nor `PCOALAUUSDM`
+— both explicitly specified in ADR-005/006's own "Consequences" sections
+— existed anywhere in it, despite Track 1 (the equity proxies,
+VALE/WHC.AX) being fully live.
 
-### Why not fixed now
+### What was found while closing it
 
-ADR-030–033 (this thread) introduced 4 new candidate FRED series of the
-same Track 2 shape — `PPOILUSDM` (palm oil), `PRUBBUSDM` (rubber),
+Web-verifying all 6 candidate series against `fred.stlouisfed.org`
+directly (this thread, since no sandbox on this project has a route to
+`api.stlouisfed.org` either) surfaced a **second, previously-unknown
+bug**: Iron Ore's real FRED series ID is `PIORECRUSDM` — **not**
+`PIORECRORECUSDM`, the ID this entry itself (and Architecture Extension
+v1.0 ADR-005) had been citing. `PIORECRORECUSDM` does not exist on FRED
+— a duplicated "ORE" typo (`PIORE-CR-ORE-C-USDM` vs the real
+`PIORE-CR-USDM`) carried, unverified, across two design documents and
+this risk entry itself, until now. The other 5 series (`PCOALAUUSDM`,
+`PPOILUSDM`, `PRUBBUSDM`, `PTINUSDM`, `PNICKUSDM`) were all confirmed
+correct as documented.
+
+The 3 open questions from this entry's original "Why not fixed then"
+(below, preserved for audit trail) were answered by direct read of the
+live source this thread, not assumption: `src/bronze/fred_ingester.py`
+is fully domain-agnostic — `domain` is only used to build the Bronze
+output path — so **no ingester code change was needed**;
+`config/schemas/fred_macro.yaml` (the SchemaValidator gate) is equally
+generic (4 columns, no per-domain branching); `src/silver/
+macro_processor.py` globs `data/bronze/macro/fred/**/*.parquet` as a
+single pass regardless of per-series domain, so it required no change
+either. This closes as a config-only addition.
+
+### Why not fixed then (preserved for audit trail)
+
+ADR-030–033 (30 Jul 2026 thread) introduced 4 new candidate FRED series
+of the same Track 2 shape — `PPOILUSDM` (palm oil), `PRUBBUSDM` (rubber),
 `PTINUSDM` (tin), `PNICKUSDM` (nickel), matching the same World Bank Pink
-Sheets naming convention as the two above. These were deliberately **NOT**
-added to `fred_series.yaml` in this pass either: (1) fixing the pre-
-existing IRON_ORE/COAL_NEWC gap was out of scope for a tvdatafeed-
-retirement thread; (2) whether `fred_ingester.py` even has domain-parsing
-logic for a `commodity` domain was not verified this thread; (3) none of
-the 6 series (2 pre-existing + 4 new) have been empirically confirmed
-against the live FRED API from any sandbox to date — same network
-constraint as every other preflight-class gap in this project
-(`check_bis_cbpol_d.py`, `check_yfinance_tickers.py`, etc.).
+Sheets naming convention as the two above. These were deliberately
+**NOT** added to `fred_series.yaml` in that pass either: (1) fixing the
+pre-existing IRON_ORE/COAL_NEWC gap was out of scope for a
+tvdatafeed-retirement thread; (2) whether `fred_ingester.py` even has
+domain-parsing logic for a `commodity` domain was not verified that
+thread; (3) none of the 6 series had been empirically confirmed against
+the live FRED API from any sandbox to date.
 
-### Suggested next step
+### Fix
 
-A dedicated, properly-scoped thread should: (1) verify `fred_ingester.py`'s
-domain handling supports (or needs extending for) a `commodity` domain;
-(2) add a `commodity` domain section to `fred_series.yaml` with all 6
-series (2 backfilled + 4 new); (3) author or extend a preflight script to
-confirm all 6 resolve against live FRED (mirroring `check_yfinance_tickers.py`'s
-pattern); (4) wire the Track 2 supplement into `ForecastModule` once
-GMI Wave 1 Cycle 4 (CrossAssetEngine) actually starts — Track 2 has no
-live consumer yet regardless of this gap, since `ForecastModule` itself
-isn't built.
+`config/fred_series.yaml` — new `commodity` domain section, all 6 series
+(`PIORECRUSDM` corrected, `PCOALAUUSDM`, `PPOILUSDM`, `PRUBBUSDM`,
+`PTINUSDM`, `PNICKUSDM`), `regime_input: false` on all six (no
+macro-regime consumer; Track 2 is a future `ForecastModule` input — GMI
+Wave 1 Cycle 4 / CrossAssetEngine not yet built). Stale header comment
+("60 series") corrected to 67 in the same pass — already off by one
+(VIXCLS) before this change.
+
+`src/bronze/fred_ingester.py` — `RELEASE_LAG_DAYS` entries added for all
+6 new series (25 days each), matching the existing PPI-series precedent
+(`PPIFIS`/`PPIFGS`/`PPIACO`, also 25) and rounding up from the ~24-day
+publication lag directly observed on each series' `fred.stlouisfed.org`
+page this thread (Feb-2026 period data consistently showed "Updated: Mar
+24, 2026" across all 6).
+
+`scripts/preflight/check_fred_commodity_series.py` — new preflight
+script (none of the 4 existing scripts in that directory covered FRED),
+mirroring `check_bis_cbpol_d.py`'s pattern: authored and offline-tested
+this thread (same network constraint as every other preflight script in
+this project — execution against the live API deferred to
+network-enabled hardware). Duplicates `EXPECTED_COMMODITY_SERIES`
+independently of `fred_series.yaml` rather than importing it, matching
+`check_bis_cbpol_d.py`'s own `EXPECTED_REF_AREAS` independence rationale.
+
+### Verified empirically
+
+All 6 series IDs, including the corrected `PIORECRUSDM`, confirmed live
+and monthly via direct web check of their `fred.stlouisfed.org` pages.
+`config/fred_series.yaml` re-parses cleanly (67 total series, 0
+duplicate IDs). `src/bronze/fred_ingester.py` and
+`scripts/preflight/check_fred_commodity_series.py` both pass
+`ast.parse()`. 10 new tests (`TestCheckFredCommoditySeries`,
+`tests/unit/test_preflight_scripts.py`) pass in isolation in a sandbox
+and collect cleanly alongside the existing 4 preflight-script test
+classes (42 total collected, 0 collection errors — the exact failure
+mode this project tracks separately from pass/fail, per the CI/CD Ops
+Guide's own G-4 rationale). Every file write closed-loop verified:
+re-fetched from the live repo after each edit and diffed against the
+sandbox-validated version before moving on.
+
+**Not yet run:** a real `FRED_API_KEY`-backed invocation of
+`check_fred_commodity_series.py` against live FRED, and a full `poetry
+run pytest` on real hardware — both need to happen there before this is
+exercised end-to-end. Nothing above depends on either to be correctly
+specified and offline-verified; this is the same authoring/execution
+split every other preflight script in this project already carries.
+
+**Test baseline:** `tests/COUNT_BASELINE.txt` 1422 → 1432 (+10).
 
 ---
 
@@ -1364,7 +1419,37 @@ endpoint correctness itself was then independently confirmed a third way
 
 ---
 
-*Last updated: v1.13.4 — Gate 1 discovery phase live-confirmed on the
+*Last updated: v1.14.0 — RISK-15 (FRED Track 2 commodity supplements)
+resolved: `config/fred_series.yaml` gained a new `commodity` domain (6
+series — 2 pre-existing per ADR-005/006, 4 new per ADR-030–033),
+`src/bronze/fred_ingester.py` gained matching `RELEASE_LAG_DAYS`
+entries, and a new preflight script
+(`scripts/preflight/check_fred_commodity_series.py`) was authored to
+verify all 6 against live FRED. Found and fixed a second bug while
+verifying: Iron Ore's real FRED series ID is `PIORECRUSDM`, not the
+`PIORECRORECUSDM` both Architecture Extension v1.0 ADR-005 and this
+risk entry itself had been citing unverified. MINOR bump (not PATCH):
+judgment call — this activates real new data flow into Bronze on the
+next `bronze_macro_weekly` run, which reads as "new indicator" under
+this project's own versioning semantics (CI/CD Ops Guide) even though
+no live Gold-layer consumer exists yet (`ForecastModule`/CrossAssetEngine
+not built). 1422 → 1432 passed (+10), coverage unchanged. August 2026.
+Prior entry: v1.13.5 — `scripts/archive/` removed entirely (Ovi, 6 Aug
+2026 commit) broke `test_archived_migration_scripts.py`'s 10
+archive-existence regression guards (RISK-11) — diagnosed as a G-5
+(test pass) failure wearing a G-6 (coverage) label, not an actual
+coverage regression (81.54% measured, above the 80% gate; the combined
+`pytest --cov` invocation's exit code was tripped by the test failures
+alongside it). Confirmed via full-tree grep that nothing else in the
+repo held a live import or path reference to `scripts/archive/` — the
+bug those 10 tests guarded against (destructive import-time writes) is
+now structurally impossible, not just disabled. File trimmed to its 1
+still-meaningful test (`make migrate`'s safety net) and renamed
+`test_archived_migration_scripts.py` → `test_makefile_safety_nets.py`.
+PATCH bump: test-suite maintenance only, no `src/` change. 1432 → 1422
+passed (net –10: –11 removed, +1 kept), coverage 81.43% unchanged.
+August 2026.
+Prior entry: v1.13.4 — Gate 1 discovery phase live-confirmed on the
 M1: `weightsb.xlsx` downloaded for real (492,941 bytes, 10 sheets,
 1993-95 through 2020-22), all 13 target currency codes located in
 every sheet — layout now fully known, values not yet extracted (Gate

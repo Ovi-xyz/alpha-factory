@@ -1,5 +1,108 @@
 # CHANGELOG — Data Platform
 
+## v1.14.0 — RISK-15 Diselesaikan: FRED Track 2 Commodity Supplements (Agustus 2026)
+
+Dokumen referensi: tidak ada decision document terpisah — thread baru,
+menutup KNOWN_RISKS.md RISK-15 yang diflag 30 Juli 2026 (thread
+ADR-030–033, GMI_Decision_Document_v7.docx) sebagai "flagged, not
+fixed."
+
+Total: **1 gap konfigurasi ditutup** (commodity domain baru di
+fred_series.yaml, 6 series) | **1 bug dokumentasi ditemukan dan
+diperbaiki** (Iron Ore series ID salah di 2 dokumen sebelumnya) |
+**1 script preflight baru** | **1422 → 1432 passed / 0 failed / 0
+error**.
+
+### FIX FredCommodityDomain [config/fred_series.yaml, src/bronze/fred_ingester.py, KNOWN_RISKS.md] — Commodity Domain Ditambahkan, 6 Series (2 Lama + 4 Baru)
+
+**Root cause**: `config/fred_series.yaml` tidak punya domain
+`commodity` sama sekali. Architecture Extension v1.0 ADR-005/006
+sudah men-decide 2 series (`PIORECRORECUSDM` untuk Iron Ore,
+`PCOALAUUSDM` untuk Coal Australia) sebagai FRED Track 2 supplement
+untuk proxy VALE/WHC.AX — tidak pernah benar-benar ditambahkan ke
+file. Thread ADR-030–033 (30 Juli 2026) menambahkan 4 kandidat baru
+dengan pola sama (`PPOILUSDM`, `PRUBBUSDM`, `PTINUSDM`, `PNICKUSDM`
+untuk CPO/RUBBER/TIN/NICKEL) tapi juga sengaja tidak menambahkannya —
+di luar scope thread tvdatafeed-retirement itu, dan belum
+terverifikasi live.
+
+**Fix**: Section `commodity` baru ditambahkan dengan 6 series, seluruh
+`regime_input: false` (bukan macro regime input — Track 2 adalah
+input masa depan untuk `ForecastModule`, GMI Wave 1 Cycle 4 /
+CrossAssetEngine belum dibangun). `src/bronze/fred_ingester.py`
+mendapat entry `RELEASE_LAG_DAYS` untuk keenam series (25 hari,
+mengikuti presedan series PPI yang sudah ada dan lag publikasi ~24
+hari yang diobservasi langsung di fred.stlouisfed.org). Komentar
+header stale ("60 series") sekalian diperbaiki ke 67 — sudah selisih
+1 (VIXCLS) sebelum perubahan ini.
+
+**Diverifikasi**: `fred_ingester.py` dan `macro_processor.py` dibaca
+langsung — keduanya domain-agnostic (domain hanya dipakai untuk path
+output Bronze / glob generik), jadi TIDAK ADA perubahan kode ingester
+yang diperlukan, menjawab 2 dari 3 pertanyaan terbuka yang
+KNOWN_RISKS.md RISK-15 sendiri tinggalkan. `config/schemas/
+fred_macro.yaml` (SchemaValidator) juga generik, tidak per-domain.
+KNOWN_RISKS.md RISK-15 status diupdate ke RESOLVED dengan detail
+penuh; footer "Last updated" juga diperbaiki — ditemukan stale di
+v1.13.4 (entry v1.13.5 tidak pernah menambahkan barisnya sendiri di
+footer ini meski RISK-11-nya sendiri sudah diupdate) — entry v1.13.5
+yang hilang ditambahkan sekalian.
+
+### FIX IronOreSeriesID [config/fred_series.yaml, scripts/preflight/check_fred_commodity_series.py] — `PIORECRORECUSDM` Tidak Pernah Ada, Series Asli `PIORECRUSDM`
+
+**Root cause**: web-verifikasi keenam series kandidat terhadap
+fred.stlouisfed.org langsung (bukan asumsi) menemukan Iron Ore's ID
+asli adalah `PIORECRUSDM` — BUKAN `PIORECRORECUSDM` yang dikutip
+Architecture Extension v1.0 ADR-005 DAN KNOWN_RISKS.md RISK-15 sendiri
+sejak 25 Juni 2026. `PIORECRORECUSDM` tidak eksis di FRED — typo
+duplikasi "ORE" (`PIORE-CR-ORE-C-USDM` vs yang asli `PIORE-CR-USDM`)
+yang terbawa tanpa terverifikasi lintas dua dokumen desain dan risk
+entry ini sendiri — persis kelas gap yang RISK-15 sendiri bunyikan
+alarmnya. 5 series lain (`PCOALAUUSDM`, `PPOILUSDM`, `PRUBBUSDM`,
+`PTINUSDM`, `PNICKUSDM`) dikonfirmasi benar sesuai dokumentasi.
+
+**Fix**: `PIORECRUSDM` (bukan `PIORECRORECUSDM`) yang ditulis ke
+`fred_series.yaml` dan `check_fred_commodity_series.py`. Regression
+guard permanen ditambahkan
+(`test_iron_ore_series_id_is_not_the_documented_typo`) yang secara
+eksplisit assert `PIORECRORECUSDM` TIDAK ADA di
+`EXPECTED_COMMODITY_SERIES` — bukan cuma assert yang benar ada.
+
+### ADD CheckFredCommoditySeries [scripts/preflight/check_fred_commodity_series.py, tests/unit/test_preflight_scripts.py, tests/COUNT_BASELINE.txt] — Preflight Script Baru untuk FRED
+
+**Root cause**: KNOWN_RISKS.md RISK-15 sendiri menyarankan "author or
+extend a preflight script ... mirroring check_yfinance_tickers.py's
+pattern." Listing `scripts/preflight/` dicek langsung — tidak ada
+script FRED sama sekali di antara 4 yang ada (`check_bis_cbpol_d.py`,
+`check_bis_eer_weights.py`, `check_finnhub_shape.py`,
+`check_yfinance_tickers.py`) — jadi diauthor baru, bukan extend.
+
+**Fix**: `check_fred_commodity_series.py` ditulis mengikuti pola
+persis `check_bis_cbpol_d.py` — `EXPECTED_COMMODITY_SERIES` dict
+independen (bukan import dari `fred_series.yaml`), `--series` flag
+untuk filter satu series, exit code 0/1. Constraint jaringan sama
+seperti setiap preflight script lain di proyek ini:
+`api.stlouisfed.org` tidak pernah ada di allowlist sandbox manapun —
+authoring tidak butuh akses jaringan, running-nya yang butuh,
+dijalankan Ovi nanti di M1.
+
+**Diverifikasi empiris**: 10 test baru (`TestCheckFredCommoditySeries`)
+dijalankan offline di sandbox terisolasi — seluruhnya pass. Digabung
+dengan 4 class test preflight-script existing dan di-collect ulang:
+**42 test total collected, 0 collection error** — kelas kegagalan
+persis yang CI/CD Ops Guide sendiri (Gate G-4) bunyikan alarmnya
+(NEW-4). Setiap file write di-closed-loop-verify: dibaca ulang dari
+repo live setelah tiap edit dan di-diff terhadap versi tervalidasi
+sandbox sebelum lanjut ke file berikutnya.
+
+**Belum dijalankan**: invocation nyata `check_fred_commodity_series.py`
+dengan `FRED_API_KEY` terhadap live FRED, dan full `poetry run pytest`
+di hardware nyata — keduanya perlu terjadi di sana sebelum ini
+dianggap exercised end-to-end. `tests/COUNT_BASELINE.txt`: 1422 →
+1432.
+
+---
+
 ## v1.13.5 — `scripts/archive/` Dihapus Total, Test Suite Diperbaiki (Agustus 2026)
 
 Dokumen referensi: tidak ada decision document terpisah — kelanjutan
