@@ -1,6 +1,18 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.14.0"
+version = "1.15.0"
+# FIX (Ovi, 9 Aug 2026): three-part session, none touching src/ --
+# (1) RISK-15's live-FRED half confirmed on the M1 (all 6 Track 2 series
+# PASS); (2) Gate 1 (RISK-16) targeted extraction pass authored --
+# extract_us_weights_from_sheet() + --extract-weights CLI mode on
+# check_bis_eer_weights.py, unit-tested against a synthetic workbook, not
+# yet run against the real bis.org file; (3) proxy correlation studies
+# authored -- new scripts/preflight/check_proxy_correlation.py
+# (CPO/RUBBER/TIN/NICKEL vs. their RISK-15 FRED benchmarks), not yet run
+# against real yfinance/FRED. 28 new tests (11 + 17), all passing
+# alongside the 43 pre-existing preflight-script tests in an isolated
+# sandbox before either script touched the real repo. See
+# dev-log/2026-08-09-risk15-live-confirm-gate1-extraction-proxy-correlation.md
 # FIX RISK-15 (Ovi, 8 Aug 2026): KNOWN_RISKS.md RISK-15 (FRED Track 2
 # commodity supplements, flagged 30 Jul 2026) resolved. config/
 # fred_series.yaml gained a new `commodity` domain -- 6 series: 2

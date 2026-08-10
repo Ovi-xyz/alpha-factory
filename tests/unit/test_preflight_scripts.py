@@ -371,6 +371,245 @@ class TestCheckBisEerWeights:
         monkeypatch.setattr(mod, "_discover_weights", lambda: 0)
         assert mod.main() == 0
 
+    # -- Gate 1 targeted extraction (ADD, this thread) --------------------
+    # extract_us_weights_from_sheet() is unit-tested against a SYNTHETIC
+    # workbook shaped like the REAL confirmed layout from the 4 Aug 2026
+    # --discover-weights run (row 6 = "Weight on:" header with REF_AREA
+    # codes as columns, column 2 = "In the EER for:" row-label REF_AREA
+    # code) -- same caveat as test_discover_weights_scans_synthetic_
+    # workbook_for_ref_areas above: this proves the extraction logic is
+    # correct, not that it matches bis.org's specific real-world file,
+    # which no sandbox on this project has ever been able to reach.
+
+    @staticmethod
+    def _build_synthetic_weightsb_bytes():
+        """Shared fixture-style builder: a 2-vintage workbook (2017_2019,
+        2020_2022) matching the real file's confirmed shape, with a US
+        row carrying distinct, checkable weight values at 2 of the 13
+        target currency columns (AU, XM) -- 2 rather than 1 to satisfy
+        the header-row heuristic's own >=2-hit minimum, and to prove the
+        function reads multiple columns correctly, not just one."""
+        from io import BytesIO
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws_old = wb.active
+        ws_old.title = "2017_2019"
+        ws_old.append(["In the EER for:", None, "AU", "XM"])
+        ws_old.append(["Australia", "AU", 1.0, 2.0])
+        ws_old.append(["United States", "US", 11.11, 12.12])
+
+        ws_new = wb.create_sheet("2020_2022")
+        ws_new.append(["In the EER for:", None, "AU", "XM"])
+        ws_new.append(["Australia", "AU", 3.0, 4.0])
+        ws_new.append(["United States", "US", 22.22, 23.23])
+
+        buf = BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_extract_us_weights_from_sheet_happy_path(self):
+        """All 13 BROAD_DOLLAR_REF_AREAS currencies present as header
+        columns, US row present -- every value should be extracted
+        correctly, keyed by currency code (not REF_AREA code)."""
+        import check_bis_eer_weights as mod
+        from io import BytesIO
+        from openpyxl import Workbook, load_workbook
+
+        wb = Workbook()
+        ws = wb.active
+        header = ["In the EER for:", None] + list(mod.BROAD_DOLLAR_REF_AREAS.values())
+        ws.append(header)
+        us_weights = {ra: float(i) + 0.5 for i, ra in enumerate(mod.BROAD_DOLLAR_REF_AREAS.values())}
+        us_row = ["United States", "US"] + [us_weights[ra] for ra in mod.BROAD_DOLLAR_REF_AREAS.values()]
+        ws.append(us_row)
+        buf = BytesIO()
+        wb.save(buf)
+        wbr = load_workbook(BytesIO(buf.getvalue()), read_only=True, data_only=True)
+
+        result = mod.extract_us_weights_from_sheet(wbr.active, mod.BROAD_DOLLAR_REF_AREAS)
+        assert result is not None
+        for currency, ref_area in mod.BROAD_DOLLAR_REF_AREAS.items():
+            assert result[currency] == us_weights[ref_area]
+        wbr.close()
+
+    def test_extract_us_weights_from_sheet_returns_none_when_us_row_missing(self):
+        import check_bis_eer_weights as mod
+        from io import BytesIO
+        from openpyxl import Workbook, load_workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["In the EER for:", None, "AU", "XM"])
+        ws.append(["Australia", "AU", 1.0, 2.0])
+        buf = BytesIO()
+        wb.save(buf)
+        wbr = load_workbook(BytesIO(buf.getvalue()), read_only=True, data_only=True)
+
+        assert mod.extract_us_weights_from_sheet(wbr.active, mod.BROAD_DOLLAR_REF_AREAS) is None
+        wbr.close()
+
+    def test_extract_us_weights_from_sheet_partial_when_currency_column_missing(self):
+        """Only 2 of the 13 target currencies appear as header columns in
+        this sheet -- the other 11 should come back None individually,
+        not turn the whole extraction into a failure. Partial results are
+        surfaced, not hidden (module docstring)."""
+        import check_bis_eer_weights as mod
+        from io import BytesIO
+        from openpyxl import Workbook, load_workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["In the EER for:", None, "AU", "XM"])
+        ws.append(["United States", "US", 5.5, 6.6])
+        buf = BytesIO()
+        wb.save(buf)
+        wbr = load_workbook(BytesIO(buf.getvalue()), read_only=True, data_only=True)
+
+        result = mod.extract_us_weights_from_sheet(wbr.active, mod.BROAD_DOLLAR_REF_AREAS)
+        assert result is not None
+        assert result["AUD"] == 5.5
+        assert result["EUR"] == 6.6
+        assert result["JPY"] is None
+        assert result["NOK"] is None
+        wbr.close()
+
+    def test_extract_us_weights_from_sheet_respects_us_ref_area_override(self):
+        import check_bis_eer_weights as mod
+        from io import BytesIO
+        from openpyxl import Workbook, load_workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["In the EER for:", None, "AU", "XM"])
+        ws.append(["United States (alt code)", "USA", 7.0, 8.0])
+        buf = BytesIO()
+        wb.save(buf)
+        wbr = load_workbook(BytesIO(buf.getvalue()), read_only=True, data_only=True)
+
+        assert mod.extract_us_weights_from_sheet(wbr.active, mod.BROAD_DOLLAR_REF_AREAS, us_ref_area="US") is None
+        result = mod.extract_us_weights_from_sheet(wbr.active, mod.BROAD_DOLLAR_REF_AREAS, us_ref_area="USA")
+        assert result is not None
+        assert result["AUD"] == 7.0
+        wbr.close()
+
+    def test_extract_weights_returns_1_on_download_failure(self, monkeypatch):
+        import check_bis_eer_weights as mod
+
+        class _FakeHttpx:
+            @staticmethod
+            def get(*a, **kw):
+                raise ConnectionError("simulated: no network access to www.bis.org")
+
+        monkeypatch.setitem(sys.modules, "httpx", _FakeHttpx)
+        assert mod._extract_weights() == 1
+
+    def test_extract_weights_returns_1_on_unparseable_content(self, monkeypatch):
+        import check_bis_eer_weights as mod
+
+        class _FakeResponse:
+            content = b"not a real xlsx file"
+            def raise_for_status(self): pass
+
+        class _FakeHttpx:
+            @staticmethod
+            def get(*a, **kw): return _FakeResponse()
+
+        monkeypatch.setitem(sys.modules, "httpx", _FakeHttpx)
+        assert mod._extract_weights() == 1
+
+    def test_extract_weights_auto_selects_most_recent_vintage_sheet(self, monkeypatch, capsys):
+        """No --sheet override -> should pick 2020_2022 (the newer of the
+        2 synthetic vintages), not 2017_2019, via max(sheetnames) -- the
+        "YYYY_YYYY" naming sorts correctly by year."""
+        import check_bis_eer_weights as mod
+
+        xlsx_bytes = TestCheckBisEerWeights._build_synthetic_weightsb_bytes()
+
+        class _FakeResp:
+            content = xlsx_bytes
+            def raise_for_status(self): pass
+
+        class _FakeHttpx:
+            @staticmethod
+            def get(*a, **kw): return _FakeResp()
+
+        monkeypatch.setitem(sys.modules, "httpx", _FakeHttpx)
+        monkeypatch.setattr(mod, "BROAD_DOLLAR_REF_AREAS", {"AUD": "AU", "EUR": "XM"})
+        result = mod._extract_weights()
+        captured = capsys.readouterr()
+        assert result == 0
+        assert "Sheet: 2020_2022" in captured.out
+        assert "22.220000" in captured.out  # the newer vintage's AU weight, not 11.11
+
+    def test_extract_weights_sheet_override_works(self, monkeypatch, capsys):
+        import check_bis_eer_weights as mod
+
+        xlsx_bytes = TestCheckBisEerWeights._build_synthetic_weightsb_bytes()
+
+        class _FakeResp:
+            content = xlsx_bytes
+            def raise_for_status(self): pass
+
+        class _FakeHttpx:
+            @staticmethod
+            def get(*a, **kw): return _FakeResp()
+
+        monkeypatch.setitem(sys.modules, "httpx", _FakeHttpx)
+        monkeypatch.setattr(mod, "BROAD_DOLLAR_REF_AREAS", {"AUD": "AU", "EUR": "XM"})
+        result = mod._extract_weights(sheet="2017_2019")
+        captured = capsys.readouterr()
+        assert result == 0
+        assert "Sheet: 2017_2019" in captured.out
+        assert "11.110000" in captured.out
+
+    def test_extract_weights_returns_1_for_unknown_sheet(self, monkeypatch):
+        import check_bis_eer_weights as mod
+
+        xlsx_bytes = TestCheckBisEerWeights._build_synthetic_weightsb_bytes()
+
+        class _FakeResp:
+            content = xlsx_bytes
+            def raise_for_status(self): pass
+
+        class _FakeHttpx:
+            @staticmethod
+            def get(*a, **kw): return _FakeResp()
+
+        monkeypatch.setitem(sys.modules, "httpx", _FakeHttpx)
+        assert mod._extract_weights(sheet="1999_2001_TYPO") == 1
+
+    def test_extract_weights_returns_1_when_us_row_not_found(self, monkeypatch):
+        import check_bis_eer_weights as mod
+        from io import BytesIO
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "2020_2022"
+        ws.append(["In the EER for:", None, "AU", "XM"])
+        ws.append(["Australia", "AU", 1.0, 2.0])  # no US row at all
+        buf = BytesIO()
+        wb.save(buf)
+
+        class _FakeResp:
+            content = buf.getvalue()
+            def raise_for_status(self): pass
+
+        class _FakeHttpx:
+            @staticmethod
+            def get(*a, **kw): return _FakeResp()
+
+        monkeypatch.setitem(sys.modules, "httpx", _FakeHttpx)
+        monkeypatch.setattr(mod, "BROAD_DOLLAR_REF_AREAS", {"AUD": "AU", "EUR": "XM"})
+        assert mod._extract_weights() == 1
+
+    def test_cli_extract_weights_flag_calls_extract_weights(self, monkeypatch):
+        import check_bis_eer_weights as mod
+        monkeypatch.setattr(sys, "argv", ["check_bis_eer_weights.py", "--extract-weights"])
+        monkeypatch.setattr(mod, "_extract_weights", lambda sheet, us_ref_area: 0)
+        assert mod.main() == 0
+
 
 class TestCheckFredCommoditySeries:
 
@@ -487,3 +726,206 @@ class TestCheckFredCommoditySeries:
         monkeypatch.setattr(mod, "_fetch_observations", _fake_fetch)
         monkeypatch.setattr(sys, "argv", ["check_fred_commodity_series.py"])
         assert mod.main() == 1
+
+
+class TestCheckProxyCorrelation:
+    """scripts/preflight/check_proxy_correlation.py -- the proxy
+    correlation studies for CPO/RUBBER/TIN/NICKEL (F34.SI/STA.BK/AFM.V/
+    NIC.AX vs. PPOILUSDM/PRUBBUSDM/PTINUSDM/PNICKUSDM), unblocked by
+    RISK-15's FRED live confirmation (9 Aug 2026). Covers the pure
+    correlation math (no network) and the I/O wrapper's error-handling
+    paths (mocked fetch functions) -- same split as every other class in
+    this file."""
+
+    def test_proxy_tickers_has_4_entries(self):
+        import check_proxy_correlation as mod
+        assert mod.PROXY_TICKERS == {
+            "CPO": "F34.SI", "RUBBER": "STA.BK",
+            "TIN": "AFM.V", "NICKEL": "NIC.AX",
+        }
+
+    def test_benchmark_series_has_4_entries_and_matches_fred_commodity_series(self):
+        """Cross-consistency regression guard: BENCHMARK_SERIES is
+        duplicated from check_fred_commodity_series.py's
+        EXPECTED_COMMODITY_SERIES deliberately (independence rationale,
+        module docstring) -- but the 4 series IDs used here must still be
+        a subset of what that script actually checks, or this script
+        would silently correlate against an unverified series ID."""
+        import check_proxy_correlation as mod
+        import check_fred_commodity_series as fred_mod
+        assert mod.BENCHMARK_SERIES == {
+            "CPO": "PPOILUSDM", "RUBBER": "PRUBBUSDM",
+            "TIN": "PTINUSDM", "NICKEL": "PNICKUSDM",
+        }
+        assert set(mod.BENCHMARK_SERIES.values()) <= set(fred_mod.EXPECTED_COMMODITY_SERIES)
+
+    def test_to_returns_computes_pct_change(self):
+        import check_proxy_correlation as mod
+        levels = {"2020-01-01": 100.0, "2020-02-01": 110.0, "2020-03-01": 99.0}
+        returns = mod._to_returns(levels)
+        assert returns["2020-02-01"] == pytest.approx(0.10)
+        assert returns["2020-03-01"] == pytest.approx(-0.10)
+        assert "2020-01-01" not in returns  # no prior entry to diff against
+
+    def test_to_returns_skips_gaps_without_fabricating(self):
+        """A missing month (Feb) must not be interpolated or forward-
+        filled -- the March return is computed against January (the only
+        prior entry actually present), not silently invented."""
+        import check_proxy_correlation as mod
+        levels = {"2020-01-01": 100.0, "2020-03-01": 121.0}
+        returns = mod._to_returns(levels)
+        assert len(returns) == 1
+        assert returns["2020-03-01"] == pytest.approx(0.21)
+
+    def test_compute_proxy_correlation_perfect_positive(self):
+        import check_proxy_correlation as mod
+        months = [f"2020-{m:02d}-01" for m in range(1, 13)] + [f"2021-{m:02d}-01" for m in range(1, 13)]
+        proxy, bench = {}, {}
+        vp, vb = 100.0, 50.0
+        for i, m in enumerate(months):
+            proxy[m], bench[m] = vp, vb
+            pct = 0.01 * ((i % 5) - 2)  # deterministic, non-constant
+            vp *= (1 + pct)
+            vb *= (1 + pct)
+        corr, n = mod.compute_proxy_correlation(proxy, bench)
+        assert corr == pytest.approx(1.0, abs=1e-9)
+        assert n == len(months) - 1
+
+    def test_compute_proxy_correlation_perfect_negative(self):
+        import check_proxy_correlation as mod
+        months = [f"2020-{m:02d}-01" for m in range(1, 13)] + [f"2021-{m:02d}-01" for m in range(1, 13)]
+        proxy, bench = {}, {}
+        vp, vb = 100.0, 50.0
+        for i, m in enumerate(months):
+            proxy[m], bench[m] = vp, vb
+            pct = 0.01 * ((i % 5) - 2)
+            vp *= (1 + pct)
+            vb *= (1 - pct)
+        corr, n = mod.compute_proxy_correlation(proxy, bench)
+        assert corr == pytest.approx(-1.0, abs=1e-9)
+
+    def test_compute_proxy_correlation_returns_none_for_insufficient_overlap(self):
+        """MIN_OVERLAPPING_MONTHS defaults to 12 -- only 1 return pair
+        here (2 price levels) should refuse to compute, not return a
+        misleading number from 2 data points."""
+        import check_proxy_correlation as mod
+        proxy = {"2020-01-01": 100.0, "2020-02-01": 101.0}
+        bench = {"2020-01-01": 50.0, "2020-02-01": 51.0}
+        corr, n = mod.compute_proxy_correlation(proxy, bench)
+        assert corr is None
+        assert n == 1
+
+    def test_compute_proxy_correlation_returns_none_for_zero_variance(self):
+        """A constant series has an undefined (not zero) correlation --
+        statistics.correlation raises StatisticsError, which must be
+        caught, not propagated as a crash."""
+        import check_proxy_correlation as mod
+        months = [f"2020-{m:02d}-01" for m in range(1, 15)]
+        const_proxy = {m: 100.0 for m in months}
+        varying_bench = {m: 50.0 * (1 + 0.01 * i) for i, m in enumerate(months)}
+        corr, n = mod.compute_proxy_correlation(const_proxy, varying_bench)
+        assert corr is None
+
+    def test_study_one_returns_false_on_yfinance_exception(self, monkeypatch):
+        import check_proxy_correlation as mod
+
+        def _raise(*a, **kw):
+            raise ConnectionError("simulated: no network access to finance.yahoo.com")
+
+        monkeypatch.setattr(mod, "_fetch_proxy_monthly_closes", _raise)
+        ok, msg = mod._study_one("NICKEL", "NIC.AX", "PNICKUSDM", "fake-key")
+        assert ok is False
+        assert "yfinance fetch raised" in msg
+
+    def test_study_one_returns_false_on_empty_proxy_data(self, monkeypatch):
+        import check_proxy_correlation as mod
+        monkeypatch.setattr(mod, "_fetch_proxy_monthly_closes", lambda *a, **kw: {})
+        ok, msg = mod._study_one("NICKEL", "NIC.AX", "PNICKUSDM", "fake-key")
+        assert ok is False
+        assert "no usable monthly closes" in msg
+
+    def test_study_one_returns_false_on_fred_exception(self, monkeypatch):
+        import check_proxy_correlation as mod
+        monkeypatch.setattr(mod, "_fetch_proxy_monthly_closes", lambda *a, **kw: {"2020-01-01": 1.0})
+
+        def _raise(*a, **kw):
+            raise ConnectionError("simulated: no network access to api.stlouisfed.org")
+
+        monkeypatch.setattr(mod, "_fetch_fred_monthly", _raise)
+        ok, msg = mod._study_one("NICKEL", "NIC.AX", "PNICKUSDM", "fake-key")
+        assert ok is False
+        assert "FRED fetch raised" in msg
+
+    def test_study_one_returns_false_on_empty_fred_data(self, monkeypatch):
+        import check_proxy_correlation as mod
+        monkeypatch.setattr(mod, "_fetch_proxy_monthly_closes", lambda *a, **kw: {"2020-01-01": 1.0})
+        monkeypatch.setattr(mod, "_fetch_fred_monthly", lambda *a, **kw: {})
+        ok, msg = mod._study_one("NICKEL", "NIC.AX", "PNICKUSDM", "fake-key")
+        assert ok is False
+        assert "no usable observations" in msg
+
+    def test_study_one_returns_true_with_reference_point_in_message(self, monkeypatch):
+        """Confirms the success message cites the VALE/Iron Ore reference
+        point (ADR-005) rather than inventing a pass/fail threshold this
+        project has never actually adopted."""
+        import check_proxy_correlation as mod
+        months = [f"2020-{m:02d}-01" for m in range(1, 13)] + [f"2021-{m:02d}-01" for m in range(1, 13)]
+        proxy, bench = {}, {}
+        vp, vb = 10.0, 500.0
+        for i, m in enumerate(months):
+            proxy[m], bench[m] = vp, vb
+            pct = 0.01 * ((i % 5) - 2)
+            vp *= (1 + pct)
+            vb *= (1 + pct)
+        monkeypatch.setattr(mod, "_fetch_proxy_monthly_closes", lambda *a, **kw: proxy)
+        monkeypatch.setattr(mod, "_fetch_fred_monthly", lambda *a, **kw: bench)
+        ok, msg = mod._study_one("NICKEL", "NIC.AX", "PNICKUSDM", "fake-key")
+        assert ok is True
+        assert "corr=" in msg
+        assert "ADR-005" in msg
+
+    def test_main_returns_1_without_api_key(self, monkeypatch):
+        import check_proxy_correlation as mod
+        monkeypatch.delenv("FRED_API_KEY", raising=False)
+        monkeypatch.setattr(sys, "argv", ["check_proxy_correlation.py"])
+        assert mod.main() == 1
+
+    def test_main_returns_1_for_unknown_symbol_filter(self, monkeypatch):
+        import check_proxy_correlation as mod
+        monkeypatch.setenv("FRED_API_KEY", "fake-key")
+        monkeypatch.setattr(sys, "argv", ["check_proxy_correlation.py", "--symbol", "NOT_REAL"])
+        assert mod.main() == 1
+
+    def test_main_all_pass_returns_0(self, monkeypatch):
+        import check_proxy_correlation as mod
+        monkeypatch.setenv("FRED_API_KEY", "fake-key")
+        monkeypatch.setattr(mod, "_study_one", lambda *a, **kw: (True, "OK -- corr=+0.5 over 20 overlapping monthly returns"))
+        monkeypatch.setattr(sys, "argv", ["check_proxy_correlation.py"])
+        assert mod.main() == 0
+
+    def test_main_one_failure_returns_1(self, monkeypatch):
+        import check_proxy_correlation as mod
+        monkeypatch.setenv("FRED_API_KEY", "fake-key")
+
+        def _mixed(symbol, yf_symbol, fred_series, api_key, period="15y"):
+            if symbol == "TIN":
+                return False, "simulated failure"
+            return True, "OK"
+
+        monkeypatch.setattr(mod, "_study_one", _mixed)
+        monkeypatch.setattr(sys, "argv", ["check_proxy_correlation.py"])
+        assert mod.main() == 1
+
+    def test_main_symbol_filter_calls_only_that_symbol(self, monkeypatch):
+        import check_proxy_correlation as mod
+        monkeypatch.setenv("FRED_API_KEY", "fake-key")
+        calls = []
+
+        def _record(symbol, yf_symbol, fred_series, api_key, period="15y"):
+            calls.append(symbol)
+            return True, "OK"
+
+        monkeypatch.setattr(mod, "_study_one", _record)
+        monkeypatch.setattr(sys, "argv", ["check_proxy_correlation.py", "--symbol", "TIN"])
+        assert mod.main() == 0
+        assert calls == ["TIN"]

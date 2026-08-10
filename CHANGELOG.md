@@ -1,5 +1,124 @@
 # CHANGELOG — Data Platform
 
+## v1.15.0 — RISK-15 Live-Confirm, Gate 1 Extraction Pass, Studi Korelasi Proxy (Agustus 2026)
+
+Dokumen referensi: tidak ada decision document terpisah — sesi
+tiga-bagian yang tidak menyentuh `src/`, menutup verifikasi live RISK-15
+yang tersisa dan menulis dua kemampuan preflight baru: Gate 1
+(ADR-017/018, RISK-16) dan studi korelasi proxy (RISK-1 residual gap).
+
+Total: **1 verifikasi live ditutup** (RISK-15) | **2 preflight script
+baru/diperluas** (`check_bis_eer_weights.py --extract-weights`,
+`check_proxy_correlation.py`) | **28 test baru** | **1432 → 1460
+passed / 0 failed / 0 error**.
+
+### VERIFY Risk15LiveFred [KNOWN_RISKS.md] — `check_fred_commodity_series.py` Dijalankan Live di M1, Semua 6 Series PASS
+
+**Root cause**: v1.14.0 menutup RISK-15 secara kode/config, tapi
+entry-nya sendiri secara eksplisit menyisakan "Not yet run: a real
+FRED_API_KEY-backed invocation ... against live FRED" sebagai catatan
+terbuka.
+
+**Fix**: Ovi menjalankan `check_fred_commodity_series.py` di M1 dengan
+`FRED_API_KEY` asli — seluruh 6 series PASS (`PIORECRUSDM`,
+`PCOALAUUSDM`, `PPOILUSDM`, `PRUBBUSDM`, `PTINUSDM`, `PNICKUSDM`,
+semuanya `latest=2026-06-01`, 12/12 observasi usable). KNOWN_RISKS.md
+RISK-15 diupdate untuk mencatat ini — separuh catatan "Not yet run"
+ditutup.
+
+**Yang belum**: full `poetry run pytest` di hardware nyata
+mengkonfirmasi 1432/1432 secara empiris — tidak termasuk dalam run 9
+Agustus ini, dan belum dikonfirmasi terpisah.
+
+### ADD Gate1ExtractionPass [scripts/preflight/check_bis_eer_weights.py, tests/unit/test_preflight_scripts.py] — `extract_us_weights_from_sheet()` + `--extract-weights` CLI Mode
+
+**Root cause**: KNOWN_RISKS.md RISK-16/Gate 1 section (4 Agustus 2026)
+mencatat layout `weightsb.xlsx` sudah sepenuhnya dikarakterisasi tapi
+nilai per-currency belum diekstrak — scan `--discover-weights`
+menemukan posisi 13 target currency sebagai KOLOM header, tapi tidak
+pernah mencari baris US sendiri (US bukan salah satu dari 13 target
+REF_AREA).
+
+**Fix**: `extract_us_weights_from_sheet()` (pure function, tanpa I/O)
+ditambahkan — mencari baris dengan kolom-2 == "US", mencari baris
+header secara independen (>=2 match dari 13 target REF_AREA sebagai
+penanda, bukan hardcode row 6), lalu membaca intersection: nilai baris
+US di setiap kolom target currency. Posisi row/column DIDERIVASI ULANG
+setiap kali dipanggil — tidak mempercayai temuan "identik di seluruh 10
+sheet" dari run 4 Agustus sebagai layout tetap, mengikuti disiplin
+"jangan tebak layout, verifikasi" yang sama yang sudah menemukan &
+memperbaiki 3 kesalahan tebakan sebelumnya di script ini (WS_CBPOL_D,
+WS_EER_M, segmen "structure/" yang hilang). `--extract-weights` CLI
+mode ditambahkan, default ke vintage sheet terbaru (`max(sheetnames)` →
+`2020_2022`), dengan override `--sheet` dan `--us-ref-area`.
+
+**Diverifikasi (empiris, sandbox saja)**: 11 test baru
+(`TestCheckBisEerWeights::test_extract_*`) terhadap workbook sintetis
+yang meniru layout nyata yang sudah dikonfirmasi (run 4 Agustus) —
+happy path 13 currency, US row hilang → None, currency column hilang →
+partial result (bukan total failure), override `us_ref_area`,
+auto-select vintage terbaru, override `--sheet` manual, unknown sheet →
+fail bersih, US row tidak ditemukan → fail bersih, CLI wiring. Satu
+kesalahan penulisan test ditemukan dan diperbaiki saat proses ini
+sendiri (assertion awal salah mengecek nilai baris Australia, bukan
+baris US, yang dibangun test itu sendiri) — dijaga di komentar test
+sebagai jejak audit. **Gate 1 belum ditutup** — ini baru menulis &
+menguji-unit kode ekstraksi, bukan menjalankannya terhadap file
+bis.org yang sesungguhnya (tidak ada sandbox di proyek ini yang punya
+rute jaringan ke bis.org). Menjalankan `--extract-weights` di M1
+adalah langkah berikutnya.
+
+### ADD ProxyCorrelationStudy [scripts/preflight/check_proxy_correlation.py, tests/unit/test_preflight_scripts.py] — Studi Korelasi CPO/RUBBER/TIN/NICKEL vs FRED Track 2
+
+**Root cause**: `instruments_taxonomy.yaml` sendiri mencatat inline di
+keempat entry NICKEL/TIN/CPO/RUBBER bahwa `proxy_for`/
+`proxy_correlation_expected` sengaja tidak diisi — belum ada studi
+korelasi empiris (berbeda dari VALE yang punya ~0.81, ADR-005).
+`validate_instruments.py` mewajibkan `proxy_correlation_expected`
+setiap kali `proxy_for` ada, jadi keempat instrumen ini tidak bisa
+mendapat salah satu field sampai angka nyata ada. RISK-15 sendiri
+(v1.14.0) mencatat: "the correlation studies need a commodity price
+benchmark ... these 6 series are exactly that benchmark, now
+available" — benchmark itu baru dikonfirmasi live hari ini (lihat
+entry VERIFY di atas).
+
+**Fix**: `scripts/preflight/check_proxy_correlation.py` baru. Karena
+tidak ada benchmark harian resmi untuk keempat komoditas ini (persis
+kenapa mereka di-proxy sejak awal — lihat ADR-029), metodologinya
+berbeda dari VALE/Iron Ore ("rolling 60D" terhadap benchmark harian):
+proxy yfinance di-resample ke closing bulanan (tanggal 1 tiap bulan,
+selaras dengan konvensi tanggal FRED), dikorelasikan sebagai
+month-over-month return (bukan level harga — menghindari spurious
+correlation dua seri yang sama-sama trending, mengikuti prinsip yang
+sama dengan CorrelationModule platform ini, Architecture v2.0 §6.2)
+terhadap return bulanan FRED Track 2. `compute_proxy_correlation()`
+(pure function, pakai `statistics.correlation` stdlib) dipisah dari
+I/O — pola separation-of-concerns yang sama dengan
+`extract_us_weights_from_sheet()`. Minimum 12 pasang return overlap
+diwajibkan (fail closed, bukan korelasi dari sedikit titik data yang
+menyesatkan — sikap yang sama dengan SchemaValidator's quarantine, GD
+§3.7).
+
+**Diverifikasi (empiris, sandbox saja)**: 17 test baru
+(`TestCheckProxyCorrelation`) — matematika korelasi murni (korelasi
+positif sempurna, negatif sempurna, overlap tidak cukup → None, varians
+nol → None tanpa crash), penanganan error I/O wrapper (yfinance
+exception, data proxy kosong, FRED exception, data FRED kosong), pesan
+sukses mengutip titik referensi VALE/ADR-005 (bukan threshold
+pass/fail yang dikarang), CLI wiring. Cross-consistency guard
+ditambahkan: `BENCHMARK_SERIES` di script ini divalidasi sebagai subset
+dari `check_fred_commodity_series.py`'s `EXPECTED_COMMODITY_SERIES`.
+Seluruh 71 test di `test_preflight_scripts.py` (43 lama + 28 baru)
+dikumpulkan dan lolos bersama di sandbox terisolasi sebelum kedua
+script menyentuh repo asli. **Belum dijalankan** terhadap
+yfinance/FRED nyata — hasil korelasi aktual, dan keputusan mengisi
+`proxy_for`/`proxy_correlation_expected` di `instruments_taxonomy.yaml`,
+adalah langkah tindak lanjut yang disengaja tidak dilakukan script ini.
+
+**Test baseline**: `tests/COUNT_BASELINE.txt` 1432 → 1460 (+28).
+
+---
+
 ## v1.14.0 — RISK-15 Diselesaikan: FRED Track 2 Commodity Supplements (Agustus 2026)
 
 Dokumen referensi: tidak ada decision document terpisah — thread baru,

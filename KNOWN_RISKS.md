@@ -164,7 +164,18 @@ unverified "CIRO trade resumption" headline (~Jan 2026) surfaced during
 candidate research, not investigated. Neither blocks this resolution —
 both are monitored risks on the *new* sources, unrelated to the
 tvdatafeed retirement itself, and are lower severity than a fully broken
-primary source.
+primary source. Also unresolved: none of the 4 proxies has an empirical
+`proxy_correlation_expected` value (unlike VALE's ~0.81, ADR-005) —
+`instruments_taxonomy.yaml`'s own NICKEL/TIN/CPO/RUBBER entries carry
+this exact caveat inline, deliberately leaving `proxy_for`/
+`proxy_correlation_expected` unset rather than guessing. **Update (9 Aug
+2026):** a new preflight script,
+`scripts/preflight/check_proxy_correlation.py` (17 new tests), computes
+month-over-month return correlation between each proxy's yfinance
+history and its FRED Track 2 benchmark (RISK-15) — authored and
+unit-tested against synthetic data, not yet run against real
+yfinance/FRED. Wiring a real result into `instruments_taxonomy.yaml` is
+a follow-up decision once that run happens.
 
 ---
 
@@ -1184,10 +1195,16 @@ Guide's own G-4 rationale). Every file write closed-loop verified:
 re-fetched from the live repo after each edit and diffed against the
 sandbox-validated version before moving on.
 
-**Not yet run:** a real `FRED_API_KEY`-backed invocation of
-`check_fred_commodity_series.py` against live FRED, and a full `poetry
-run pytest` on real hardware — both need to happen there before this is
-exercised end-to-end. Nothing above depends on either to be correctly
+**Live-confirmed (9 Aug 2026):** Ovi ran `check_fred_commodity_series.py`
+on the M1 with a real `FRED_API_KEY` — all 6 series PASS, all with
+`latest=2026-06-01` and 12/12 usable observations in the last 12
+requested (`PIORECRUSDM`, `PCOALAUUSDM`, `PPOILUSDM`, `PRUBBUSDM`,
+`PTINUSDM`, `PNICKUSDM`). This closes the live-FRED half of this entry's
+own "Not yet run" note.
+
+**Still not run:** a full `poetry run pytest` on real hardware confirming
+1432/1432 for real — not part of the 9 Aug 2026 preflight run, and not
+otherwise confirmed to date. Nothing above depends on it to be correctly
 specified and offline-verified; this is the same authoring/execution
 split every other preflight script in this project already carries.
 
@@ -1378,10 +1395,27 @@ internal layout is now fully characterized against the real data, not
 just a synthetic test workbook) but Gate 1 is **still not closed** —
 the scan gives coordinates, not values, and doesn't itself locate the
 US row (not one of the 13 target codes) whose weights-on-partners are
-what the Broad Dollar Index actually needs. The targeted extraction
-pass — find the US row, read its 13 target-column values, wire into
-`BIS_WEIGHTS` — is unblocked but not started. Full detail:
+what the Broad Dollar Index actually needs. Full detail:
 `dev-log/2026-08-04-gate1-live-confirmation-poetry-lock-fix.md`.
+
+**Extraction pass authored (9 Aug 2026):**
+`extract_us_weights_from_sheet()` (pure, no I/O) plus a new
+`--extract-weights` CLI mode added to `check_bis_eer_weights.py` —
+locates the US row (column-2 match; not one of the 13 target codes, so
+never surfaced by `--discover-weights`'s own scan), re-derives the
+header row's column positions on every call rather than trusting the 4
+Aug run's "identical across all 10 sheets" finding as a hardcoded
+layout, defaults to the most recent vintage (`max(sheetnames)` →
+`2020_2022`) with a `--sheet` override, and reports each of the 13
+target currencies' weight in the US's own Broad EER basket. 11 new tests
+(`TestCheckBisEerWeights::test_extract_*`), all against a synthetic
+workbook shaped like the real confirmed layout — same caveat as
+`--discover-weights`'s own tests: proves the parsing logic is correct,
+not that it matches `bis.org`'s specific real file, which still has
+never been reached from any sandbox on this project. **Gate 1 remains
+open** — this moves the targeted extraction pass from "unblocked but not
+started" to "written and unit-tested," not to "values extracted."
+Running `--extract-weights` for real on the M1 is the next step.
 
 ### What this does NOT resolve
 
@@ -1419,7 +1453,23 @@ endpoint correctness itself was then independently confirmed a third way
 
 ---
 
-*Last updated: v1.14.0 — RISK-15 (FRED Track 2 commodity supplements)
+*Last updated: v1.15.0 — Three-part session, none touching `src/`:
+(1) RISK-15's live-FRED half confirmed — `check_fred_commodity_series.py`
+run for real on the M1, all 6 Track 2 series PASS. (2) Gate 1 (RISK-16)
+extraction pass authored: `extract_us_weights_from_sheet()` +
+`--extract-weights` CLI mode on `check_bis_eer_weights.py`, 11 new tests
+against a synthetic workbook — not yet run against the real file. (3)
+Proxy correlation studies authored: new
+`scripts/preflight/check_proxy_correlation.py` (CPO/RUBBER/TIN/NICKEL
+vs. their RISK-15 FRED benchmarks, monthly-return Pearson correlation),
+17 new tests — not yet run against real yfinance/FRED. All 71 tests in
+`test_preflight_scripts.py` (43 pre-existing + 28 new) collected and
+passed together in an isolated sandbox before either script touched the
+real repo. MINOR bump: two new preflight capabilities, no `src/` change
+(matching this project's own "new job/feature" MINOR precedent, not a
+PATCH-level fix). 1432 → 1460 passed (+28), coverage unchanged. August
+2026.
+Prior entry: v1.14.0 — RISK-15 (FRED Track 2 commodity supplements)
 resolved: `config/fred_series.yaml` gained a new `commodity` domain (6
 series — 2 pre-existing per ADR-005/006, 4 new per ADR-030–033),
 `src/bronze/fred_ingester.py` gained matching `RELEASE_LAG_DAYS`
