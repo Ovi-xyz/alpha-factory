@@ -65,4 +65,6 @@ class TestPipelineConfigIntegration:
         loader = get_loader()
         # FIX GMI-IL-001: was == 643, now 640 — ADR-003 reclassified SPX/VIX/DXY
         # to Layer 2 context (Layer 1 count() scope is unchanged in meaning).
-        assert loader.count() == 640
+        # UPD ADR-036 (GMI_Decision_Document_v8.docx, 10 Aug 2026): USD_IDR
+        # reclassified forex -> context.dollar_basket — 640 -> 639.
+        assert loader.count() == 639

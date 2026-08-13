@@ -177,6 +177,28 @@ unit-tested against synthetic data, not yet run against real
 yfinance/FRED. Wiring a real result into `instruments_taxonomy.yaml` is
 a follow-up decision once that run happens.
 
+**Update (10 Aug 2026) — run for real, decision made (ADR-034):**
+`check_proxy_correlation.py` was run live against real yfinance/FRED
+data for the first time. Results, against each proxy's RISK-15 FRED
+Track 2 benchmark: NICKEL (NIC.AX) +0.586/36mo, CPO (F34.SI) +0.405/120mo,
+RUBBER (STA.BK) +0.229/120mo, TIN (AFM.V) +0.139/120mo — all well below
+this platform's own VALE (~0.81, ADR-005) / WHC.AX (~0.78, ADR-006)
+proxy-quality precedent. `GMI_Decision_Document_v8.docx` ADR-034
+(differentiated by measured strength, not treated uniformly): **TIN and
+RUBBER re-deferred** (`context_available: false`, `deferred_reason` set,
+`proxy_for`/`proxy_correlation_expected` left unset — same state they
+held before ADR-031/032) — too weak to trust as unbiased context
+anchors. **CPO and NICKEL retained active**, now with `proxy_for`
+(`CPO_FCPO_BMDI`, `NICKEL_LME_NI`) and `proxy_correlation_expected`
+(0.405, 0.586) set to the measured values, plus an explicit "moderate,
+not strong" caveat in each entry's `notes`. NICKEL's 36-month sample
+(vs. 120 for the other three) is flagged separately — cause (NIC.AX's
+own price-history depth on yfinance vs. something else) not
+investigated. Implemented via the Filesystem MCP connector on
+11 Aug 2026, sandbox-validated first (`validate_instruments.py` exit 0,
+699 symbols; full `pytest` suite: 1466 collected, 0 failed) before being
+mirrored to the live repo. `deferred_count()`: 0 → 2.
+
 ---
 
 ## RISK-2: DuckDB rejects glob patterns with multiple `**` wildcards — RESOLVED (audited)

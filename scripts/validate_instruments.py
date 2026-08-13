@@ -80,7 +80,12 @@ REQUIRED_FIELDS: dict[str, list[str]] = {
     # (Architecture v2.1 Addendum §7.1 — "Required For: ALL commodity").
     "commodity":  ["symbol", "yfinance_symbol", "commodity_role", "commodity_subcategory"],
     "forex":      ["symbol", "raw_symbol", "yfinance_symbol"],
-    "index":      ["symbol", "yfinance_symbol"],
+    # REMOVED ADR-035 (GMI_Decision_Document_v8.docx, 10 Aug 2026): 'index'
+    # dropped -- permanently empty since ADR-003 (SPX/VIX reclassified to
+    # Layer 2), confirmed via instrument_loader.py's own comment and
+    # silver_scope.py::layer1_markets()'s dynamic derivation never
+    # surfacing it. See config/schemas/instruments/*.schema.yaml for the
+    # matching jsonschema-side removal this ADR also required.
 }
 
 # GMI-VAL-001: canonical 22-subcategory taxonomy — Rates Adjustment v1.0 §5.1
@@ -212,7 +217,10 @@ def _validate_layer1(data: dict, errors: list[str]) -> list[str]:
     Returns the flat list of all Layer 1 symbols collected.
     """
     all_symbols: list[str] = []
-    layer1_markets = ("us_stocks", "idx_stocks", "commodity", "forex", "index")
+    # UPD ADR-035 (GMI_Decision_Document_v8.docx, 10 Aug 2026): 'index'
+    # removed -- permanently empty since ADR-003, see REQUIRED_FIELDS
+    # comment above for the full rationale.
+    layer1_markets = ("us_stocks", "idx_stocks", "commodity", "forex")
 
     for market in layer1_markets:
         content = data.get(market)

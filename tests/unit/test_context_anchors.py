@@ -9,7 +9,8 @@ Test matrix:
   - resolve() writes context_anchors_{date}.parquet using only
     InstrumentLoader — no Silver DuckDB query involved (Architecture v2.0
     Table §4.2: "Filter: None").
-  - Deferred instruments (TIN, CPO, RUBBER; ADR-007) excluded.
+  - Deferred instruments (TIN, RUBBER as of ADR-034, GMI_Decision_Document_v8.docx,
+    10 Aug 2026; CPO/NICKEL remain active) excluded.
   - Output schema carries all required Layer 2 metadata columns.
   - load() / load_full() success paths (NEW — these had ZERO test coverage
     under either name, before or after the split; load_context_full() in
@@ -46,10 +47,12 @@ class TestContextAnchorsResolve:
         InstrumentLoader (no Silver DuckDB query, no silver_1d_path argument
         even exists on this method's signature). We do NOT mock get_loader
         here — it exercises the real InstrumentLoader against live config.
-        FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026): 59
-        active context instruments (was 55) — CPO/RUBBER/TIN/NICKEL all
-        un-deferred (yfinance equity proxies replace tvdatafeed, which was
-        retired entirely, ADR-029). Zero deferred Layer 2 instruments remain.
+        UPD ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026): 58 active
+        context instruments (58, not 59/60) — TIN and RUBBER re-deferred
+        (weak equity-proxy correlation vs FRED Track 2 benchmarks); CPO and
+        NICKEL remain active with correlation caveats. Combined with
+        ADR-036's IDR addition (Layer 2 total slots 59->60), active count
+        is 60 - 2 deferred = 58.
         """
         resolver, output_path = _resolver_with_tmp_output(tmp_path, monkeypatch)
         run_date = date(2025, 3, 3)
@@ -58,23 +61,22 @@ class TestContextAnchorsResolve:
 
         context_parquet = output_path / f"context_anchors_{run_date.isoformat()}.parquet"
         assert context_parquet.exists(), "context_anchors_{date}.parquet must exist"
-        assert len(symbols) == 59, (
-            f"Expected 59 active Layer 2 instruments (0 deferred as of ADR-029-033), got {len(symbols)}"
+        assert len(symbols) == 58, (
+            f"Expected 58 active Layer 2 instruments (2 deferred as of ADR-034), got {len(symbols)}"
         )
 
-    def test_resolve_no_instruments_currently_deferred(self, tmp_path, monkeypatch):
-        """FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
-        REPLACES test_resolve_excludes_deferred, which asserted TIN/CPO/
-        RUBBER were absent — no longer true now that all 4 previously-
-        deferred instruments (TIN, CPO, RUBBER, NICKEL) are context_available
-        via yfinance equity proxies (tvdatafeed retired, ADR-029). This test
-        asserts the opposite as a regression guard: if any of the 4 is ever
-        accidentally re-deferred, this should fail."""
+    def test_resolve_excludes_tin_and_rubber_includes_cpo_and_nickel(self, tmp_path, monkeypatch):
+        """UPD ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
+        REPLACES test_resolve_no_instruments_currently_deferred. TIN and
+        RUBBER are deferred again (proxy correlation +0.139/+0.229 over
+        120mo, too weak vs. this platform's own VALE/WHC.AX precedent) —
+        resolve() must exclude them. CPO and NICKEL remain active
+        (+0.405/+0.586, retained with caveats) and must still appear."""
         resolver, _ = _resolver_with_tmp_output(tmp_path, monkeypatch)
         symbols = resolver.resolve(date(2025, 3, 4))
-        assert "TIN"     in symbols
+        assert "TIN"     not in symbols
+        assert "RUBBER"  not in symbols
         assert "CPO"     in symbols
-        assert "RUBBER"  in symbols
         assert "NICKEL"  in symbols
 
     def test_resolve_parquet_schema(self, tmp_path, monkeypatch):
@@ -132,7 +134,7 @@ class TestContextAnchorsLoad:
         symbols = resolver.load(run_date)
         assert isinstance(symbols, list)
         assert all(isinstance(s, str) for s in symbols)
-        assert len(symbols) == 59  # FIX ADR-030-033: 0 deferred (was 55/4 deferred)
+        assert len(symbols) == 58  # UPD ADR-034: 2 deferred again (TIN, RUBBER)
 
     def test_load_matches_resolve_output(self, tmp_path, monkeypatch):
         resolver, _ = _resolver_with_tmp_output(tmp_path, monkeypatch)
@@ -156,7 +158,7 @@ class TestContextAnchorsLoad:
 
         df = resolver.load_full(run_date)
         assert isinstance(df, pl.DataFrame)
-        assert len(df) == 59  # FIX ADR-030-033: 0 deferred (was 55/4 deferred)
+        assert len(df) == 58  # UPD ADR-034: 2 deferred again (TIN, RUBBER)
         required_cols = {
             "symbol", "context_category", "context_group", "layer",
             "include_in_forecast", "reliability_flag", "proxy_for",

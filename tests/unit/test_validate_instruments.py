@@ -20,6 +20,25 @@ class TestValidateInstruments:
         # file only, used by every synthetic fixture below unchanged).
         assert validate_split() is True
 
+    def test_index_key_absent_from_real_files(self):
+        """ADR-035 (GMI_Decision_Document_v8.docx, 10 Aug 2026): the
+        vestigial 'index: []' market category (empty since ADR-003) is
+        removed entirely from both real config files, not just emptied."""
+        identity = yaml.safe_load(Path("config/instruments_identity.yaml").read_text())
+        taxonomy = yaml.safe_load(Path("config/instruments_taxonomy.yaml").read_text())
+        assert "index" not in identity
+        assert "index" not in taxonomy
+
+    def test_index_not_in_required_fields_or_layer1_markets(self):
+        """ADR-035: REQUIRED_FIELDS and _validate_layer1()'s layer1_markets
+        tuple must no longer reference 'index'."""
+        import inspect
+        from scripts import validate_instruments as vi
+        assert "index" not in vi.REQUIRED_FIELDS
+        assert "index" not in inspect.getsource(vi._validate_layer1).split(
+            "layer1_markets = ", 1
+        )[1].split("\n", 1)[0]
+
     def test_symbol_with_dot_fails(self, tmp_path):
         """IDD §10.2: symbol dengan titik → error + exit code 1."""
         bad_yaml = {
@@ -622,6 +641,36 @@ class TestJsonSchemaLayer:
         ):
             schema = yaml.safe_load((schemas_dir / name).read_text())
             jsonschema.Draft7Validator.check_schema(schema)  # raises if invalid
+
+    def test_index_not_required_by_schema(self):
+        """ADR-035 (GMI_Decision_Document_v8.docx, 10 Aug 2026): 'index' was
+        a required top-level property in both schemas — dropping the empty
+        'index: []' section from the real config files without this fix
+        would have made validate_split() fail on them. Confirms the fix
+        directly against the schema documents themselves."""
+        import jsonschema
+        schemas_dir = Path("config/schemas/instruments")
+        for name in ("identity.schema.yaml", "taxonomy.schema.yaml"):
+            schema = yaml.safe_load((schemas_dir / name).read_text())
+            assert "index" not in schema.get("required", [])
+            assert "index" not in schema.get("properties", {})
+
+    def test_split_file_without_index_key_still_validates(self):
+        """ADR-035: a minimal dict with no 'index' key at all (the real
+        post-ADR-035 shape) must pass jsonschema validation directly —
+        tested against jsonschema.validate() rather than the full
+        validate_split() pipeline, since the latter also enforces full
+        22-subcategory coverage (an unrelated concern to 'index')."""
+        import jsonschema
+        schemas_dir = Path("config/schemas/instruments")
+        minimal = {
+            "version": "1.0", "last_updated": "2026-01-01",
+            "us_stocks": {}, "idx_stocks": {}, "commodity": {}, "forex": {},
+            "context": {},
+        }
+        for name in ("identity.schema.yaml", "taxonomy.schema.yaml"):
+            schema = yaml.safe_load((schemas_dir / name).read_text())
+            jsonschema.validate(minimal, schema)  # raises if 'index' still required
 
     def test_wrong_type_on_context_available_is_caught(self, tmp_path):
         """context_available written as the string 'true' instead of a

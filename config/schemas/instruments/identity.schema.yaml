@@ -15,7 +15,7 @@
 "$schema": "http://json-schema.org/draft-07/schema#"
 title: "Alpha Factory instruments_identity.yaml"
 type: object
-required: ["version", "last_updated", "us_stocks", "idx_stocks", "commodity", "forex", "index", "context"]
+required: ["version", "last_updated", "us_stocks", "idx_stocks", "commodity", "forex", "context"]
 properties:
   version:
     type: string
@@ -41,9 +41,16 @@ properties:
     additionalProperties:
       type: array
       items: { "$ref": "#/$defs/instrument" }
-  index:
-    type: array
-    items: { "$ref": "#/$defs/instrument" }
+  # REMOVED ADR-035 (GMI_Decision_Document_v8.docx, 10 Aug 2026): 'index'
+  # market category dropped -- empty in config since ADR-003 reclassified
+  # SPX/VIX out of Layer 1 (Architecture Extension v1.0 §2.2). This schema
+  # file wasn't checked during ADR-035's own decide-phase (its own §1.3
+  # "Verified Baseline" only reads instrument_loader.py/silver_scope.py/
+  # validate_instruments.py) -- found here during implementation: 'index'
+  # was `required`, so removing the YAML key without this edit would have
+  # made validate_split() fail on the real files. Consequential fix, same
+  # decided scope as ADR-035 (a market category with zero members / zero
+  # required-property references is exactly the debt class it targets).
   context:
     type: object
     properties:

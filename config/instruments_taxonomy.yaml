@@ -687,9 +687,7 @@ forex:
   - symbol: NZD_USD
   - symbol: USD_CAD
   - symbol: USD_CHF
-  - symbol: USD_IDR
   - symbol: USD_JPY
-index: []
 context:
   dollar:
     _meta:
@@ -726,6 +724,11 @@ context:
   # convention, non-blocking — USD<CCY>=X used here for consistency with
   # the existing USD_CAD/USD_CHF/USD_JPY convention, live-unconfirmed for
   # the 6 currencies below except CNH per ADR-013).
+  # UPD ADR-036 (GMI_Decision_Document_v8.docx, 10 Aug 2026): the 7th
+  # basket leg, IDR, joined this group — see its own entry below for the
+  # reclassification rationale (was Layer 1 USD_IDR). Basket-input
+  # completion is now 7/7 within a single group, not 6+1 split across
+  # Layer 1/Layer 2.
   dollar_basket:
     _meta:
       subcategory_id: context_dollar_basket
@@ -785,17 +788,38 @@ context:
       context_available: true
       include_in_forecast: true
       notes: DM basket leg. Ticker convention unconfirmed live — Gate 2, non-blocking.
+    # ADD ADR-036 (GMI_Decision_Document_v8.docx, 10 Aug 2026): USD_IDR
+    # reclassified out of Layer 1 forex — completes the Broad Dollar
+    # basket's 13th leg entirely within dollar_basket (previously split
+    # 7 Layer 1 / 6 Layer 2, per the ADD ADR-013/014/015/016 comment
+    # above). Ovi's rationale: Indonesia exposure is already carried by
+    # 30 IDX30 equities plus BI's central-bank-rate context anchor
+    # (2x-weighted in score_em_risk, Data Source & Rates Adjustment v1.0
+    # §7.2) — USD/IDR as a standalone Layer 1 trading pair was redundant
+    # with that existing exposure. Drops out of gold_signals/gold_mtf/
+    # gold_screener eligibility — the explicit, confirmed trade-off.
+    - symbol: IDR
+      layer: 2
+      context_category: context_dollar_basket
+      context_group: dollar_basket
+      context_available: true
+      include_in_forecast: true
+      reclassified_from: layer_1_forex
+      notes: 'ADR-036: was USD_IDR (Layer 1 forex) — renamed IDR to match dollar_basket''s bare-currency-code
+        convention, raw_symbol dropped. Ticker unchanged (USDIDR=X).'
   # ADD ADR-024 (GMI_Decision_Document_v2.docx): point-fix FX anchor for
-  # CPO's future MYR->USD Silver-layer normalization (ADR-023 narrowed
-  # Wave 2's MYR dependency to CPO alone — TIN/RUBBER are USD-native).
-  # Deliberately NOT folded into context_dollar_basket above — two
-  # unrelated purposes (Broad Dollar Index computation vs. a single
-  # commodity's currency conversion) kept under separate labels per
-  # ADR-024's rationale. contributes_to is empty: zero domain-score
-  # weight. NOT a CrossAssetEngine input when that engine is built —
-  # sole consumer is the future Silver-layer CPO normalization join
-  # (CPO_usd = CPO_myr / MYR_USD_rate), which is why
-  # include_in_forecast=false here despite context_available=true.
+  # a single deferred commodity's future local-currency->USD Silver-layer
+  # normalization. Deliberately NOT folded into context_dollar_basket
+  # above — two unrelated purposes (Broad Dollar Index computation vs. a
+  # single commodity's currency conversion) kept under separate labels
+  # per ADR-024's rationale. contributes_to is empty: zero domain-score
+  # weight. NOT a CrossAssetEngine input when that engine is built.
+  # UPD ADR-037 (GMI_Decision_Document_v8.docx, 10 Aug 2026): original
+  # MYR entry (for CPO's original FCPO Bursa Malaysia plan) removed —
+  # orphaned since ADR-030 re-sourced CPO to F34.SI (SGD-denominated).
+  # Replaced with THB, for a future STA.BK/RUBBER normalization step —
+  # see the subcategory's own _meta.note below for why AUD/CAD/SGD are
+  # deliberately not also added here.
   fx_normalization:
     _meta:
       subcategory_id: context_fx_normalization
@@ -803,17 +827,29 @@ context:
       description: Single-purpose FX anchor(s) for commodity currency normalization — not a CrossAssetEngine
         input
       contributes_to: []
+      note: 'ADR-037 (GMI_Decision_Document_v8.docx, 10 Aug 2026): AUD, CAD, SGD
+        deliberately NOT added here, despite all 4 current equity proxies
+        (F34.SI/SGD, STA.BK/THB, AFM.V/CAD, NIC.AX/AUD) being local-currency-
+        denominated. AUD_USD and USD_CAD already exist as always-on Layer 1
+        forex pairs; SGD already exists in context.dollar_basket (ADR-016).
+        A future FX-normalization consumer should read these three from
+        their existing canonical source, not a re-declared duplicate here —
+        same reuse-from-source pattern compute_broad_dollar() already uses
+        for Layer 1 forex pairs (Architecture v2.0 §7.2).'
     instruments:
-    - symbol: MYR
+    - symbol: THB
       layer: 2
       context_category: context_fx_normalization
       context_group: fx_normalization
       context_available: true
       include_in_forecast: false
-      notes: 'ADR-024: USD/MYR, confirmed live as MYR=X (Yahoo Finance canonical form, same <currency>=X
-        convention as JPY=X/HKD=X/SGD=X/IDR=X — differs from the USD<CCY>=X convention used for context_dollar_basket
-        above by explicit ADR choice). Sole consumer: Silver-layer CPO normalization (ADR-023). Not consumed
-        by CrossAssetEngine, gold_signals, or gold_screener.'
+      notes: 'ADR-037: replaces MYR (ADR-024, orphaned once ADR-030 re-sourced CPO to F34.SI/SGD — MYR''s
+        stated consumer no longer exists). THB is genuinely new: no other Layer 1 or Layer 2 declaration
+        reaches Thai Baht anywhere in the universe. Confirmed live as THB=X (Yahoo Finance canonical
+        <currency>=X form, same pattern as MYR=X/JPY=X/HKD=X/SGD=X/IDR=X). Sole intended consumer: a
+        future Silver-layer STA.BK/RUBBER normalization step — not yet built (RUBBER is itself deferred
+        by ADR-034 as of this same document). Not consumed by CrossAssetEngine, gold_signals, or
+        gold_screener.'
   rates:
     fed:
       _meta:
@@ -1100,7 +1136,7 @@ context:
         - score: score_commodity_cycle
           weight: 0.4
           aggregation: z_score_momentum_60d
-        reliability_notes: Nickel structural break 2022-03-07 registered
+        reliability_notes: 'Nickel structural break 2022-03-07 registered. TIN re-deferred by ADR-034 (10 Aug 2026) — weak proxy correlation (+0.139/120mo).'
       instruments:
       - symbol: COPPER
         layer: 2
@@ -1124,20 +1160,26 @@ context:
         # preflight log, 5 rows). structural_break retained below: the 2022
         # LME suspension is still relevant nickel-market history even though
         # the price feed is now an equity proxy, not the LME contract itself.
-        # proxy_for/proxy_correlation_expected deliberately NOT set --
-        # validate_instruments.py requires proxy_correlation_expected
-        # whenever proxy_for is present, and no empirical NIC.AX-vs-nickel-
-        # price correlation analysis exists yet (unlike VALE's ~0.81, which
-        # came from an actual study). Follow-up, not fabricated here.
+        # FIX ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
+        # check_proxy_correlation.py run live 10 Aug 2026 -- NIC.AX vs
+        # PNICKUSDM (RISK-15 FRED Track 2 benchmark) correlates +0.586 over
+        # 36 overlapping monthly returns (a third the window of the other
+        # three studies -- NIC.AX's own price-history depth, cause not
+        # investigated this thread). Moderate, not strong, relative to this
+        # platform's own VALE (~0.81, ADR-005) precedent -- retained (not
+        # deferred) with proxy_for/proxy_correlation_expected now set to the
+        # measured value, per ADR-034's differentiated treatment.
         context_available: true
         include_in_forecast: true
+        proxy_for: NICKEL_LME_NI
+        proxy_correlation_expected: 0.586
         commodity_role: context
         commodity_subcategory: base_metals
         structural_break:
           date: '2022-03-07'
           severity: HIGH
           description: LME trading suspension — price +100% in hours
-        notes: EV/battery cycle indicator. NIC.AX (Nickel Industries) equity proxy since ADR-033 — yfinance NI=F confirmed broken (404), tvdatafeed retired before LME routing was ever wired.
+        notes: 'EV/battery cycle indicator. NIC.AX (Nickel Industries) equity proxy since ADR-033 — yfinance NI=F confirmed broken (404), tvdatafeed retired before LME routing was ever wired. ADR-034 (10 Aug 2026): moderate proxy correlation, +0.586 vs PNICKUSDM over a 36-month sample (shorter than the other three studies).'
       - symbol: ALUMINIUM
         layer: 2
         context_category: context_commodity_metals
@@ -1177,7 +1219,7 @@ context:
         layer: 2
         context_category: context_commodity_metals
         context_group: commodity
-        context_available: true
+        context_available: false
         include_in_forecast: true
         commodity_role: context
         # FIX ADR-032 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
@@ -1188,13 +1230,26 @@ context:
         # proxy instead -- confirmed live 30 Jul 2026 (5 rows).
         # requires_fx_normalization stays false: ADR-023's finding (TIN was
         # never currency-blocked, only ticker/exchange-blocked) remains true
-        # of the new equity proxy too. proxy_for/proxy_correlation_expected
-        # deliberately NOT set -- no empirical AFM.V-vs-tin-price correlation
-        # analysis exists yet; see NICKEL's comment above for the same
-        # validate_instruments.py pairing-requirement rationale.
+        # of the new equity proxy too.
+        # FIX ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
+        # RE-DEFERRED. check_proxy_correlation.py run live 10 Aug 2026 --
+        # AFM.V vs PTINUSDM (RISK-15 FRED Track 2 benchmark) correlates
+        # only +0.139 over 120 overlapping monthly returns -- near
+        # statistical noise relative to this platform's own VALE (~0.81,
+        # ADR-005) / WHC.AX (~0.78, ADR-006) proxy-quality precedent.
+        # proxy_for/proxy_correlation_expected remain unset (same state as
+        # before ADR-032 -- not asserting a correlation figure this
+        # low-confidence). planned_wave below reuses the '2' label this
+        # instrument carried pre-ADR-032 as a structural placeholder ONLY
+        # (schema requires a value whenever context_available=false) -- it
+        # does NOT reassert the original FX-normalization trigger. Real
+        # re-evaluation trigger: a materially stronger proxy or longer
+        # price history (no fixed date/wave decided -- Decision v8 §4).
         commodity_subcategory: base_metals
         requires_fx_normalization: false
-        notes: 'AFM.V (Alphamin Resources) equity proxy since ADR-032. Monitored risk: unverified "CIRO trade resumption" headline (~Jan 2026) surfaced during candidate research, not independently investigated.'
+        deferred_reason: 'ADR-034 (10 Aug 2026): AFM.V proxy correlates only +0.139 with PTINUSDM (FRED Track 2 benchmark) over 120 monthly returns — too weak to trust as an unbiased context anchor.'
+        planned_wave: 2
+        notes: 'AFM.V (Alphamin Resources) equity proxy since ADR-032. Monitored risk: unverified "CIRO trade resumption" headline (~Jan 2026) surfaced during candidate research, not independently investigated. Re-deferred by ADR-034 (10 Aug 2026) — proxy correlation +0.139/120mo, too weak to trust.'
     agri:
       _meta:
         subcategory_id: context_commodity_agri
@@ -1203,11 +1258,15 @@ context:
           weight: 0.35
           aggregation: z_score_level
         note: 'FIX ADR-030/031 (GMI_Decision_Document_v7.docx, 30 Jul 2026): both
-          agri instruments (CPO, RUBBER) are now context_available=true (yfinance
-          equity proxies replacing the tvdatafeed-blocked originals) -- the
-          "weights normalized when deferred" caveat no longer applies to this
-          subcategory (zero deferred instruments remain in agri). Left here for
-          audit-trail visibility rather than deleted outright.'
+          agri instruments (CPO, RUBBER) were context_available=true (yfinance
+          equity proxies replacing the tvdatafeed-blocked originals) as of that
+          thread. UPD ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
+          RUBBER re-deferred (proxy correlation +0.229/120mo, too weak) -- CPO
+          remains active (+0.405/120mo, retained with caveat). The subcategory
+          weight below (0.35) is unchanged: contributes_to routes at the
+          subcategory level, not per-instrument (a known schema gap ADR-034
+          documents but does not close), so CPO alone now carries this
+          subcategory''s full signal weight with no automatic renormalization.'
       instruments:
       - symbol: CPO
         layer: 2
@@ -1227,19 +1286,24 @@ context:
         # equity-proxy pattern (matching IRON_ORE/VALE, COAL_NEWC/WHC.AX
         # above), not a raw MYR-denominated commodity feed -- the MYR=X
         # context_fx_normalization anchor (ADR-024) is no longer this
-        # instrument's consumer. That anchor's own entry is left in place
-        # (context.fx_normalization above) in case a genuine commodity-
-        # price-level use for it emerges later. proxy_for/
-        # proxy_correlation_expected deliberately NOT set -- see NICKEL's
-        # comment above for the validate_instruments.py pairing rationale.
+        # instrument's consumer.
+        # FIX ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
+        # check_proxy_correlation.py run live 10 Aug 2026 -- F34.SI vs
+        # PPOILUSDM (RISK-15 FRED Track 2 benchmark) correlates +0.405 over
+        # 120 overlapping monthly returns -- moderate, not strong, relative
+        # to this platform's own VALE (~0.81, ADR-005) precedent. Retained
+        # (not deferred) with proxy_for/proxy_correlation_expected now set
+        # to the measured value, per ADR-034's differentiated treatment.
         commodity_subcategory: agricultural
         requires_fx_normalization: false
-        notes: F34.SI (Wilmar International) equity proxy since ADR-030 — no longer a raw MYR-denominated commodity feed.
+        proxy_for: CPO_FCPO_BMDI
+        proxy_correlation_expected: 0.405
+        notes: 'F34.SI (Wilmar International) equity proxy since ADR-030 — no longer a raw MYR-denominated commodity feed. ADR-034 (10 Aug 2026): moderate proxy correlation, +0.405 vs PPOILUSDM over 120 monthly returns.'
       - symbol: RUBBER
         layer: 2
         context_category: context_commodity_agri
         context_group: commodity
-        context_available: true
+        context_available: false
         include_in_forecast: true
         commodity_role: context
         # FIX ADR-031 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
@@ -1252,11 +1316,24 @@ context:
         # re-check, e.g. --period 1mo, before this feeds a real Bronze run).
         # requires_fx_normalization stays false: ADR-023's finding (RUBBER
         # was never currency-blocked) remains true of the new proxy too.
-        # proxy_for/proxy_correlation_expected deliberately NOT set -- same
-        # pairing-requirement rationale as NICKEL/TIN/CPO above.
+        # FIX ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
+        # RE-DEFERRED. check_proxy_correlation.py run live 10 Aug 2026 --
+        # STA.BK vs PRUBBUSDM (RISK-15 FRED Track 2 benchmark) correlates
+        # only +0.229 over 120 overlapping monthly returns -- weak, relative
+        # to this platform's own VALE (~0.81, ADR-005) / WHC.AX (~0.78,
+        # ADR-006) proxy-quality precedent. proxy_for/proxy_correlation_
+        # expected remain unset (same state as before ADR-031). planned_wave
+        # below reuses the '2' label this instrument carried pre-ADR-031 as
+        # a structural placeholder ONLY (schema requires a value whenever
+        # context_available=false) -- it does NOT reassert the original
+        # FX-normalization trigger. Real re-evaluation trigger: a materially
+        # stronger proxy or longer price history (no fixed date/wave
+        # decided -- Decision v8 §4).
         commodity_subcategory: agricultural
         requires_fx_normalization: false
-        notes: 'STA.BK (Sri Trang Agro-Industry) equity proxy since ADR-031. 3/5 rows on initial preflight -- recommend longer-window re-check before production Bronze ingestion.'
+        deferred_reason: 'ADR-034 (10 Aug 2026): STA.BK proxy correlates only +0.229 with PRUBBUSDM (FRED Track 2 benchmark) over 120 monthly returns — too weak to trust as an unbiased context anchor.'
+        planned_wave: 2
+        notes: 'STA.BK (Sri Trang Agro-Industry) equity proxy since ADR-031. 3/5 rows on initial preflight — recommend longer-window re-check before production Bronze ingestion. Re-deferred by ADR-034 (10 Aug 2026) — proxy correlation +0.229/120mo, too weak to trust.'
     coal:
       _meta:
         # FIX ADR-019: score_inflation_pressure entry (weight 0.22) removed.

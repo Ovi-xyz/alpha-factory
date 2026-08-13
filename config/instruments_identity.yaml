@@ -739,13 +739,9 @@ forex:
   - symbol: USD_CHF
     raw_symbol: USD/CHF
     yfinance_symbol: USDCHF=X
-  - symbol: USD_IDR
-    raw_symbol: USD/IDR
-    yfinance_symbol: USDIDR=X
   - symbol: USD_JPY
     raw_symbol: USD/JPY
     yfinance_symbol: USDJPY=X
-index: []
 context:
   dollar:
     instruments:
@@ -772,10 +768,13 @@ context:
     - symbol: NOK
       yfinance_symbol: USDNOK=X
       timezone: UTC
+    - symbol: IDR
+      yfinance_symbol: USDIDR=X
+      timezone: UTC
   fx_normalization:
     instruments:
-    - symbol: MYR
-      yfinance_symbol: MYR=X
+    - symbol: THB
+      yfinance_symbol: THB=X
       timezone: UTC
   rates:
     fed: {}

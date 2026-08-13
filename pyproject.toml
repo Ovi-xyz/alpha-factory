@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.15.0"
+version = "1.15.1"
 # FIX (Ovi, 9 Aug 2026): three-part session, none touching src/ --
 # (1) RISK-15's live-FRED half confirmed on the M1 (all 6 Track 2 series
 # PASS); (2) Gate 1 (RISK-16) targeted extraction pass authored --

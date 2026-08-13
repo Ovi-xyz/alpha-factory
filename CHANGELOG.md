@@ -1,5 +1,139 @@
 # CHANGELOG — Data Platform
 
+## v1.15.1 — Taxonomy Hygiene & Proxy Correlation Discipline (Agustus 2026)
+
+Dokumen referensi: GMI_Decision_Document_v8.docx (10 Aug 2026).
+
+Total: **4 ADR diimplementasikan (ADR-034, ADR-035, ADR-036, ADR-037)** |
+**8 file dimodifikasi (2 config, 2 schema, 2 source, 1 script) + 6 file test** |
+**1466 collected / 0 failed / 0 error** (baseline v1.15.0: 1460).
+
+Implementasi mengikuti hasil live run 10 Aug 2026 dari `check_proxy_correlation.py`
+dan `check_bis_eer_weights.py --extract-weights` (lihat RISK-1/RISK-16,
+`2026-08-10-alpha-factory preflight logs.txt`). Divalidasi di sandbox clone
+terisolasi (`validate_instruments.py` exit 0, `pytest` penuh) sebelum
+di-mirror ke live repo via Filesystem MCP.
+
+### ADR-034 [P2] — `config/instruments_taxonomy.yaml`
+**Proxy deferral dibedakan per kekuatan korelasi, bukan diseragamkan**
+
+- Root cause: `check_proxy_correlation.py` dijalankan live untuk pertama
+  kali — NICKEL +0.586/36bln, CPO +0.405/120bln, RUBBER +0.229/120bln,
+  TIN +0.139/120bln — seluruhnya jauh di bawah preseden platform sendiri
+  (VALE ~0.81 ADR-005, WHC.AX ~0.78 ADR-006).
+- Opsi yang dipertimbangkan: hapus total keempatnya (ditolak — akan
+  mengosongkan `context_commodity_agri` dan gagal validator coverage 22
+  subkategori); perlakuan seragam (ditolak — NICKEL 0.586 tidak sebanding
+  dengan TIN 0.139).
+- Fix: TIN dan RUBBER kembali `context_available: false` (`deferred_reason`
+  + `planned_wave: 2` diisi sebagai placeholder struktural — bukan
+  reasersi trigger FX-normalization lama). CPO dan NICKEL tetap aktif,
+  `proxy_for`/`proxy_correlation_expected` diisi nilai terukur dengan
+  caveat "moderate, not strong" di `notes`.
+- Diverifikasi empiris: `validate_instruments.py` — 699 symbols, Layer
+  1=639, Layer 2=60, `deferred_count()==2`.
+- Test baru/diperbarui: `test_deferred_instruments_are_tin_and_rubber`,
+  `test_forecast_context_cpo_nickel_active_tin_rubber_deferred`,
+  `test_resolve_excludes_tin_and_rubber_includes_cpo_and_nickel`, dan
+  count assertions di seluruh `test_instrument_loader.py`/
+  `test_context_anchors.py`/`test_full_system.py`.
+
+### ADR-035 [P3] — `config/instruments_{identity,taxonomy}.yaml`, `scripts/validate_instruments.py`, `config/schemas/instruments/*.schema.yaml`
+**Kategori market `index: []` yang vestigial dihapus**
+
+- Root cause: `index` kosong di kedua file YAML sejak ADR-003 (SPX/VIX
+  direklasifikasi ke Layer 2). `instrument_loader.py`'s own comment sudah
+  mendokumentasikan ini permanen; `silver_scope.py::layer1_markets()`
+  tidak pernah menyertakannya (derivasi dinamis).
+- **Temuan tambahan saat implementasi (di luar decide-phase awal
+  ADR-035):** kedua file `config/schemas/instruments/*.schema.yaml`
+  mendeklarasikan `index` sebagai `required` top-level property —
+  tidak diperiksa saat decide-phase ADR-035 sendiri. Menghapus key
+  `index` dari YAML tanpa memperbaiki schema akan membuat
+  `validate_split()` gagal (`jsonschema` required-property error).
+  Diperbaiki sebagai consequential fix bercakupan sama dengan ADR-035
+  (kategori debt yang sama persis yang ADR ini targetkan).
+- Fix: `index: []` dihapus dari kedua file config; `"index"` dihapus dari
+  `REQUIRED_FIELDS` dan tuple `layer1_markets` di
+  `validate_instruments.py`; `index` dihapus dari `required` +
+  `properties` di kedua schema file.
+- Diverifikasi empiris: `validate_instruments.py` exit 0 pasca-perubahan;
+  `jsonschema.validate()` langsung terhadap dict minimal tanpa key
+  `index` — lolos.
+- Test baru: `test_index_key_absent_from_real_files`,
+  `test_index_not_in_required_fields_or_layer1_markets`,
+  `test_index_not_required_by_schema`,
+  `test_split_file_without_index_key_still_validates`.
+
+### ADR-036 [P2] — `config/instruments_{identity,taxonomy}.yaml`
+**USD_IDR direklasifikasi: Layer 1 forex → Layer 2 `context.dollar_basket`**
+
+- Root cause: 13 target-currency legs Broad Dollar Index terpecah dua
+  jalur sourcing (7 via Layer 1 forex termasuk USD_IDR, 6 via
+  `dollar_basket`) — desain `dollar_basket`'s sendiri hanya menjelaskan
+  6 yang terakhir. USD/IDR sebagai pair trading standalone redundan
+  dengan exposure Indonesia yang sudah ada (30 saham IDX30 + BI rate
+  context anchor, sudah 2x-weighted di `score_em_risk` per Data Source
+  & Rates Adjustment v1.0 §7.2).
+- Fix: `USD_IDR` dipindah keluar dari Layer 1 forex, masuk
+  `context.dollar_basket` sebagai `IDR` (mengikuti konvensi
+  bare-currency-code 6 anggota lain), `raw_symbol` dihapus,
+  `reclassified_from: layer_1_forex` ditambahkan (pola audit-trail yang
+  sama dengan DXY/SPX/VIX, ADR-003).
+- Konsekuensi eksplisit: USD/IDR keluar dari eligibility
+  `gold_signals`/`gold_mtf`/`gold_screener` — trade-off yang dikonfirmasi
+  disengaja, bukan efek samping. Layer 1 forex: 19 → 18. `dollar_basket`:
+  6 → 7. EXPECTED_TOTAL tetap 699 (reklasifikasi lintas-layer, bukan
+  penambahan — preseden ADR-003).
+- Diverifikasi empiris: `validate_instruments.py` — Layer 1=639
+  (was 640), Layer 2=60 (was 59).
+- Test baru: `test_idr_reclassified_from_layer1_forex`,
+  `test_dollar_basket_subcategory_has_seven_currencies`.
+
+### ADR-037 [P3] — `config/instruments_{identity,taxonomy}.yaml`
+**`context.fx_normalization`: MYR dihapus, THB ditambahkan**
+
+- Root cause: MYR (ADR-024) ada untuk satu tujuan — normalisasi CPO's
+  raw FCPO Bursa Malaysia feed. Orphaned sejak ADR-030 me-resource CPO
+  ke F34.SI (SGX, SGD-denominated). Keempat proxy equity saat ini
+  (F34.SI/SGD, STA.BK/THB, AFM.V/CAD, NIC.AX/AUD) semuanya
+  local-currency-denominated, bukan USD.
+- Fix: entry MYR dihapus, entry THB ditambahkan (kebutuhan normalisasi
+  STA.BK/RUBBER di masa depan — RUBBER sendiri deferred lagi per
+  ADR-034 dalam dokumen yang sama). `_meta.note` ditambahkan menjelaskan
+  AUD/CAD/SGD sengaja TIDAK diduplikasi di sini — sudah tersedia via
+  Layer 1 forex (`AUD_USD`, `USD_CAD`) atau `context.dollar_basket`
+  (`SGD`, ADR-016); `compute_broad_dollar()` (Architecture v2.0 §7.2)
+  sudah membaca Layer 1 forex langsung by name, pola reuse-dari-sumber
+  yang sama harus diikuti konsumen normalisasi FX di masa depan.
+- Diverifikasi empiris: `requires_fx_normalization`/`base_currency`
+  dikonfirmasi tidak dibaca di manapun dalam `src/` (bukan typed
+  `InstrumentLoader` field, catch-all `meta` dict saja) — penghapusan
+  MYR adalah debt removal bersih, tanpa consumer yang terputus.
+- Test baru/diperbarui: `test_fx_normalization_subcategory_has_thb_only`,
+  `test_thb_excluded_from_forecast`,
+  `test_thb_ticker_matches_bare_currency_convention`,
+  `test_fx_normalization_does_not_duplicate_aud_cad_sgd`.
+
+### Catatan cakupan — item yang DITEMUKAN tapi SENGAJA TIDAK diubah
+- `src/utils/symbol_utils.py::KNOWN_EDGE_CASES["MYR"]` — dict dokumentasi
+  murni (own comment: "NOT consulted at runtime"), sekarang stale, tapi
+  tidak disebut di scope decided ADR-037 manapun. Deeper dead-code sweep
+  eksplisit di luar-scope per pola ADR-035 sendiri.
+- `scripts/preflight/check_yfinance_tickers.py` referensi `MYR` (manual
+  ticker-check tool) — di luar scope 4 ADR ini.
+- Gate 1 (BIS Broad Dollar weight) persistence mechanism — genuinely
+  open per `GMI_Decision_Document_v8.docx` §4, tidak diselesaikan di
+  release ini.
+
+### Version bump rationale
+PATCH (1.15.0 → 1.15.1), bukan MINOR: seluruh perubahan adalah koreksi
+taksonomi/data quality dan reklasifikasi (preseden ADR-003), bukan job/
+market/indicator baru. `GMI_Decision_Document_v8.docx` §3 item 12
+menyerahkan pilihan PATCH vs MINOR eksplisit ke implementer.
+
+---
+
 ## v1.15.0 — RISK-15 Live-Confirm, Gate 1 Extraction Pass, Studi Korelasi Proxy (Agustus 2026)
 
 Dokumen referensi: tidak ada decision document terpisah — sesi

@@ -43,11 +43,13 @@ class TestPackageExports:
         for name in src.__all__:
             assert hasattr(src, name), f"{name!r} in __all__ but not in module"
 
-    def test_get_loader_returns_640(self):
-        """FIX GMI-IL-001: was test_get_loader_returns_643 — ADR-003 reclassification."""
+    def test_get_loader_returns_639(self):
+        """FIX GMI-IL-001: was test_get_loader_returns_643 — ADR-003 reclassification.
+        UPD ADR-036 (GMI_Decision_Document_v8.docx, 10 Aug 2026): USD_IDR
+        reclassified forex -> context.dollar_basket — 640 -> 639."""
         from src import get_loader
         loader = get_loader()
-        assert loader.count() == 640
+        assert loader.count() == 639
 
     def test_get_config_returns_config(self):
         from src import get_config, PipelineConfig

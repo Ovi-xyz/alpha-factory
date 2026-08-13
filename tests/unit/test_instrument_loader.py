@@ -13,17 +13,19 @@ class TestInstrumentLoader:
     def setup_method(self):
         self.loader = get_loader()
 
-    def test_total_count_640(self):
+    def test_total_count_639(self):
         """
         FIX GMI-IL-001: was test_total_count_643, asserted count()==643.
         Architecture Extension v1.0 ADR-003 reclassifies SPX, VIX (Layer 1
         us_stocks.Index) and DXY (Layer 1 forex) to Layer 2 context anchors.
         Layer 1 trading universe: 643 - 2 (SPX, VIX) - 1 (DXY) = 640.
+        UPD ADR-036 (GMI_Decision_Document_v8.docx, 10 Aug 2026): USD_IDR
+        reclassified forex -> context.dollar_basket (renamed IDR) — 640 -> 639.
         This is an intentional, documented contract change — not a regression.
         Layer 2 (context_available=True) count is asserted separately in
         TestInstrumentLoaderLayer2.test_all_context_default_count.
         """
-        assert self.loader.count() == 640
+        assert self.loader.count() == 639
 
     def test_get_aapl(self):
         inst = self.loader.get("AAPL")
@@ -69,10 +71,12 @@ class TestInstrumentLoader:
         """
         FIX GMI-IL-001: forex 20->19 (DXY removed), index 2->0 (SPX/VIX removed).
         us_stocks/idx/commodity unchanged — see ADR-003.
+        UPD ADR-036 (GMI_Decision_Document_v8.docx, 10 Aug 2026): forex
+        19->18 (USD_IDR reclassified to context.dollar_basket).
         """
         assert len(self.loader.by_market("us_stocks")) == 588
         assert len(self.loader.by_market("idx"))       == 30
-        assert len(self.loader.by_market("forex"))     == 19
+        assert len(self.loader.by_market("forex"))     == 18
         assert len(self.loader.by_market("commodity")) == 3
         assert len(self.loader.by_market("index"))     == 0
 
@@ -133,75 +137,90 @@ class TestInstrumentLoaderLayer2:
         self.loader = get_loader()
 
     def test_all_context_default_count(self):
-        """all_context() default excludes deferred — 59 active, 0 deferred, as
-        of ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026): CPO,
-        RUBBER, TIN, NICKEL all un-deferred via yfinance equity proxies
-        (F34.SI, STA.BK, AFM.V, NIC.AX) after tvdatafeed's full retirement
-        (ADR-029). include_deferred therefore makes no observable difference
-        today -- see test_all_context_include_deferred."""
+        """all_context() default excludes deferred.
+        UPD ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026): TIN and
+        RUBBER re-deferred (weak proxy correlation, +0.139/+0.229 over
+        120mo — see check_proxy_correlation.py's 10 Aug 2026 live run).
+        CPO and NICKEL remain active (retained with correlation caveats,
+        +0.405/+0.586). Combined with ADR-036's IDR addition to Layer 2
+        (60 total slots, up from 59): 60 - 2 deferred = 58 active."""
         ctx = self.loader.all_context()
-        assert len(ctx) == 59
+        assert len(ctx) == 58
         assert all(i.context_available for i in ctx)
 
     def test_all_context_include_deferred(self):
-        """all_context(include_deferred=True) returns all 59 — Extension v1.0
-        §3.1 (52) extended by ADR-014 (+6 context_dollar_basket) and
-        ADR-024 (+1 context_fx_normalization). FIX ADR-030-033: with zero
-        currently-deferred Layer 2 instruments, this call is now equivalent
-        to the default (include_deferred=False) -- the mechanism itself
-        (excluding context_available=False rows) is still exercised by
-        TestInstrumentLoaderCoverageGaps' synthetic-data tests."""
+        """all_context(include_deferred=True) returns all 60 — Extension
+        v1.0 §3.1 (52) extended by ADR-014 (+6 context_dollar_basket),
+        ADR-024 (+1 context_fx_normalization), and ADR-036 (+1 IDR into
+        dollar_basket, 10 Aug 2026) = 60. FIX ADR-034: TIN and RUBBER are
+        deferred again (2 of the 60); CPO and NICKEL remain active."""
         ctx = self.loader.all_context(include_deferred=True)
-        assert len(ctx) == 59
+        assert len(ctx) == 60
         symbols = {i.symbol for i in ctx}
         assert {"TIN", "CPO", "RUBBER", "NICKEL"}.issubset(symbols)
-        assert {"CNH", "KRW", "SGD", "HKD", "TWD", "NOK", "MYR"}.issubset(symbols)
+        assert {"CNH", "KRW", "SGD", "HKD", "TWD", "NOK", "IDR"}.issubset(symbols)
+        assert "THB" in symbols
+        assert "MYR" not in symbols   # ADR-037: MYR removed, replaced by THB
 
     def test_count_context(self):
-        assert self.loader.count_context() == 59
-        assert self.loader.count_context(include_deferred=True) == 59
+        """UPD ADR-034/036 (10 Aug 2026): active (58) now genuinely differs
+        from total-with-deferred (60) — previously coincided at 59 only
+        because deferred_count() happened to be 0."""
+        assert self.loader.count_context() == 58
+        assert self.loader.count_context(include_deferred=True) == 60
 
     def test_count_total(self):
-        """Layer 1 (640) + Layer 2 active (59) = 699 OHLCV-bearing instruments.
-        FIX ADR-030-033 (30 Jul 2026): was 695 (55 active) before CPO/RUBBER/
-        TIN/NICKEL were un-deferred -- see test_all_context_default_count."""
-        assert self.loader.count_total() == 699
+        """Layer 1 (639) + Layer 2 active (58) = 697 OHLCV-bearing instruments.
+        UPD ADR-034/036 (GMI_Decision_Document_v8.docx, 10 Aug 2026): this
+        now genuinely diverges from EXPECTED_TOTAL (699, validate_instruments.py)
+        for the first time — 699 counts ALL declared Layer 2 slots including
+        the 2 now-deferred (TIN, RUBBER), while count_total() intentionally
+        counts only what's actually active/ingested. Previously these two
+        numbers coincided (699) purely because deferred_count() was 0 at
+        the time — see count_total()'s own docstring for the distinction."""
+        assert self.loader.count_total() == 697
 
-    def test_deferred_count_is_0(self):
-        """FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
-        REPLACES test_deferred_count_is_4. tvdatafeed retired entirely
-        (ADR-029); CPO, RUBBER, TIN, NICKEL all un-deferred via yfinance
-        equity proxies. Zero deferred Layer 2 instruments remain."""
-        assert self.loader.deferred_count() == 0
+    def test_deferred_count_is_2(self):
+        """FIX ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
+        REPLACES test_deferred_count_is_0. TIN and RUBBER re-deferred after
+        check_proxy_correlation.py's live 10 Aug 2026 run found their equity
+        proxies correlate too weakly with their FRED Track 2 benchmark
+        (+0.139/120mo and +0.229/120mo respectively) to trust as unbiased
+        context anchors. CPO and NICKEL remain active (+0.405, +0.586)."""
+        assert self.loader.deferred_count() == 2
 
-    def test_no_deferred_instruments_remain(self):
+    def test_deferred_instruments_are_tin_and_rubber(self):
         """
-        FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
-        REPLACES test_deferred_instruments_have_required_fields. That test's
-        entire premise (walk the live deferred set, check each one's
-        deferred_reason/planned_wave/currency fields) is now vacuous -- the
-        live deferred set is empty. The Extension v1.0 §8.3 STRUCTURAL rule
-        ("a deferred instrument must carry deferred_reason + planned_wave")
-        is still real and still enforced -- by scripts/validate_instruments.py
-        against whatever future instrument gets deferred, and exercisable via
-        synthetic data in TestInstrumentLoaderCoverageGaps if ever needed --
-        just no longer against live config, since there is currently nothing
-        live to check it against.
+        FIX ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
+        REPLACES test_no_deferred_instruments_remain. TIN and RUBBER are
+        deferred again; CPO and NICKEL remain active with correlation
+        caveats (proxy_for/proxy_correlation_expected now set on both).
         """
         deferred = {
             i.symbol: i for i in self.loader.all_context(include_deferred=True)
             if not i.context_available
         }
-        assert deferred == {}, f"Expected zero deferred Layer 2 instruments, got: {sorted(deferred)}"
+        assert set(deferred) == {"TIN", "RUBBER"}, (
+            f"Expected exactly TIN and RUBBER deferred, got: {sorted(deferred)}"
+        )
+        for sym in ("TIN", "RUBBER"):
+            inst = deferred[sym]
+            assert inst.is_deferred is True
+            assert inst.deferred_reason
+            assert inst.planned_wave is not None
 
-        for sym in ("CPO", "RUBBER", "TIN", "NICKEL"):
+        for sym in ("CPO", "NICKEL"):
             inst = self.loader.get_context(sym)
             assert inst.context_available is True
             assert inst.is_deferred is False
+            assert inst.proxy_for is not None
+            assert inst.meta.get("proxy_correlation_expected") is not None
             assert inst.meta.get("requires_fx_normalization") is not True, (
                 f"{sym} is now an equity proxy, not a raw currency-denominated "
                 "commodity feed -- requires_fx_normalization must not be True"
             )
+        assert self.loader.get_context("CPO").meta.get("proxy_correlation_expected") == 0.405
+        assert self.loader.get_context("NICKEL").meta.get("proxy_correlation_expected") == 0.586
 
     def test_get_context_vix(self):
         inst = self.loader.get_context("VIX")
@@ -259,18 +278,16 @@ class TestInstrumentLoaderLayer2:
         assert "EIDO" in fc_symbols        # international — included
         assert "ARKK" in fc_symbols        # thematic — included
 
-    def test_forecast_context_now_includes_former_deferred(self):
-        """FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
-        REPLACES test_forecast_context_excludes_deferred, whose premise (CPO/
-        RUBBER/TIN never appear in VAR input because they were deferred) no
-        longer holds -- all 4 (+ NICKEL) are now context_available=true AND
-        include_in_forecast=true (yfinance equity proxies). The general
-        exclusion MECHANISM (deferred -> absent from forecast_context()) is
-        unaffected and still real; it simply has no live example to exercise
-        it against right now. This test locks in the new reality as a
-        regression guard."""
+    def test_forecast_context_cpo_nickel_active_tin_rubber_deferred(self):
+        """FIX ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
+        REPLACES test_forecast_context_now_includes_former_deferred. TIN and
+        RUBBER are deferred again (excluded from forecast_context() via the
+        context_available filter); CPO and NICKEL remain active and
+        include_in_forecast=true, so they still appear."""
         fc_symbols = {i.symbol for i in self.loader.forecast_context()}
-        assert {"CPO", "RUBBER", "TIN", "NICKEL"}.issubset(fc_symbols)
+        assert {"CPO", "NICKEL"}.issubset(fc_symbols)
+        assert "TIN" not in fc_symbols
+        assert "RUBBER" not in fc_symbols
 
     def test_correlation_context_includes_deferred_excluded_instruments(self):
         """
@@ -278,11 +295,15 @@ class TestInstrumentLoaderLayer2:
         factor ETFs (include_in_forecast=False) ARE included here, unlike
         forecast_context(). Architecture v2.0 §8.2 design constraint: PCA
         pre-processing applies ONLY to ForecastModule, not CorrelationModule.
+        UPD ADR-034/036 (10 Aug 2026): 58, not 59 — TIN/RUBBER excluded
+        (deferred), IDR included (ADR-036 moved it into Layer 2).
         """
         cc_symbols = {i.symbol for i in self.loader.correlation_context()}
         assert "SPY" in cc_symbols
         assert "XLK" in cc_symbols
-        assert len(cc_symbols) == 59  # FIX ADR-030-033: 0 deferred (was 55/4 deferred)
+        assert "TIN" not in cc_symbols
+        assert "RUBBER" not in cc_symbols
+        assert len(cc_symbols) == 58
 
     def test_subcategory_meta_dm_cb(self):
         """Data Source & Rates Adjustment v1.0 §6.1: 9 DM central banks via BIS."""
@@ -349,20 +370,17 @@ class TestInstrumentLoaderLayer2:
         assert l2_inst.is_layer2 is True
 
     def test_is_deferred_property_false_for_active_instruments(self):
-        """FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
-        REPLACES test_is_deferred_property. Confirmed via a real
-        `poetry run pytest` run (poetry-logs_v1_13_0.txt) that TIN was
-        missed in the initial pass -- it asserted tin.is_deferred is True,
-        which broke the moment TIN was un-deferred (AFM.V equity proxy).
-        Zero deferred Layer 2 instruments remain in the real config, so
-        the is_deferred==True branch is now dead against live data --
-        confirms False here for two always-active real instruments; the
-        True branch is covered via synthetic data instead, see
-        TestInstrumentLoaderCoverageGaps.test_is_deferred_property_true_for_deferred_instrument.
-        """
-        tin = self.loader.get_context("TIN")
+        """FIX ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
+        REPLACES test_is_deferred_property_false_for_active_instruments'
+        prior TIN example — TIN is deferred again as of this ADR (weak
+        proxy correlation). NICKEL and COPPER remain always-active real
+        instruments; the True branch (TIN, RUBBER) is now covered directly
+        against live data by
+        TestInstrumentLoaderLayer2.test_deferred_instruments_are_tin_and_rubber
+        rather than only via synthetic fixtures."""
+        nickel = self.loader.get_context("NICKEL")
         copper = self.loader.get_context("COPPER")
-        assert tin.is_deferred is False
+        assert nickel.is_deferred is False
         assert copper.is_deferred is False
 
     def test_context_instrument_is_frozen(self):
@@ -383,17 +401,29 @@ class TestGMIDecisionDocumentsV1V2:
     def setup_method(self):
         self.loader = get_loader()
 
-    def test_dollar_basket_subcategory_has_six_currencies(self):
+    def test_dollar_basket_subcategory_has_seven_currencies(self):
         """ADR-014: context_dollar_basket completes Broad Dollar Index's
         10-pair input design (Architecture v2.0 §7.2) — 6 net-new EM/DM
-        legs beyond the 6 (+ USD_IDR) that already existed in Layer 1."""
+        legs beyond the 6 (+ USD_IDR) that already existed in Layer 1.
+        UPD ADR-036 (GMI_Decision_Document_v8.docx, 10 Aug 2026): IDR
+        (was Layer 1 USD_IDR) joined this group too — 6 -> 7."""
         basket = self.loader.by_context_group("dollar_basket")
         assert {i.symbol for i in basket} == {
-            "CNH", "KRW", "SGD", "HKD", "TWD", "NOK"
+            "CNH", "KRW", "SGD", "HKD", "TWD", "NOK", "IDR"
         }
         assert all(i.layer == 2 for i in basket)
         assert all(i.context_available for i in basket)
         assert all(i.context_category == "context_dollar_basket" for i in basket)
+
+    def test_idr_reclassified_from_layer1_forex(self):
+        """ADR-036 (GMI_Decision_Document_v8.docx, 10 Aug 2026): USD_IDR ->
+        IDR, same reclassified_from audit-trail pattern as DXY/SPX/VIX."""
+        idr = self.loader.get_context("IDR")
+        assert idr.yfinance_symbol == "USDIDR=X"
+        assert idr.reclassified_from == "layer_1_forex"
+        assert idr.context_category == "context_dollar_basket"
+        with pytest.raises(KeyError):
+            self.loader.get("USD_IDR")
 
     def test_dollar_basket_contributes_to_is_empty(self):
         """ADR-014: zero direct domain-score weight — this subcategory is a
@@ -431,66 +461,86 @@ class TestGMIDecisionDocumentsV1V2:
         notes = sgd.meta.get("notes", "")
         assert "FX-policy" in notes or "S$NEER" in notes
 
-    def test_fx_normalization_subcategory_has_myr_only(self):
-        """ADR-024: dedicated single-purpose subcategory for CPO's future
-        MYR->USD Silver-layer normalization — deliberately NOT folded into
-        context_dollar_basket (two unrelated purposes kept separate)."""
+    def test_fx_normalization_subcategory_has_thb_only(self):
+        """UPD ADR-037 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
+        REPLACES test_fx_normalization_subcategory_has_myr_only. MYR
+        (ADR-024, for CPO's original FCPO plan) removed — orphaned since
+        ADR-030 re-sourced CPO to F34.SI/SGD. THB added for a future
+        STA.BK/RUBBER normalization step. Still a dedicated single-purpose
+        subcategory, deliberately NOT folded into context_dollar_basket."""
         fx_norm = self.loader.by_context_group("fx_normalization")
-        assert {i.symbol for i in fx_norm} == {"MYR"}
-        myr = fx_norm[0]
-        assert myr.yfinance_symbol == "MYR=X"
-        assert myr.layer == 2
-        assert myr.context_available is True
+        assert {i.symbol for i in fx_norm} == {"THB"}
+        thb = fx_norm[0]
+        assert thb.yfinance_symbol == "THB=X"
+        assert thb.layer == 2
+        assert thb.context_available is True
 
-    def test_myr_excluded_from_forecast(self):
-        """ADR-024: MYR is a Silver-layer normalization input only — never a
-        CrossAssetEngine/ForecastModule feature. include_in_forecast=false
-        despite context_available=true (unusual combination, deliberate)."""
-        myr = self.loader.get_context("MYR")
-        assert myr.include_in_forecast is False
+    def test_thb_excluded_from_forecast(self):
+        """ADR-037: THB (like MYR before it) is a Silver-layer normalization
+        input only — never a CrossAssetEngine/ForecastModule feature."""
+        thb = self.loader.get_context("THB")
+        assert thb.include_in_forecast is False
 
     def test_fx_normalization_contributes_to_is_empty(self):
         """ADR-024: zero domain-score weight, mirroring context_dollar_basket."""
         meta = self.loader.subcategory_meta("context_fx_normalization")
         assert meta["contributes_to"] == []
 
-    def test_myr_ticker_differs_from_basket_convention_by_design(self):
-        """ADR-024 explicitly chose MYR=X (Yahoo Finance's canonical
-        <currency>=X form, same as JPY=X/HKD=X/SGD=X/IDR=X) rather than the
-        USD<CCY>=X convention used for context_dollar_basket — confirmed
-        live for both, this is a deliberate documented choice, not an
-        inconsistency."""
-        myr = self.loader.get_context("MYR")
+    def test_thb_ticker_matches_bare_currency_convention(self):
+        """UPD ADR-037: THB=X follows the same bare <currency>=X convention
+        MYR=X used (same pattern as JPY=X/HKD=X/SGD=X/IDR=X), distinct from
+        the USD<CCY>=X convention used for context_dollar_basket."""
+        thb = self.loader.get_context("THB")
         hkd = self.loader.get_context("HKD")
-        assert myr.yfinance_symbol == "MYR=X"
+        assert thb.yfinance_symbol == "THB=X"
         assert hkd.yfinance_symbol == "USDHKD=X"
 
-    def test_adr023_history_superseded_by_adr030_033(self):
+    def test_fx_normalization_does_not_duplicate_aud_cad_sgd(self):
+        """ADR-037: AUD, CAD, SGD deliberately NOT added to
+        context.fx_normalization — already reachable via Layer 1 forex
+        (AUD_USD, USD_CAD) or context.dollar_basket (SGD, ADR-016)."""
+        fx_norm_symbols = {i.symbol for i in self.loader.by_context_group("fx_normalization")}
+        assert fx_norm_symbols == {"THB"}
+        assert "AUD" not in fx_norm_symbols
+        assert "CAD" not in fx_norm_symbols
+        assert "SGD" not in fx_norm_symbols
+        meta = self.loader.subcategory_meta("context_fx_normalization")
+        assert "AUD" in meta.get("note", "") or "CAD" in meta.get("note", "")
+
+    def test_adr023_history_superseded_by_adr030_034(self):
         """
-        FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026):
+        FIX ADR-030-033 (GMI_Decision_Document_v7.docx, 30 Jul 2026) +
+        ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
         REPLACES test_adr023_only_cpo_is_myr_dependent. ADR-023's finding
         (only CPO was MYR-dependent; TIN/RUBBER were USD-native but ticker-
         blocked) was about the ORIGINAL raw-commodity-price sourcing plan
         (Bursa Malaysia FCPO, LME SN, SICOM TSR20 — all via tvdatafeed).
         tvdatafeed was retired entirely (ADR-029) before any of the three
         got live wiring, and all three (+ NICKEL) were re-sourced as
-        yfinance equity proxies instead. The old assertions (cpo.is_deferred,
-        base_currency=="MYR", etc.) are no longer true of anything live --
-        this test locks in the NEW reality rather than deleting the history
-        outright.
+        yfinance equity proxies instead (ADR-030-033). ADR-034 then
+        re-deferred TIN and RUBBER specifically on proxy-correlation
+        grounds (a different, later reason than the original ticker/
+        FX blockers) — CPO and NICKEL remain active. This test locks in
+        the current, twice-superseded reality rather than deleting the
+        history outright.
         """
         cpo = self.loader.get_context("CPO")
+        nickel = self.loader.get_context("NICKEL")
         tin = self.loader.get_context("TIN")
         rubber = self.loader.get_context("RUBBER")
-        nickel = self.loader.get_context("NICKEL")
 
-        for inst in (cpo, tin, rubber, nickel):
+        for inst in (cpo, nickel):
             assert inst.context_available is True
             assert inst.is_deferred is False
             assert inst.meta.get("requires_fx_normalization") is not True, (
                 f"{inst.symbol}: equity proxy, not a raw currency-denominated "
                 "commodity feed — requires_fx_normalization must not be True"
             )
+
+        for inst in (tin, rubber):
+            assert inst.context_available is False
+            assert inst.is_deferred is True
+            assert inst.deferred_reason
 
         assert cpo.yfinance_symbol == "F34.SI"
         assert rubber.yfinance_symbol == "STA.BK"

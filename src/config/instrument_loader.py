@@ -13,15 +13,34 @@ Mulai instruments.yaml v1.4, universe terbagi dua:
            SPX, VIX, DXY DIHAPUS dari Layer 1 (ADR-003 reklasifikasi) —
            640 instrumen (was 643).
   Layer 2 (context anchors, always-on): instruments.yaml `context` section —
-           59 OHLCV instruments (56 active + 3 deferred Wave 2: TIN/CPO/RUBBER)
+           60 OHLCV instruments (58 active + 2 deferred: TIN/RUBBER)
            diakses via API BARU: all_context(), by_context_category(),
            by_context_group(), forecast_context(), correlation_context(),
            deferred_count(), get_context(), subcategory_meta().
-  EXPECTED_TOTAL = 640 (Layer 1) + 59 (Layer 2 OHLCV) = 699.
+  EXPECTED_TOTAL = 639 (Layer 1) + 60 (Layer 2 OHLCV) = 699.
   # UPD ADR-013/014/024 (GMI Decision Documents v1/v2, 2026-07-11): +7 Layer 2
   # instruments (6 context_dollar_basket currencies + MYR context_fx_normalization),
   # all context_available=true from day one — 52->59 total, 49->56 active,
   # 20->22 subcategories, EXPECTED_TOTAL 692->699. See instruments.yaml v1.5.
+  # UPD ADR-034/036/037 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
+  #   ADR-034 — TIN, RUBBER re-deferred (weak equity-proxy correlation vs
+  #     FRED Track 2 benchmarks, +0.139/+0.229 over 120mo); CPO, NICKEL
+  #     retained active with correlation caveats (+0.405/+0.586).
+  #   ADR-035 — vestigial Layer 1 `index` market category removed (was
+  #     empty since ADR-003). all_symbols()/by_market()/count() API
+  #     unaffected — InstrumentLoader._build_index() already no-ops on an
+  #     empty/absent list.
+  #   ADR-036 — USD_IDR reclassified Layer 1 forex -> Layer 2
+  #     context.dollar_basket (renamed IDR): Layer 1 640->639,
+  #     dollar_basket 6->7. IDX30 + BI's rate context anchor already
+  #     cover Indonesia exposure; USD/IDR as a Layer 1 pair was redundant.
+  #   ADR-037 — MYR (orphaned since ADR-030 re-sourced CPO off raw MYR
+  #     pricing) replaced by THB in context.fx_normalization (net swap,
+  #     count unchanged) — a future STA.BK/RUBBER normalization step's
+  #     anchor, not yet built.
+  # EXPECTED_TOTAL unchanged at 699 throughout (reclassifications and
+  # deferrals move/flag existing declared universe members, they don't
+  # add or remove from the total).
 
 Layer 1 API (UNCHANGED — backward compatible 100%):
     from src.config.instrument_loader import get_loader
@@ -31,12 +50,12 @@ Layer 1 API (UNCHANGED — backward compatible 100%):
     idx     = loader.by_market("idx")        # list[Instrument]
 
 Layer 2 API (NEW — Architecture Extension v1.0 §8.1):
-    ctx       = loader.all_context()                          # 56 active (excl. deferred)
+    ctx       = loader.all_context()                          # 58 active (excl. deferred)
     etfs      = loader.by_context_category("context_etf_sector")
     all_etf   = loader.by_context_group("etf")                # 25 instruments
     fc_inputs = loader.forecast_context()                     # include_in_forecast=True
     cm_inputs = loader.correlation_context()                  # all context_available=True
-    n_pending = loader.deferred_count()                       # 3 (TIN, CPO, RUBBER)
+    n_pending = loader.deferred_count()                       # 2 (TIN, RUBBER)
     vix       = loader.get_context("VIX")
     meta      = loader.subcategory_meta("context_rates_dm_cb")  # _meta.contributes_to etc.
 """
@@ -82,7 +101,7 @@ class Instrument:
     layer:                        int            = 1     # 1=trading candidate, 2=context anchor
     context_category:             Optional[str]  = None  # e.g. 'context_etf_sector' (Layer 2 only)
     context_group:                Optional[str]  = None  # e.g. 'etf', 'commodity', 'equity', 'dollar'
-    context_available:            bool           = True  # False = deferred (TIN, CPO, RUBBER — Wave 2)
+    context_available:            bool           = True  # False = deferred (TIN, RUBBER — ADR-034)
     include_in_forecast:          bool           = True  # False = excluded from ForecastModule VAR input
     proxy_for:                    Optional[str]  = None  # Benchmark being proxied (e.g. 'IRON_ORE_SGX_FE62')
     proxy_instrument:              Optional[str]  = None  # Proxy symbol used (e.g. 'VALE', 'WHC.AX')
@@ -213,9 +232,10 @@ class InstrumentLoader:
     _CONTEXT_GROUPED_KEYS: tuple[str, ...] = ("equity", "commodity", "etf")
     # ADD ADR-014/ADR-024 (GMI Decision Documents v1/v2): dollar_basket
     # (Broad Dollar Index basket-completion currencies) and fx_normalization
-    # (MYR — single-purpose CPO currency conversion anchor) are single-
-    # subcategory groups, structurally identical to `dollar` — no further
-    # nesting, contributes_to: [] in both (zero domain-score weight).
+    # (single-purpose commodity-proxy currency conversion anchor(s) — THB as
+    # of ADR-037, GMI_Decision_Document_v8.docx, 10 Aug 2026; was MYR) are
+    # single-subcategory groups, structurally identical to `dollar` — no
+    # further nesting, contributes_to: [] in both (zero domain-score weight).
     _CONTEXT_DIRECT_KEYS: tuple[str, ...] = ("dollar", "dollar_basket", "fx_normalization")
     # `rates` is grouped like equity/commodity/etf, but its subcategories carry
     # NO "instruments" key (FRED/BIS macro series only) — handled separately
@@ -301,7 +321,7 @@ class InstrumentLoader:
         ]
 
     def count(self) -> int:
-        """Total instrumen aktif Layer 1. Expected: 640 (post GMI Wave 1 reklasifikasi)."""
+        """Total instrumen aktif Layer 1. Expected: 639 (post ADR-036 IDR reklasifikasi)."""
         return len(self.all_symbols())
 
     def symbol_list(self, market: str | None = None) -> list[str]:
@@ -330,7 +350,7 @@ class InstrumentLoader:
     def all_context(self, include_deferred: bool = False) -> list[Instrument]:
         """
         Return semua Layer 2 OHLCV instruments.
-        Default exclude context_available=False (TIN, CPO, RUBBER — Wave 2 deferred).
+        Default exclude context_available=False (TIN, RUBBER — ADR-034 deferred).
         Set include_deferred=True untuk audit / health-reporter visibility.
         """
         if include_deferred:
@@ -394,14 +414,18 @@ class InstrumentLoader:
         return sum(1 for i in self._context_instruments if not i.context_available)
 
     def count_context(self, include_deferred: bool = False) -> int:
-        """Total Layer 2 OHLCV instruments. Expected: 56 active / 59 with deferred."""
+        """Total Layer 2 OHLCV instruments. Expected: 58 active / 60 with deferred."""
         return len(self.all_context(include_deferred=include_deferred))
 
     def count_total(self) -> int:
-        """Layer 1 + Layer 2 (active) combined. Expected: 640 + 56 = 696 OHLCV-bearing.
+        """Layer 1 + Layer 2 (active) combined. Expected: 639 + 58 = 697 OHLCV-bearing.
         NOTE: EXPECTED_TOTAL=699 in validate_instruments.py counts ALL Layer 2
-        slots including deferred (640 + 59 = 699) since deferred instruments
+        slots including deferred (639 + 60 = 699) since deferred instruments
         are declared universe members per ADR-007, just not yet ingested.
+        As of ADR-034 (10 Aug 2026) this genuinely diverges from 699 for the
+        first time — TIN and RUBBER are deferred again, so count_total()'s
+        697 is 2 lower than EXPECTED_TOTAL's 699. Previously (deferred_count
+        == 0) the two numbers happened to coincide.
         """
         return self.count() + self.count_context(include_deferred=False)
 

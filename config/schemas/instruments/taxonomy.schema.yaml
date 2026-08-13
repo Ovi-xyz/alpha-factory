@@ -4,7 +4,7 @@
 "$schema": "http://json-schema.org/draft-07/schema#"
 title: "Alpha Factory instruments_taxonomy.yaml"
 type: object
-required: ["version", "last_updated", "us_stocks", "idx_stocks", "commodity", "forex", "index", "context"]
+required: ["version", "last_updated", "us_stocks", "idx_stocks", "commodity", "forex", "context"]
 properties:
   version:
     type: string
@@ -30,9 +30,8 @@ properties:
     additionalProperties:
       type: array
       items: { "$ref": "#/$defs/instrument" }
-  index:
-    type: array
-    items: { "$ref": "#/$defs/instrument" }
+  # REMOVED ADR-035 (GMI_Decision_Document_v8.docx, 10 Aug 2026): see
+  # identity.schema.yaml's matching comment for the full rationale.
   context:
     type: object
     properties:

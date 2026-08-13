@@ -74,11 +74,13 @@ class ContextAnchorsResolver:
     trading liquidity gate (GD §0.2: pipeline produces context, not trade
     decisions).
 
-    Deferred instruments (context_available=False: TIN, CPO, RUBBER) are
-    excluded from resolve()/load() — Architecture Extension v1.0 ADR-007.
-    Use loader.all_context(include_deferred=True) directly (bypassing this
-    resolver) if deferred visibility is needed for audit/health-reporter
-    purposes.
+    Deferred instruments (context_available=False — TIN, RUBBER as of
+    ADR-034, GMI_Decision_Document_v8.docx, 10 Aug 2026; originally
+    CPO/RUBBER/TIN under Architecture Extension v1.0 ADR-007, then briefly
+    zero deferred under GMI_Decision_Document_v7.docx ADR-030-033) are
+    excluded from resolve()/load(). Use loader.all_context(include_deferred=True)
+    directly (bypassing this resolver) if deferred visibility is needed for
+    audit/health-reporter purposes.
 
     Output schema:
         symbol, context_category, context_group, layer,
@@ -105,7 +107,7 @@ class ContextAnchorsResolver:
         here — there is nothing to fall back FROM).
 
         Returns:
-            List of normalized Layer 2 symbol strings (49 active, deferred
+            List of normalized Layer 2 symbol strings (58 active, deferred
             excluded).
         """
         loader = get_loader()
