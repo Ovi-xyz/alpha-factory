@@ -43,11 +43,18 @@ SCHEMA_PATH = Path("config/schemas/fred_macro.yaml")
 # These lags approximate the typical FRED first-release publication delay.
 # Source: FRED release calendars + St. Louis Fed documentation.
 # Conservative: overestimates lag (earlier release_date) → safer for PIT.
+# FIX ADR-041 (GMI_Decision_Document_v9.docx, 14 Aug 2026): 5 entries below
+# removed as part of the grep-sweep (checklist item 11) that accompanied
+# pruning GOLDAMGBD228NLBM / NAPM / NMFCI / PPIFGS / CSCICP03USM665S from
+# config/fred_series.yaml. These keys are inert once removed from the
+# registry (never looked up again), but leaving them here would misleadingly
+# suggest they're still active series. Pure vestigial cleanup, zero
+# behavior change — same class of fix as ADR-035's index:[] removal.
 RELEASE_LAG_DAYS: dict[str, int] = {
     # Inflation
     "CPIAUCSL": 35,  "CPILFESL": 35,
     "PCEPI":    35,  "PCEPILFE": 35,
-    "PPIFIS":   25,  "PPIFGS":   25,  "PPIACO": 25,
+    "PPIFIS":   25,  "PPIACO": 25,
     # Labor
     "PAYEMS":   40,  "ICSA":      7,  "CCSA":    7,
     "UNRATE":   40,  "U6RATE":   40,  "CIVPART": 40,
@@ -57,8 +64,14 @@ RELEASE_LAG_DAYS: dict[str, int] = {
     "INDPRO": 20,  "TCU": 20,
     "RSAFS": 20,   "RSXFS": 20,
     "DGORDER": 25, "NEWORDER": 25,
-    "NAPM": 3,     "NMFCI": 3,
     # Monetary / Rates (daily series — minimal lag)
+    # NOTE ADR-042: the 6 newly-registered Treasury tenors (DGS1MO/DGS3MO/
+    # DGS6MO/DGS1/DGS7/DGS20) are intentionally NOT added here — the ADR's
+    # own consequences explicitly state "no code change needed in
+    # treasury_ingester.py or fred_ingester.py itself." They fall back to
+    # _DEFAULT_RELEASE_LAG (7 days) rather than the 1-day lag their DGS2/
+    # DGS5/DGS10/DGS30 siblings use below — a decided scope boundary, not
+    # an oversight.
     "FEDFUNDS": 3,  "DFF": 1,
     "T10Y2Y": 1,    "T10Y3M": 1,
     "DGS2": 1,      "DGS5": 1,   "DGS10": 1,  "DGS30": 1,
@@ -66,14 +79,14 @@ RELEASE_LAG_DAYS: dict[str, int] = {
     # Credit / Financial
     "BAMLH0A0HYM2": 1,  "BAMLC0A0CM": 1,
     "NFCI": 3,      "STLFSI4": 3,
-    "DCOILWTICO": 1,  "GOLDAMGBD228NLBM": 1,
+    "DCOILWTICO": 1,
     "DEXUSEU": 1,   "DEXJPUS": 1,
     "M2SL": 10,     "WALCL": 5,
     "VIXCLS": 1,
     # Housing / Consumer
     "HOUST": 20,  "PERMIT": 20,  "HSN1F": 30,
     "EXHOSLUSM495S": 25,
-    "UMCSENT": 3,  "CSCICP03USM665S": 5,
+    "UMCSENT": 3,
     "PSAVERT": 30,  "PCE": 30,
     "DRSFRMACBS": 45,  "TOTALSL": 30,
     # Commodity (RISK-15 fix, Ovi 8 Aug 2026) -- IMF Primary Commodity

@@ -1475,7 +1475,235 @@ endpoint correctness itself was then independently confirmed a third way
 
 ---
 
-*Last updated: v1.15.0 — Three-part session, none touching `src/`:
+## RISK-17 (NEW): EIA APIv1 fully discontinued Nov 2022 — every `bronze_eia` run had silently written zero rows for ~3.75 years — RESOLVED (migrated to APIv2)
+
+**Status:** ✅ **FIXED (14 Aug 2026).** Discovered on `check_eia_series.py`'s
+first-ever live run — part of the 8-script preflight batch authored this
+thread (FRED/EIA/BLS/BEA/US Treasury/IMF/Polygon/AlphaVantage).
+
+**GD Reference:** GD §3.3.3 (EIA weekly crude oil cadence),
+Supplementary Design v1.1 G1 (`IncFetchProtocol` pattern `_fetch_series`
+mirrors for EIA specifically).
+
+### What the risk was
+
+`eia_ingester.py::_fetch_series()` called `https://api.eia.gov/series/`
+(EIA's legacy v1 endpoint), per `FIX EIA-1`'s original rationale ("v1 is
+the stable, correct format for PET.* series"). EIA's own documentation
+confirms APIv1 was fully discontinued November 2022 — the endpoint had
+not existed for roughly 3.75 years. Every Wednesday `bronze_eia` run
+since deployment returned HTTP 404 on all 4 series, both batched and
+isolated, and silently wrote zero rows.
+
+### Why this was invisible
+
+`_fetch_series()` catches non-200 responses with a `logger.warning` and
+returns `None` — `run()` then simply logs `0 OK, 0 failed` (not an
+exception, not a crash). No `EIA_API_KEY not set` note printed alongside
+the 404s, so this was never mistaken for an auth gap either. Nothing in
+the existing test suite exercised the real v1 URL against a live
+response — all mocks assumed the old shape was still valid.
+
+### Fix
+
+Migrated to APIv2's `/v2/seriesid/{id}` backward-compatibility route,
+which accepts the same legacy v1-style series IDs (`PET.WCRSTUS1.W`
+etc.) directly — the minimal-surface-area fix, not the larger v2
+category/facet route redesign `FIX EIA-1` was originally avoiding (that
+concern — v2's category paths vary per dataset — still holds for the
+full route/facet approach; it just doesn't apply to the `/seriesid/`
+backward-compat path). Response parsing updated from v1's
+`data.series[0].data = [[period, value], ...]` to v2's
+`response.data = [{"period": ..., "value": ..., ...}, ...]`.
+`config/schemas/eia_oil.yaml`'s `expected_columns` required no changes —
+`_fetch_series()` normalizes both shapes into the identical internal
+Bronze record before the schema validator is ever consulted.
+
+### What this does NOT resolve
+
+Not empirically confirmed against a live EIA APIv2 response for these 4
+specific series — this sandbox has no network route to `api.eia.gov`.
+Pending live confirmation on network-enabled hardware (same discipline
+as RISK-16's Gate 1 before its live run).
+
+### Verification
+
+`tests/unit/test_eia_ingester.py` rewritten for the v2 shape (URL now
+carries `series_id` in the path, not `params["series_id"]`; response
+rows are dicts, not `[period, value]` pairs) — 16/16 passing, 0
+regressions in the rest of the suite. `check_eia_series.py` mirrors the
+identical URL + parsing change to keep testing the real production path.
+
+---
+
+## RISK-18 (NEW): BEA `pce_deflator` LineDescription match failed 0/310 rows live; `trade_balance` was reading the wrong table entirely — RESOLVED (LineNumber-based matching + table swap)
+
+**Status:** ✅ **FIXED (14 Aug 2026).** Discovered on
+`check_bea_datasets.py`'s first-ever live run.
+
+**GD Reference:** CI/CD Ops Guide v1.7.4 NEW-7 / this project's own
+`FIX GLD-001` (BEA NIPA unit-mixing — LineDescription filter).
+
+### What the risk was
+
+Two independent problems in `bea_ingester.py::_fetch_nipa()`:
+
+1. **`pce_deflator` (T20304):** `FIX GLD-001`'s `LINE_FILTER` required an
+   exact string match against `LineDescription == "Personal consumption
+   expenditures"`. Live, T20304 returned 310 rows and **zero** matched —
+   BEA's actual wording differs from the string this project had assumed
+   (table choice itself is correct, confirmed via BEA's own NIPA table
+   register). `_fetch_nipa()` would have returned an empty DataFrame for
+   this series on every real run.
+2. **`trade_balance` (T40100):** Table `T40100` is BEA's International
+   Transactions / current-account (balance-of-payments) table — confirmed
+   via its own returned rows ("Balance on current account, NIPAs",
+   "Current payments to the rest of the world", ...) — a different,
+   broader concept than a GDP-component "net exports of goods and
+   services" line (current account also nets in primary/secondary income
+   flows GDP accounting excludes). This reads as the wrong table chosen
+   at original design time, not wording drift.
+
+### Why this was invisible
+
+Both failure modes are silent by design (`FIX GLD-001`'s own filter
+returns an empty DataFrame, not an error, when nothing matches) — exactly
+the class of bug this project's "silent drops are a risk pattern"
+principle exists to catch. No live preflight check existed for either
+table until this thread.
+
+### Fix
+
+`pce_deflator`: switched to `LineNumber == "1"` — BEA's NIPA table
+convention places a table's headline/aggregate row at a fixed
+`LineNumber`, structural to the table format rather than a label BEA
+reworks casually; robust to exactly the wording drift that broke the old
+match. `trade_balance`: table switched `T40100` → `T10105` (Table 1.1.5,
+Gross Domestic Product — the standard GDP-components table), matched via
+`LineNumber == "15"`, inferred from Table 1.1.x's standardized line
+structure (confirmed via an actual BEA Table 1.1.3 listing sharing the
+identical line layout — Line 15 = "Net exports of goods and services").
+`real_gdp` (T10106) is **unchanged** — its `LineDescription` match
+already passes live.
+
+### What this does NOT resolve
+
+`trade_balance`'s exact `LineNumber` for T10105 is inferred from an
+external reference and a same-layout sibling table, **not yet
+empirically confirmed against a live T10105 response for this
+pipeline's own request parameters** — this sandbox has no network route
+to `apps.bea.gov`. Treat as decided-in-direction, not decided-in-detail,
+until that live run happens.
+
+### Verification
+
+`tests/unit/test_bea_ingester_gld001.py`'s `pce_deflator`/`trade_balance`
+tests rewritten to prove the fix's actual point — the row that matches
+now carries a **deliberately different** `LineDescription` wording than
+the old filter string, demonstrating the match survives exactly the
+drift that broke it live. `real_gdp`'s tests are untouched and still
+pass. 2 new tests lock in the `LINE_NUMBER_FILTER` dict and the
+`T10105` table swap. 32/32 passing in this file, 0 regressions elsewhere.
+
+---
+
+## RISK-19 (NEW): 5 dead/redundant FRED series silently costing nothing but registry cleanliness; 6 declared Treasury tenors silently dropped by the registry-gate mechanism — RESOLVED (pruned + registered)
+
+**Status:** ✅ **FIXED (14 Aug 2026).** Discovered on
+`check_fred_series.py`'s first-ever live run — the first live check ever
+run against the 61 non-commodity series in `config/fred_series.yaml`
+(RISK-15's `check_fred_commodity_series.py` only ever covered the 6
+`domain: commodity` Track 2 series).
+
+**GD Reference:** GD §3.3.3 ("full 1M–30Y yield curve"), Supplementary
+Design v1.1 G1 (`series_filter` registry-gate mechanism).
+
+### What the risk was
+
+**Dead series (5):** `GOLDAMGBD228NLBM` (deleted FRED 2022-01-31, ICE
+Benchmark Administration data removal), `NAPM` and `NMFCI` (both deleted
+FRED 2016-06-24 at ISM's own request — no free replacement exists, ISM
+data is paid-license only), `PPIFGS` (discontinued by BLS ~Feb 2016,
+frozen at 2015-12-01 live — redundant with `PPIFIS`, already live and
+fresh), `CSCICP03USM665S` (frozen since 2024-01 — its Canada sibling
+series in the same OECD family already carries FRED's explicit
+`(DISCONTINUED)` tag; redundant with `UMCSENT`, confirmed fresh). None
+were in `regime_inputs` — macro regime detection was never affected.
+
+**Registry gap (6 Treasury tenors):** `treasury_ingester.py`'s
+`TREASURY_FRED_SERIES` has always declared all 13 tenors (1M through
+30Y), but `FREDIngester.run()`'s `series_filter` can only retain series
+already present in the loaded `config/fred_series.yaml` registry —
+`DGS1MO`, `DGS3MO`, `DGS6MO`, `DGS1`, `DGS7`, and `DGS20` were never
+registered, so they were silently dropped on every run despite being
+named in the filter. Bronze had only ever ingested 4 of the 13 declared
+tenors (2Y/5Y/10Y/30Y) — the exact "silent drops" failure class this
+project's own principles flag as a recurring risk pattern.
+
+### Why this was invisible
+
+`_fetch_series()` catching a dead series' API exception logs at DEBUG
+level only, incrementing neither the success nor the failed counter in
+`run()`'s own INFO-level summary — a dead series and a series that
+simply never existed in the registry look identical from the outside
+(neither appears in the run log at all). No prior live check had ever
+enumerated the full non-commodity registry against real FRED responses.
+
+### Fix
+
+5 dead/redundant series removed from `config/fred_series.yaml` (67 → 62).
+6 missing Treasury tenors registered under `monetary_policy`, matching
+the existing `DGS2`/`DGS5`/`DGS10`/`DGS30` entry pattern (62 → 68 total).
+Grep-sweep (checking for other `src/` references to the 5 pruned series)
+found and cleaned two genuine dead references: `fred_ingester.py`'s
+`RELEASE_LAG_DAYS` dict (5 now-inert keys removed — same vestigial-config
+class as this project's own `index: []` precedent) and
+`bls_ingester.py`'s `fred_mirror_map["PPI"]` (dropped `PPIFGS`, kept
+`PPIFIS`). The 6 new tenors deliberately do **not** get a
+`RELEASE_LAG_DAYS` entry — they fall back to the 7-day default rather
+than their siblings' 1-day lag, a decided scope boundary (no `src/`
+behavior change beyond the registry gate itself), not an oversight.
+
+### Verification
+
+New dedicated file `tests/unit/test_fred_series_registry_adr041_042.py`
+(24 tests) — static registry content (counts, presence/absence, no
+duplicate IDs), and, more load-bearing, an end-to-end reproduction of
+the exact silent-drop mechanism using the **real** production registry
+file (not a mocked one): `series_filter=["DGS20"]` against
+`FREDIngester()` now actually reaches `fredapi.Fred.get_series()` and
+writes a Bronze file, where before this fix it would have silently
+retained 0 series and written nothing, with no error. 1466 → 1492
+passed (+26: 24 new + 2 new BEA additions above), 0 regressions
+elsewhere. Coverage: 81.46% aggregate (gate: 80%).
+
+---
+
+*Last updated: v1.15.2 — `GMI_Decision_Document_v9.docx` (14 Aug 2026):
+first live run of all 8 preflight scripts authored the same thread
+surfaced 5 findings across EIA/BEA/FRED, all fixed here. ADR-038: EIA
+APIv1 confirmed fully dead (discontinued Nov 2022) — migrated to APIv2's
+`/v2/seriesid/` backward-compat route (RISK-17). ADR-039: BEA
+`pce_deflator`'s `LineDescription` match failing 0/310 rows live — fixed
+via `LineNumber`-based matching, robust to wording drift (RISK-18).
+ADR-040: BEA `trade_balance` was reading the wrong table (`T40100`,
+current-account) — switched to `T10105` (GDP components), `LineNumber`
+inferred from Table 1.1.x's standard layout, pending live confirmation
+(RISK-18). ADR-041: 5 dead/redundant FRED series pruned
+(`GOLDAMGBD228NLBM`/`NAPM`/`NMFCI`/`PPIFGS`/`CSCICP03USM665S`), plus a
+grep-sweep cleanup of two now-dead references (`RELEASE_LAG_DAYS`,
+`bls_ingester.py`'s FRED-mirror map). ADR-042: 6 Treasury tenors
+(`DGS1MO`/`DGS3MO`/`DGS6MO`/`DGS1`/`DGS7`/`DGS20`) registered, closing
+the registry-gate silent-drop gap `series_filter` had against them since
+`treasury_ingester.py` was written (RISK-19). PATCH bump: bug fixes to
+existing ingesters + config pruning/addition, no new capability exposed
+downstream (matching this project's own PATCH precedent — cf. v1.13.4/
+v1.13.5). 1466 → 1492 passed (+26), coverage 81.43% → 81.46%. Not yet
+empirically confirmed against live EIA/BEA APIs from this environment —
+3 items (ADR-038's v2 response shape, ADR-040's exact `T10105` LineNumber)
+explicitly flagged pending live confirmation, same discipline as this
+file's own RISK-16/Gate 1 precedent. August 2026.
+Prior entry: v1.15.0 — Three-part session, none touching `src/`:
 (1) RISK-15's live-FRED half confirmed — `check_fred_commodity_series.py`
 run for real on the M1, all 6 Track 2 series PASS. (2) Gate 1 (RISK-16)
 extraction pass authored: `extract_us_weights_from_sheet()` +

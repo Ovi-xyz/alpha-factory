@@ -57,7 +57,9 @@ class EIAIngester(BronzeIngester):
         """Ingest all EIA series."""
         if not self._api_key:
             logger.warning(
-                "[EIA] EIA_API_KEY not set — attempting v1 API (no key required)"
+                "[EIA] EIA_API_KEY not set — APIv2 documents api_key as "
+                "required on every route (including /seriesid/); "
+                "attempting request anyway, expect failure"
             )
 
         logger.info(f"[EIA] Starting ingestion | run_date={run_date}")
@@ -113,11 +115,20 @@ class EIAIngester(BronzeIngester):
     ) -> Optional[pl.DataFrame]:
         """Fetch EIA series via REST API.
 
-        FIX EIA-1 (HIGH): EIA v2 endpoint /v2/seriesid/{id} does not exist in
-        the current EIA API structure. Use the EIA v1 legacy endpoint which is
-        stable, widely documented, and does not require key for basic series.
-        The v2 API uses category-based paths (e.g. /v2/petroleum/pri/spt/data/)
-        that vary by dataset — v1 is simpler and works for all PET.* series.
+        FIX ADR-038 (GMI_Decision_Document_v9.docx, 14 Aug 2026): FIX EIA-1's
+        v1 legacy endpoint (api.eia.gov/series/) was confirmed dead —
+        check_eia_series.py's first-ever live run (14 Aug 2026) returned
+        HTTP 404 on all 4 series, both batched and isolated, with no
+        "EIA_API_KEY not set" note printed (not an auth gap). EIA's own
+        documentation confirms APIv1 was fully discontinued November 2022 —
+        every Wednesday bronze_eia run since deployment had been silently
+        writing zero rows for ~3.75 years. FIX EIA-1's original rationale
+        ("v2's category-based paths vary per dataset") is void for this
+        specific route: migrated to APIv2's /v2/seriesid/{id}
+        backward-compatibility route, which accepts the same legacy
+        v1-style series IDs (PET.WCRSTUS1.W etc.) directly — the
+        minimal-surface-area fix, not the larger v2 category/facet
+        redesign FIX EIA-1 was originally avoiding.
 
         FIX EIA-2 (MEDIUM): use last_known date for incremental fetch instead of
         always downloading 5 years (260 rows) every Wednesday. EIA weekly data
@@ -130,17 +141,23 @@ class EIAIngester(BronzeIngester):
         else:
             start = run_date - timedelta(days=365 * 5)  # full history on first run
 
-        # FIX EIA-1: use EIA v1 endpoint — stable, correct format for PET.* series
-        # v1 format: https://api.eia.gov/series/?api_key=KEY&series_id=PET.RWTC.W
+        # FIX ADR-038: APIv2 seriesid backward-compat route. series_id is
+        # part of the URL path itself (not a query param, unlike v1) — same
+        # legacy-style IDs as before, e.g. "PET.RWTC.W".
+        # v2 format: https://api.eia.gov/v2/seriesid/PET.RWTC.W?api_key=KEY&start=...&end=...
         params: dict = {
-            "series_id": series_id,
-            "start":     start.isoformat(),
-            "end":       run_date.isoformat(),
+            "start": start.isoformat(),
+            "end":   run_date.isoformat(),
         }
         if self._api_key:
             params["api_key"] = self._api_key
+        # NOTE ADR-038: unlike v1's permissive unauthenticated access, EIA's
+        # own APIv2 documentation lists api_key as required on every route
+        # including /seriesid/ — a request without one is expected to fail.
+        # Kept as a soft warning in run() rather than a hard return here,
+        # matching this ingester's pre-existing missing-key behavior.
 
-        url = "https://api.eia.gov/series/"
+        url = EIA_BASE_URL.format(series_id=series_id)
 
         try:
             resp = requests.get(url, params=params, timeout=30)
@@ -152,21 +169,36 @@ class EIAIngester(BronzeIngester):
 
             data = resp.json()
 
-            # v1 response structure: data.series[0].data = [[period, value], ...]
-            series_list = data.get("series", [])
-            if not series_list:
-                logger.debug(f"[EIA] No series data returned for {series_id}")
+            # FIX ADR-038: v2's response envelope is
+            # {"response": {"data": [...]}, "request": {...}, "apiVersion": ...}
+            # — distinct from v1's {"series": [{"data": [[period, value], ...]}]}.
+            # Each row in response.data is a dict (field set varies by
+            # dataset — duoarea/product/series-description/etc. for
+            # petroleum series) but "period" and "value" are always present.
+            # Confirmed against EIA's own APIv2 documentation and published
+            # response examples this thread — this sandbox has no network
+            # route to api.eia.gov to confirm against a live response for
+            # these specific 4 series. Flagged pending live confirmation
+            # (checklist item 4, GMI_Decision_Document_v9.docx §3), same
+            # discipline as ADR-040's T10105 LineNumber.
+            response_obj = data.get("response")
+            if response_obj is None:
+                err = data.get("error")
+                logger.debug(
+                    f"[EIA] No 'response' envelope for {series_id}"
+                    f"{f' -- {err}' if err else ''}"
+                )
                 return None
 
-            raw_rows = series_list[0].get("data", [])
+            raw_rows = response_obj.get("data", [])
             if not raw_rows:
                 return None
 
             records = []
             for row in raw_rows:
                 try:
-                    period = str(row[0])   # e.g. "2026-01-01" or "20260101"
-                    value  = row[1]
+                    period = str(row.get("period"))
+                    value  = row.get("value")
                     if value is None:
                         continue
                     # Normalize period to ISO date format
@@ -187,7 +219,7 @@ class EIAIngester(BronzeIngester):
                         # is correctly satisfied because data IS available on run_date.
                         "release_date":     run_date.isoformat(),
                     })
-                except (IndexError, ValueError, TypeError):
+                except (AttributeError, ValueError, TypeError):
                     pass
 
             return pl.DataFrame(records) if records else None

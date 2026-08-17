@@ -17,9 +17,15 @@ from src.bronze.eia_ingester import EIAIngester, run
 
 
 def _eia_response(status_code=200, series_data=None):
+    """Build a mock APIv2 response. series_data: list of row dicts, e.g.
+    [{"period": "2026-05-06", "value": 450000.0}, ...]. None -> no
+    'response' envelope at all (mirrors a real v2 error body)."""
     resp = MagicMock()
     resp.status_code = status_code
-    resp.json.return_value = {"series": [{"data": series_data}]} if series_data is not None else {"series": []}
+    if series_data is not None:
+        resp.json.return_value = {"response": {"data": series_data}}
+    else:
+        resp.json.return_value = {"error": "series does not exist."}
     return resp
 
 
@@ -33,7 +39,7 @@ def _isolate(tmp_path, monkeypatch):
 
 
 class TestApiKeyHandling:
-    def test_no_key_still_attempts_v1_no_key_required(self, tmp_path, monkeypatch):
+    def test_no_key_still_attempts_v2_request(self, tmp_path, monkeypatch):
         monkeypatch.delenv("EIA_API_KEY", raising=False)
         with patch("requests.get", return_value=_eia_response(series_data=[])) as mock_get:
             EIAIngester().run(date(2026, 6, 1))
@@ -41,6 +47,10 @@ class TestApiKeyHandling:
                 "src.bronze.eia_ingester", fromlist=["EIA_SERIES"]
             ).EIA_SERIES)
             assert "api_key" not in mock_get.call_args_list[0].kwargs["params"]
+            # FIX ADR-038: series_id is now part of the URL path (v2's
+            # /v2/seriesid/{id} route), not a query param.
+            first_url = mock_get.call_args_list[0].args[0]
+            assert first_url.startswith("https://api.eia.gov/v2/seriesid/")
 
     def test_key_present_included_in_params(self, tmp_path, monkeypatch):
         monkeypatch.setenv("EIA_API_KEY", "fake-key")
@@ -52,7 +62,10 @@ class TestApiKeyHandling:
 class TestSuccessfulFetch:
     def test_iso_period_parsed_and_written(self, tmp_path, monkeypatch):
         monkeypatch.setenv("EIA_API_KEY", "fake-key")
-        resp = _eia_response(series_data=[["2026-05-06", 450000.0], ["2026-05-13", 452000.0]])
+        resp = _eia_response(series_data=[
+            {"period": "2026-05-06", "value": 450000.0},
+            {"period": "2026-05-13", "value": 452000.0},
+        ])
         with patch("requests.get", return_value=resp):
             EIAIngester().run(date(2026, 6, 1))
         out_dir = tmp_path / "bronze" / "macro" / "eia" / "crude_oil"
@@ -65,7 +78,7 @@ class TestSuccessfulFetch:
 
     def test_compact_8digit_period_normalized_to_iso(self, tmp_path, monkeypatch):
         monkeypatch.setenv("EIA_API_KEY", "fake-key")
-        resp = _eia_response(series_data=[["20260506", 450000.0]])
+        resp = _eia_response(series_data=[{"period": "20260506", "value": 450000.0}])
         with patch("requests.get", return_value=resp):
             EIAIngester().run(date(2026, 6, 1))
         out_dir = tmp_path / "bronze" / "macro" / "eia" / "crude_oil"
@@ -74,18 +87,24 @@ class TestSuccessfulFetch:
 
     def test_null_value_row_skipped(self, tmp_path, monkeypatch):
         monkeypatch.setenv("EIA_API_KEY", "fake-key")
-        resp = _eia_response(series_data=[["2026-05-06", None], ["2026-05-13", 452000.0]])
+        resp = _eia_response(series_data=[
+            {"period": "2026-05-06", "value": None},
+            {"period": "2026-05-13", "value": 452000.0},
+        ])
         with patch("requests.get", return_value=resp):
             EIAIngester().run(date(2026, 6, 1))
         out_dir = tmp_path / "bronze" / "macro" / "eia" / "crude_oil"
         written = pl.read_parquet(next(out_dir.rglob("us_crude_stocks*.parquet")))
         assert len(written) == 1
 
-    def test_no_series_in_response_no_write(self, tmp_path, monkeypatch):
+    def test_no_response_envelope_no_write(self, tmp_path, monkeypatch):
+        """FIX ADR-038: v2 error bodies omit the 'response' key entirely
+        (e.g. {"error": "series does not exist."}) rather than v1's
+        {"series": []}."""
         monkeypatch.setenv("EIA_API_KEY", "fake-key")
         resp = MagicMock()
         resp.status_code = 200
-        resp.json.return_value = {"series": []}
+        resp.json.return_value = {"error": "series does not exist."}
         with patch("requests.get", return_value=resp):
             EIAIngester().run(date(2026, 6, 1))
         out_dir = tmp_path / "bronze" / "macro" / "eia" / "crude_oil"
@@ -110,8 +129,9 @@ class TestSuccessfulFetch:
         with patch("requests.get", return_value=_eia_response(series_data=[])) as mock_get:
             EIAIngester().run(date(2026, 6, 1))
         assert mock_get.call_count == 4
-        ids_requested = [c.kwargs["params"]["series_id"] for c in mock_get.call_args_list]
-        assert "PET.RWTC.W" in ids_requested
+        # FIX ADR-038: series_id is now embedded in the URL path, not params.
+        urls_requested = [c.args[0] for c in mock_get.call_args_list]
+        assert "https://api.eia.gov/v2/seriesid/PET.RWTC.W" in urls_requested
 
 
 class TestIncrementalFetchWindow:
@@ -134,9 +154,10 @@ class TestIncrementalFetchWindow:
         with patch("requests.get", return_value=_eia_response(series_data=[])) as mock_get:
             EIAIngester().run(run_date)
         expected_start = (date(2026, 5, 6) - timedelta(days=14)).isoformat()
-        first_call_params = mock_get.call_args_list[0].kwargs["params"]
-        assert first_call_params["series_id"] == "PET.WCRSTUS1.W"
-        assert first_call_params["start"] == expected_start
+        first_call = mock_get.call_args_list[0]
+        # FIX ADR-038: series_id confirmed via URL path, not params.
+        assert first_call.args[0] == "https://api.eia.gov/v2/seriesid/PET.WCRSTUS1.W"
+        assert first_call.kwargs["params"]["start"] == expected_start
 
 
 class TestBuildLastKnownCache:

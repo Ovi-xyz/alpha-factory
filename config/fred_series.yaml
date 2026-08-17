@@ -1,8 +1,18 @@
 # config/fred_series.yaml — IDD §5: FRED Series Registry
-# 67 series dikelompokkan per domain macro (60 IDD §5 asli + VIXCLS +
-# 6 commodity Track 2 — RISK-15 fix, 8 Aug 2026; komentar count sebelumnya
-# sudah stale di 60 bahkan sebelum perubahan ini, VIXCLS tidak pernah
-# dihitung ulang saat ditambahkan)
+# 68 series dikelompokkan per domain macro.
+# FIX ADR-041 (GMI_Decision_Document_v9.docx, 14 Aug 2026): 5 dead/redundant
+# series pruned after check_fred_series.py's first live run (14 Aug 2026) --
+# GOLDAMGBD228NLBM (deleted FRED 2022-01-31), NAPM/NMFCI (deleted FRED
+# 2016-06-24, no free replacement), PPIFGS (discontinued by BLS ~Feb 2016,
+# redundant w/ PPIFIS), CSCICP03USM665S (frozen since 2024-01, redundant
+# w/ UMCSENT). None were in regime_inputs. 67 -> 62.
+# FIX ADR-042 (GMI_Decision_Document_v9.docx, 14 Aug 2026): 6 Treasury
+# tenors registered (DGS1MO/DGS3MO/DGS6MO/DGS1/DGS7/DGS20) -- previously
+# declared in treasury_ingester.py's TREASURY_FRED_SERIES but silently
+# dropped by FREDIngester.run()'s series_filter (can only retain series
+# already present in this registry). Closes the gap between GD v1.2
+# §3.3.3's stated "full 1M-30Y yield curve" and what Bronze actually
+# ingested (previously only 2Y/5Y/10Y/30Y). 62 -> 68.
 # Dibaca oleh src/bronze/fred_ingester.py
 
 version: "1.0"
@@ -19,33 +29,45 @@ regime_inputs:
   credit_spread:    BAMLH0A0HYM2
 
 series:
-  # ── 1. Monetary Policy & Rates (12) ──────────────────────────────────────
+  # ── 1. Monetary Policy & Rates (18) ──────────────────────────────────────
   - {id: FEDFUNDS,     domain: monetary_policy, frequency: monthly, cadence: weekly,  regime_input: true,  description: Federal Funds Effective Rate}
   - {id: DFF,          domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: false, description: Federal Funds Rate daily}
   - {id: T10Y2Y,       domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: true,  description: 10Y-2Y Yield Spread — recession signal}
   - {id: T10Y3M,       domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: false, description: 10Y-3M Spread — leading recession indicator}
+  # FIX ADR-042: 6 missing Treasury tenors registered — closes the gap
+  # treasury_ingester.py's TREASURY_FRED_SERIES always declared but
+  # FREDIngester's series_filter could never retain (registry-absent).
+  - {id: DGS1MO,       domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: false, description: 1-Month Treasury Constant Maturity Rate}
+  - {id: DGS3MO,       domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: false, description: 3-Month Treasury Constant Maturity Rate}
+  - {id: DGS6MO,       domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: false, description: 6-Month Treasury Constant Maturity Rate}
+  - {id: DGS1,         domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: false, description: 1-Year Treasury Constant Maturity Rate}
   - {id: DGS2,         domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: false, description: 2-Year Treasury Constant Maturity}
   - {id: DGS5,         domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: false, description: 5-Year Treasury Constant Maturity}
+  - {id: DGS7,         domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: false, description: 7-Year Treasury Constant Maturity Rate}
   - {id: DGS10,        domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: false, description: 10-Year Treasury Constant Maturity}
+  - {id: DGS20,        domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: false, description: 20-Year Treasury Constant Maturity Rate}
   - {id: DGS30,        domain: monetary_policy, frequency: daily,   cadence: daily,   regime_input: false, description: 30-Year Treasury Constant Maturity}
   - {id: MORTGAGE30US, domain: monetary_policy, frequency: weekly,  cadence: weekly,  regime_input: false, description: 30-Year Fixed Rate Mortgage Average}
   - {id: IORB,         domain: monetary_policy, frequency: daily,   cadence: weekly,  regime_input: false, description: Interest on Reserve Balances Rate}
   - {id: EFFR,         domain: monetary_policy, frequency: daily,   cadence: weekly,  regime_input: false, description: Effective Federal Funds Rate SOFR era}
   - {id: SOFR,         domain: monetary_policy, frequency: daily,   cadence: weekly,  regime_input: false, description: Secured Overnight Financing Rate}
 
-  # ── 2. Inflation (10) ──────────────────────────────────────────────────────
+  # ── 2. Inflation (9) ──────────────────────────────────────────────────────
   - {id: CPIAUCSL,     domain: inflation, frequency: monthly, cadence: weekly,  regime_input: true,  description: CPI All Urban Consumers — headline inflation}
   - {id: CPILFESL,     domain: inflation, frequency: monthly, cadence: weekly,  regime_input: false, description: CPI Core ex food & energy}
   - {id: PCEPI,        domain: inflation, frequency: monthly, cadence: weekly,  regime_input: false, description: PCE Price Index — Fed preferred gauge}
   - {id: PCEPILFE,     domain: inflation, frequency: monthly, cadence: weekly,  regime_input: false, description: PCE Core ex food & energy}
   - {id: PPIFIS,       domain: inflation, frequency: monthly, cadence: weekly,  regime_input: false, description: PPI Final Demand — upstream inflation}
-  - {id: PPIFGS,       domain: inflation, frequency: monthly, cadence: weekly,  regime_input: false, description: PPI Finished Goods}
+  # REMOVED ADR-041: PPIFGS (discontinued by BLS ~Feb 2016; frozen at
+  # 2015-12-01 in the 14 Aug 2026 live check — redundant w/ PPIFIS above,
+  # which already covers modern Final-Demand PPI and confirmed fresh
+  # 2026-07 the same run).
   - {id: PPIACO,       domain: inflation, frequency: monthly, cadence: weekly,  regime_input: false, description: PPI All Commodities}
   - {id: T5YIE,        domain: inflation, frequency: daily,   cadence: daily,   regime_input: false, description: 5-Year Breakeven Inflation Rate}
   - {id: T10YIE,       domain: inflation, frequency: daily,   cadence: daily,   regime_input: false, description: 10-Year Breakeven Inflation Rate}
   - {id: MICH,         domain: inflation, frequency: monthly, cadence: monthly, regime_input: false, description: U Michigan Inflation Expectation}
 
-  # ── 3. Growth & Output (10) ────────────────────────────────────────────────
+  # ── 3. Growth & Output (8) ────────────────────────────────────────────────
   - {id: A191RL1Q225SBEA, domain: growth, frequency: quarterly, cadence: weekly,   regime_input: true,  description: Real GDP Growth Rate quarterly}
   - {id: GDPC1,           domain: growth, frequency: quarterly, cadence: weekly,   regime_input: false, description: Real GDP Level}
   - {id: INDPRO,          domain: growth, frequency: monthly,   cadence: weekly,   regime_input: false, description: Industrial Production Index}
@@ -54,8 +76,11 @@ series:
   - {id: RSXFS,           domain: growth, frequency: monthly,   cadence: weekly,   regime_input: false, description: Retail Sales ex Food Service}
   - {id: DGORDER,         domain: growth, frequency: monthly,   cadence: weekly,   regime_input: false, description: Durable Goods Orders — capex signal}
   - {id: NEWORDER,        domain: growth, frequency: monthly,   cadence: weekly,   regime_input: false, description: Manufacturers New Orders — demand leading}
-  - {id: NAPM,            domain: growth, frequency: monthly,   cadence: monthly,  regime_input: false, description: ISM Manufacturing PMI}
-  - {id: NMFCI,           domain: growth, frequency: monthly,   cadence: monthly,  regime_input: false, description: ISM Non-Manufacturing NMI}
+  # REMOVED ADR-041: NAPM, NMFCI (both HTTP 400 in the 14 Aug 2026 live
+  # check — deleted from FRED 2016-06-24 at ISM's own request; no free
+  # replacement exists, ISM data is paid-license only. Invisible in
+  # fred_ingester.py's success/failed telemetry until now — pure dead
+  # weight in the registry.)
 
   # ── 4. Labor Market (8) ────────────────────────────────────────────────────
   - {id: UNRATE,         domain: labor, frequency: monthly, cadence: weekly,  regime_input: false, description: Unemployment Rate — lagging indicator}
@@ -67,25 +92,31 @@ series:
   - {id: CES0500000003,  domain: labor, frequency: monthly, cadence: weekly,  regime_input: false, description: Average Hourly Earnings — wage inflation}
   - {id: JTSJOL,         domain: labor, frequency: monthly, cadence: weekly,  regime_input: false, description: Job Openings JOLTS — labor demand}
 
-  # ── 5. Credit & Financial Conditions (10) ──────────────────────────────────
+  # ── 5. Credit & Financial Conditions (9) ──────────────────────────────────
   - {id: BAMLH0A0HYM2,    domain: credit, frequency: daily,   cadence: daily,  regime_input: true,  description: ICE BofA US High Yield Spread — credit stress}
   - {id: BAMLC0A0CM,      domain: credit, frequency: daily,   cadence: daily,  regime_input: false, description: ICE BofA US Corporate Bond Spread — IG}
   - {id: NFCI,            domain: credit, frequency: weekly,  cadence: weekly, regime_input: true,  description: Chicago Fed National Financial Conditions Index}
   - {id: STLFSI4,         domain: credit, frequency: weekly,  cadence: weekly, regime_input: false, description: St. Louis Fed Financial Stress Index}
   - {id: DCOILWTICO,      domain: credit, frequency: daily,   cadence: daily,  regime_input: false, description: WTI Crude Oil Price daily}
-  - {id: GOLDAMGBD228NLBM, domain: credit, frequency: daily,  cadence: daily,  regime_input: false, description: Gold Price London AM Fix — safe haven}
+  # REMOVED ADR-041: GOLDAMGBD228NLBM (HTTP 400 in the 14 Aug 2026 live
+  # check — deleted from FRED 2022-01-31, ICE Benchmark Administration
+  # data removal, no replacement; redundant w/ gold coverage already live
+  # via yfinance AU/GC=F in Layer 1).
   - {id: DEXUSEU,         domain: credit, frequency: daily,   cadence: daily,  regime_input: true,  description: USD/EUR Exchange Rate daily}
   - {id: DEXJPUS,         domain: credit, frequency: daily,   cadence: daily,  regime_input: false, description: USD/JPY Exchange Rate daily}
   - {id: M2SL,            domain: credit, frequency: monthly, cadence: weekly, regime_input: false, description: M2 Money Supply — liquidity proxy}
   - {id: WALCL,           domain: credit, frequency: weekly,  cadence: weekly, regime_input: false, description: Fed Total Assets — balance sheet proxy}
 
-  # ── 6. Housing & Consumer (10) ─────────────────────────────────────────────
+  # ── 6. Housing & Consumer (9) ─────────────────────────────────────────────
   - {id: HOUST,          domain: housing, frequency: monthly, cadence: weekly, regime_input: false, description: Housing Starts — construction activity}
   - {id: PERMIT,         domain: housing, frequency: monthly, cadence: weekly, regime_input: false, description: Building Permits — forward-looking housing}
   - {id: HSN1F,          domain: housing, frequency: monthly, cadence: weekly, regime_input: false, description: New Home Sales}
   - {id: EXHOSLUSM495S,  domain: housing, frequency: monthly, cadence: weekly, regime_input: false, description: Existing Home Sales}
   - {id: UMCSENT,        domain: housing, frequency: monthly, cadence: weekly, regime_input: false, description: U Michigan Consumer Sentiment}
-  - {id: CSCICP03USM665S, domain: housing, frequency: monthly, cadence: weekly, regime_input: false, description: Conference Board Consumer Confidence}
+  # REMOVED ADR-041: CSCICP03USM665S (frozen at 2024-01 in the 14 Aug 2026
+  # live check — Canada sibling series in the same OECD family already
+  # carries FRED's explicit (DISCONTINUED) tag; redundant w/ UMCSENT
+  # above, confirmed fresh the same run).
   - {id: PSAVERT,        domain: housing, frequency: monthly, cadence: weekly, regime_input: false, description: Personal Saving Rate}
   - {id: PCE,            domain: housing, frequency: monthly, cadence: weekly, regime_input: false, description: Personal Consumption Expenditures level}
   - {id: DRSFRMACBS,     domain: housing, frequency: quarterly, cadence: weekly, regime_input: false, description: Mortgage Delinquency Rate}

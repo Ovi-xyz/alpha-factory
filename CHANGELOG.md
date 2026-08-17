@@ -1,5 +1,191 @@
 # CHANGELOG — Data Platform
 
+## v1.15.2 — Data Source Preflight Remediation: EIA APIv2, BEA Table/Line Corrections, FRED Registry Hygiene (Agustus 2026)
+
+Dokumen referensi: GMI_Decision_Document_v9.docx (14 Aug 2026).
+
+Total: **5 ADR diimplementasikan (ADR-038, ADR-039, ADR-040, ADR-041,
+ADR-042)** | **8 file dimodifikasi (2 config, 4 source, 3 preflight
+script — 1 preflight script dihitung dua kali karena menyentuh 2 ADR) +
+3 file test (1 baru, 2 diperbarui)** | **1492 collected / 0 failed / 0
+error** (baseline v1.15.1: 1466).
+
+Implementasi mengikuti hasil live run 14 Aug 2026 dari 8 preflight
+script yang ditulis thread yang sama (`check_fred_series.py`,
+`check_eia_series.py`, `check_bea_datasets.py`, dst. — lihat
+RISK-17/18/19, `2026-08-14-alpha-factory_preflight_logs.txt`). Ketiga
+preflight script yang disentuh release ini (`check_fred_series.py`,
+`check_eia_series.py`, `check_bea_datasets.py`) ada hanya di local
+working directory Ovi (belum pernah di-commit ke GitHub) — dibawa masuk
+ke sandbox clone terisolasi via isi file yang dibaca langsung dari live
+filesystem sebelum divalidasi. Semua perubahan divalidasi di sandbox
+clone terisolasi (`ast.parse()`, full `pytest`, coverage aggregate) sebelum
+di-mirror ke live repo via Filesystem MCP dengan read-back verification.
+
+### ADR-038 [HIGH] — `src/bronze/eia_ingester.py`, `scripts/preflight/check_eia_series.py`, `config/schemas/eia_oil.yaml`
+**EIA APIv1 confirmed fully dead (discontinued Nov 2022) — setiap run `bronze_eia` mingguan sejak deploy menulis nol baris secara diam-diam selama ~3.75 tahun**
+
+- Root cause: `check_eia_series.py` live run pertama (14 Aug 2026) —
+  4/4 series FAIL, HTTP 404, baik batch maupun isolated. EIA's own
+  documentation mengkonfirmasi APIv1 didiskontinuasi penuh November
+  2022. `FIX EIA-1`'s rationale asli ("v1 stabil, v2 category paths
+  bervariasi per dataset") sudah void untuk route spesifik ini.
+- Opsi yang dipertimbangkan: full v2 route/facet redesign (per-series
+  category path research) — DITOLAK, surface area lebih besar dan
+  tidak perlu ketika `/v2/seriesid/{id}` backward-compat route sudah
+  menyelesaikan breakage dengan risiko jauh lebih kecil.
+- Fix: migrasi ke APIv2 `/v2/seriesid/{id}` — menerima legacy v1-style
+  series ID (`PET.WCRSTUS1.W` dst.) langsung tanpa remap penuh ke
+  category/facet tree v2. Response parsing diupdate dari v1's
+  `data.series[0].data = [[period, value], ...]` ke v2's
+  `response.data = [{"period": ..., "value": ..., ...}, ...]`.
+  `config/schemas/eia_oil.yaml`'s `expected_columns` di-reverifikasi
+  (checklist item 5) — tidak ada perubahan field diperlukan, karena
+  `_fetch_series()` menormalisasi kedua shape ke internal record yang
+  identik sebelum schema validator dikonsultasi.
+- Diverifikasi empiris: smoke test manual dengan mock v2-shaped response
+  mengkonfirmasi URL (`https://api.eia.gov/v2/seriesid/{series_id}`),
+  params, dan parsing logic benar. **Belum** dikonfirmasi terhadap live
+  response sesungguhnya — sandbox ini tidak punya network route ke
+  `api.eia.gov` — pending live confirmation (checklist item 4).
+- Test baru/diperbarui: `tests/unit/test_eia_ingester.py` ditulis ulang
+  penuh untuk v2 response shape (16 test, semua lulus). Dua test
+  di-rename untuk mencerminkan kontrak baru
+  (`test_no_key_still_attempts_v2_request`,
+  `test_no_response_envelope_no_write`) — perilaku lama yang diuji
+  sudah dihapus, sesuai konvensi test-update-saat-kontrak-berubah
+  (CI/CD Ops Guide anti-pattern table).
+
+### ADR-039 [P2] — `src/bronze/bea_ingester.py`, `scripts/preflight/check_bea_datasets.py`
+**BEA `pce_deflator` LineDescription match gagal 0/310 baris live — diganti LineNumber-based matching**
+
+- Root cause: `check_bea_datasets.py` live run pertama (14 Aug 2026) —
+  `pce_deflator` (T20304) mengembalikan 310 baris, nol yang cocok
+  dengan `LINE_FILTER["pce_deflator"]`'s exact-match string. Pemilihan
+  tabel T20304 sendiri dikonfirmasi benar via BEA's own NIPA table
+  register — hanya string match yang salah.
+- Fix: `LINE_NUMBER_FILTER["pce_deflator"] = "1"` — BEA NIPA table
+  convention menempatkan baris headline/aggregate di `LineNumber` tetap,
+  struktural terhadap format tabel, bukan label yang BEA ubah
+  sembarangan. `LINE_FILTER`'s string dipertahankan sebagai
+  human-readable label saja untuk `pce_deflator`. `real_gdp` TIDAK
+  diubah — masih cocok live via `LineDescription`.
+- Diverifikasi empiris: smoke test dengan row yang punya
+  `LineDescription` BERBEDA dari string lama tapi `LineNumber="1"` yang
+  benar — matching berhasil, membuktikan fix robust terhadap wording
+  drift yang sama persis yang mematahkan match lama.
+- Test baru/diperbarui: `tests/unit/test_bea_ingester_gld001.py`'s
+  `test_pce_deflator_filters_correct_row` ditulis ulang dengan wording
+  sengaja berbeda pada baris target. Test baru
+  `test_line_number_filter_adr039_040`.
+
+### ADR-040 [P2, pending live confirmation] — `src/bronze/bea_ingester.py`, `scripts/preflight/check_bea_datasets.py`
+**BEA `trade_balance` membaca tabel yang salah sama sekali — T40100 (current account) bukan GDP net exports**
+
+- Root cause: T40100 dikonfirmasi, via baris yang dikembalikannya
+  sendiri ("Balance on current account, NIPAs", "Current payments to
+  the rest of the world", ...), sebagai tabel International
+  Transactions/current-account (balance-of-payments) BEA — konsep
+  berbeda dan lebih luas dari komponen GDP "net exports of goods and
+  services" (current account juga menetkan primary/secondary income
+  flows yang GDP accounting kecualikan). Ini terbaca sebagai tabel
+  salah sejak desain awal, bukan wording drift.
+- Opsi yang dipertimbangkan: pertahankan T40100 dan cari baris
+  current-account yang mendekati "net exports" — DITOLAK, current
+  account dan net exports of goods/services bukan angka yang sama;
+  akan menghasilkan series yang plausible-looking tapi secara konsep
+  salah, lebih buruk dari series kosong yang ada sekarang.
+- Fix: `table_name` diganti `T40100` → `T10105` (Table 1.1.5, Gross
+  Domestic Product — tabel standar komponen GDP), matching via
+  `LineNumber == "15"`. LineNumber diinferensikan dari struktur baris
+  standar Table 1.1.x (dikonfirmasi via listing Table 1.1.3 riil yang
+  berbagi layout baris identik — Line 15 = "Net exports of goods and
+  services").
+- **Belum diselesaikan**: LineNumber persis untuk T10105 belum
+  dikonfirmasi empiris terhadap live response pipeline ini sendiri —
+  hanya diinferensikan dari referensi eksternal + tabel sibling dengan
+  layout sama. Perlakukan sebagai decided-in-direction, bukan
+  decided-in-detail, sampai live run (checklist item 10) terjadi.
+- Test baru/diperbarui: `test_trade_balance_filters_correct_row`
+  ditulis ulang dengan wording sengaja berbeda. Test baru
+  `test_trade_balance_table_switched_to_t10105`.
+
+### ADR-041 [P2] — `config/fred_series.yaml`, `src/bronze/fred_ingester.py`, `src/bronze/bls_ingester.py`, `scripts/preflight/check_fred_series.py`
+**5 FRED series mati/redundan di-prune — plus grep-sweep cleanup 2 referensi mati yang ditemukan**
+
+- Root cause: `check_fred_series.py` live run pertama (14 Aug 2026) —
+  check live pertama terhadap 61 series non-commodity di
+  `config/fred_series.yaml` (RISK-15's `check_fred_commodity_series.py`
+  hanya pernah cover 6 series `domain: commodity`). 3 hard failure
+  (HTTP 400): `GOLDAMGBD228NLBM` (dihapus FRED 2022-01-31), `NAPM` &
+  `NMFCI` (dihapus FRED 2016-06-24, tanpa pengganti gratis). 2 series
+  frozen: `PPIFGS` (didiskontinuasi BLS ~Feb 2016, redundan dengan
+  `PPIFIS`), `CSCICP03USM665S` (frozen sejak 2024-01, redundan dengan
+  `UMCSENT`).
+- Fix: 5 series dihapus dari `config/fred_series.yaml` (67 → 62). Tidak
+  ada yang berada di `regime_inputs` — deteksi macro regime tidak
+  terdampak. Grep-sweep (checklist item 11) menemukan dan membersihkan
+  2 referensi mati sesungguhnya: `fred_ingester.py`'s `RELEASE_LAG_DAYS`
+  (5 key inert dihapus) dan `bls_ingester.py`'s
+  `fred_mirror_map["PPI"]` (`PPIFGS` dihapus, `PPIFIS` dipertahankan).
+- Test baru/diperbarui: `tests/unit/test_fred_series_registry_adr041_042.py`
+  (file baru, 24 test) — mencakup keduanya ADR-041 dan ADR-042 (lihat
+  bawah), termasuk `TestGrepSweepCleanup`.
+
+### ADR-042 [P2] — `config/fred_series.yaml`
+**6 tenor Treasury yang selalu dideklarasikan tapi tak pernah teregistrasi — silently dropped oleh series_filter's registry-gate mechanism**
+
+- Root cause: `treasury_ingester.py`'s `TREASURY_FRED_SERIES` selalu
+  mendeklarasikan 13 tenor (1M s/d 30Y), tapi
+  `FREDIngester.run()`'s `series_filter` hanya bisa mempertahankan
+  series yang sudah ada di registry yang di-load — `DGS1MO`, `DGS3MO`,
+  `DGS6MO`, `DGS1`, `DGS7`, `DGS20` tidak pernah teregistrasi, sehingga
+  silently dropped setiap run meski disebut namanya di filter. Bronze
+  hanya pernah meng-ingest 4 dari 13 tenor yang dideklarasikan
+  (2Y/5Y/10Y/30Y) — closes gap antara GD v1.2 §3.3.3's "full 1M–30Y
+  yield curve" dan realita ingestion.
+- Fix: 6 tenor didaftarkan di bawah domain `monetary_policy`, mengikuti
+  pola entry `DGS2`/`DGS5`/`DGS10`/`DGS30` yang sudah ada (62 → 68
+  total). **Sesuai keputusan ADR-042 sendiri: TIDAK ada perubahan kode
+  di `treasury_ingester.py` maupun `fred_ingester.py`** — 6 tenor baru
+  ini sengaja TIDAK mendapat entry `RELEASE_LAG_DAYS` (fallback ke
+  default 7 hari, bukan 1 hari seperti sibling-nya) — keputusan scope
+  eksplisit, bukan oversight.
+- Diverifikasi empiris: `TestSilentDropMechanismFixed` mereproduksi
+  mekanisme bug persis yang dideskripsikan ADR menggunakan file
+  registry PRODUKSI SESUNGGUHNYA (bukan mock) —
+  `series_filter=["DGS20"]` terhadap `FREDIngester()` sekarang benar-
+  benar mencapai `fredapi.Fred.get_series()` dan menulis file Bronze,
+  di mana sebelum fix ini akan silently mempertahankan 0 series dan
+  menulis apa-apa, tanpa error.
+
+### Catatan cakupan — item yang DITEMUKAN tapi SENGAJA TIDAK diubah
+- ADR-040's exact `LineNumber` untuk T10105 — diinferensikan, belum
+  dikonfirmasi live untuk parameter request pipeline ini sendiri.
+  Genuinely open, di-flag bukan di-default (checklist item 10,
+  `GMI_Decision_Document_v9.docx` §4).
+- ADR-038's v2 response shape — dikonfirmasi via dokumentasi resmi EIA
+  + contoh response yang dipublikasikan, TIDAK dikonfirmasi terhadap
+  live response 4 series spesifik ini (checklist item 4).
+- Grep sweep item 11 (ADR-041) diselesaikan penuh thread ini — 2
+  referensi mati ditemukan dan dibersihkan (`RELEASE_LAG_DAYS`,
+  `bls_ingester.py`'s FRED-mirror map).
+- `bea_ingester.py`'s `run()` dan `_run_via_fred_mirror()` method-level
+  coverage tetap di bawah 80% terisolasi (56-59%) — pre-existing gap
+  tidak disentuh ADR-039/040 manapun (kedua ADR hanya mengubah
+  `_fetch_nipa()`'s matching logic, yang coverage-nya utuh via test
+  yang ada). Aggregate repo-wide coverage tetap 81%+, di atas gate G-6.
+
+### Version bump rationale
+PATCH (1.15.1 → 1.15.2), bukan MINOR: seluruh perubahan adalah bug fix
+terhadap ingester yang sudah ada (EIA/BEA silently broken) dan config
+pruning/addition (FRED registry hygiene) — bukan job/market/indicator
+baru yang diekspos ke downstream consumer manapun (preseden v1.13.4/
+v1.13.5, bukan v1.14.0/v1.15.0's MINOR precedent untuk kapabilitas
+baru).
+
+---
+
 ## v1.15.1 — Taxonomy Hygiene & Proxy Correlation Discipline (Agustus 2026)
 
 Dokumen referensi: GMI_Decision_Document_v8.docx (10 Aug 2026).

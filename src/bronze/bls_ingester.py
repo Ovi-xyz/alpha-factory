@@ -240,7 +240,7 @@ class BLSIngester(BronzeIngester):
             "CPI":          ["CPIAUCSL", "CPILFESL"],
             "NFP":          ["PAYEMS", "ICSA"],
             "UNEMPLOYMENT": ["UNRATE", "U6RATE", "CIVPART"],
-            "PPI":          ["PPIFIS", "PPIFGS"],
+            "PPI":          ["PPIFIS"],
         }
 
         if os.getenv("FRED_API_KEY"):

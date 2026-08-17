@@ -20,6 +20,21 @@
 #   release_date — EIA-3: deliberately NOT a RELEASE_LAG_DAYS proxy like
 #                 FRED/BLS/BEA — PET.* series release same-day (Wednesday
 #                 10:30am ET), so run_date IS the correct release_date here.
+#
+# FIX ADR-038 (GMI_Decision_Document_v9.docx, 14 Aug 2026): expected_columns
+# reverified against EIA APIv2's /v2/seriesid/ response shape (checklist
+# item 5) after eia_ingester.py migrated off the dead v1 endpoint. NO field
+# changes required — v2's raw envelope differs from v1's
+# ({"response": {"data": [{"period": ..., "value": ..., ...}]}} vs v1's
+# {"series": [{"data": [[period, value], ...]}]}), but _fetch_series()
+# normalizes both shapes into the identical internal record dict
+# (observation_date/value/series_id/release_date) before this schema is
+# ever consulted — this schema describes Bronze's OUTPUT, not the raw API
+# response, and that output contract was deliberately kept stable across
+# the v1->v2 migration. Not yet empirically confirmed against a live v2
+# response for these 4 specific series (no network route to api.eia.gov
+# from this sandbox) — same "pending live confirmation" discipline as
+# ADR-040's T10105 LineNumber.
 
 version: "2026-06"
 source: eia

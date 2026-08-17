@@ -9,7 +9,10 @@ Cadence: Quarterly (G5: run_on_months=[1,4,7,10], last week)
 Datasets ingested:
     NIPA Table 1.1.6: Real GDP (quarterly)
     NIPA Table 2.3.4: PCE Price Index
-    NIPA Table 4.1:   Trade Balance
+    NIPA Table 1.1.5: Trade Balance — Net exports of goods and services
+                      (FIX ADR-040: was Table 4.1 / T40100, International
+                      Transactions current-account — wrong concept, see
+                      BEA_SERIES below)
     ITA:              International Transactions
 
 Alternative: GDP and PCE available via FRED mirror (A191RL1Q225SBEA, PCEPI).
@@ -53,11 +56,40 @@ BEA_API_URL = "https://apps.bea.gov/api/data"
 # Nilai string harus EXACT match terhadap LineDescription dari BEA API response:
 #   T10106 Line 1: "Gross domestic product"              (total GDP level, billions)
 #   T20304 Line 1: "Personal consumption expenditures"  (PCE total, sebagai proxy deflator)
-#   T40100 Line 1: "Net exports of goods and services"  (trade balance)
+#   T10105 Line 15: "Net exports of goods and services"  (trade balance — FIX ADR-040)
+#
+# FIX ADR-039 (GMI_Decision_Document_v9.docx, 14 Aug 2026): check_bea_datasets.py's
+# first live run (14 Aug 2026) found pce_deflator's LineDescription match
+# 0/310 rows -- T20304's actual wording doesn't match this string (table
+# choice itself confirmed correct via BEA's own NIPA table register).
+# pce_deflator and trade_balance below are now retained ONLY as
+# human-readable labels for logging -- LINE_NUMBER_FILTER (below) is the
+# active match mechanism for those two. real_gdp is UNCHANGED (still
+# matches live, LineDescription remains its active match key).
 LINE_FILTER: dict[str, str] = {
     "real_gdp":      "Gross domestic product",
     "pce_deflator":  "Personal consumption expenditures",
     "trade_balance": "Net exports of goods and services",
+}
+
+# FIX ADR-039/ADR-040 (GMI_Decision_Document_v9.docx, 14 Aug 2026):
+# LineNumber-based matching, robust to the exact wording drift that broke
+# pce_deflator's LineDescription match. BEA's NIPA table convention places
+# a table's headline/aggregate row at a fixed LineNumber -- structural to
+# the table format, not a label BEA reworks casually.
+#   pce_deflator (T20304) Line 1  = "Personal consumption expenditures"
+#     (BEA's own NIPA table register confirms T20304 is the correct table;
+#     only the string match was wrong.)
+#   trade_balance (T10105) Line 15 = "Net exports of goods and services"
+#     (inferred from Table 1.1.x's standard line structure, shared across
+#     all Table 1.1.* variants -- e.g. Table 1.1.3 confirms Line 15 =
+#     "Net exports of goods and services" at this exact position. NOT yet
+#     empirically confirmed against a live T10105 response for THIS
+#     pipeline's own request parameters -- pending live confirmation,
+#     checklist item 10, GMI_Decision_Document_v9.docx §3.)
+LINE_NUMBER_FILTER: dict[str, str] = {
+    "pce_deflator":  "1",
+    "trade_balance": "15",   # PENDING LIVE CONFIRMATION — see ADR-040
 }
 # FIX GAP-3 [P1] (Production Readiness Assessment v1.7.2, GD §3.7): BEA was
 # one of 6 sources with no Bronze Schema Registry YAML. Gates only the
@@ -96,10 +128,20 @@ BEA_SERIES: list[dict] = [
     },
     {
         "dataset":     "NIPA",
-        "table_name":  "T40100",    # Table 4.1 Foreign Transactions
+        # FIX ADR-040 (GMI_Decision_Document_v9.docx, 14 Aug 2026): T40100
+        # is BEA's International Transactions / current-account (balance-
+        # of-payments) table -- confirmed via its own returned rows
+        # ("Balance on current account, NIPAs", "Current payments to the
+        # rest of the world", ...) -- a different, broader concept than a
+        # GDP-component "net exports of goods and services" line (current
+        # account also nets in primary/secondary income flows GDP
+        # accounting excludes). Switched to T10105 (Table 1.1.5, Gross
+        # Domestic Product), the standard GDP-components table. See
+        # LINE_NUMBER_FILTER above for the matching LineNumber.
+        "table_name":  "T10105",    # Table 1.1.5 Gross Domestic Product
         "name":        "trade_balance",
         "frequency":   "Q",
-        "description": "Trade Balance current account",
+        "description": "Trade Balance — Net exports of goods and services (GDP component)",
     },
 ]
 
@@ -188,16 +230,29 @@ class BEAIngester(BronzeIngester):
                 try:
                     val_str = str(item.get("DataValue", "0")).replace(",", "")
 
-                    # FIX GLD-001: filter hanya baris yang sesuai LineDescription target.
-                    # BEA NIPA table T10106 mengembalikan 27+ baris per quarter;
-                    # hanya LineNumber 1 ("Gross domestic product") yang mewakili
-                    # GDP total dalam unit yang konsisten (billions chained 2017$).
-                    # Mencampur baris lain (komponen, %-change) meracuni Silver series.
-                    target_desc = LINE_FILTER.get(spec["name"], "")
-                    if target_desc:
-                        line_desc = item.get("LineDescription", "").strip()
-                        if line_desc != target_desc:
-                            continue   # FIX GLD-001: skip komponen non-target
+                    # FIX GLD-001 (baseline) / FIX ADR-039 / FIX ADR-040:
+                    # filter hanya baris yang sesuai target row. BEA NIPA
+                    # tables mengembalikan 27+ baris per quarter; tanpa
+                    # filter ini, komponen lain (level vs %-change vs
+                    # kontribusi) akan meracuni Silver series.
+                    #
+                    # LineNumber-first: robust to wording drift (the exact
+                    # failure mode that broke pce_deflator's old
+                    # LineDescription match — 0/310 rows matched live).
+                    # Falls back to LineDescription only for series with no
+                    # LINE_NUMBER_FILTER entry (real_gdp — already passing
+                    # live, left unchanged).
+                    target_line_number = LINE_NUMBER_FILTER.get(spec["name"])
+                    if target_line_number:
+                        line_number = str(item.get("LineNumber", "")).strip()
+                        if line_number != target_line_number:
+                            continue   # skip komponen non-target
+                    else:
+                        target_desc = LINE_FILTER.get(spec["name"], "")
+                        if target_desc:
+                            line_desc = item.get("LineDescription", "").strip()
+                            if line_desc != target_desc:
+                                continue   # skip komponen non-target
 
                     # FIX BEA-1 (CRITICAL): BEA returns TimePeriod as "2025Q4", "2025A",
                     # "2025" etc. — NOT valid ISO dates. Silver MacroProcessor filter

@@ -11,16 +11,19 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
 
-from src.bronze.bea_ingester import BEAIngester, BEA_SERIES, LINE_FILTER
+from src.bronze.bea_ingester import BEAIngester, BEA_SERIES, LINE_FILTER, LINE_NUMBER_FILTER
 
 
-def _make_row(line_desc: str, time_period: str, value: float) -> dict:
-    return {
+def _make_row(line_desc: str, time_period: str, value: float, line_number: str | None = None) -> dict:
+    row = {
         "LineDescription": line_desc,
         "TimePeriod":      time_period,
         "DataValue":       str(value),
         "CL_UNIT":         "Billions of chained 2017 dollars",
     }
+    if line_number is not None:
+        row["LineNumber"] = line_number
+    return row
 
 
 def _mock_resp(rows: list[dict]) -> MagicMock:
@@ -66,6 +69,21 @@ class TestLineFilterConstants:
                 f"GLD-001: BEA series '{s['name']}' not in LINE_FILTER — unit-mixing risk"
             )
 
+    def test_line_number_filter_adr039_040(self):
+        """FIX ADR-039/040: pce_deflator and trade_balance are LineNumber-
+        matched; real_gdp is deliberately absent (still LineDescription-matched,
+        unchanged, already passing live)."""
+        assert LINE_NUMBER_FILTER.get("pce_deflator") == "1"
+        assert LINE_NUMBER_FILTER.get("trade_balance") == "15"
+        assert "real_gdp" not in LINE_NUMBER_FILTER
+
+    def test_trade_balance_table_switched_to_t10105(self):
+        """FIX ADR-040: T40100 (International Transactions/current-account
+        — wrong concept) replaced by T10105 (Table 1.1.5, Gross Domestic
+        Product — the standard GDP-components table)."""
+        spec = next(s for s in BEA_SERIES if s["name"] == "trade_balance")
+        assert spec["table_name"] == "T10105"
+
 
 class TestBEANIPALineDescriptionFilter:
     """GLD-001: _fetch_nipa() must filter rows by LineDescription."""
@@ -92,32 +110,44 @@ class TestBEANIPALineDescriptionFilter:
         assert df["value"][0] == pytest.approx(22900.0)
 
     def test_pce_deflator_filters_correct_row(self):
+        """FIX ADR-039: matches by LineNumber=1, NOT LineDescription — proven
+        by using a DIFFERENT description on the target row than the old
+        LINE_FILTER string. This is the exact failure mode that broke live
+        (check_bea_datasets.py, 14 Aug 2026: 0/310 rows matched)."""
         spec = {"name": "pce_deflator", "table_name": "T20304",
                 "dataset": "NIPA", "frequency": "Q"}
-        target = LINE_FILTER["pce_deflator"]
+        assert LINE_NUMBER_FILTER["pce_deflator"] == "1"
         rows = [
-            _make_row(target,            "2025Q1", 118.5),
-            _make_row("Durable goods",   "2025Q1",  95.3),
-            _make_row("Nondurable goods","2025Q1", 110.2),
+            # Deliberately different wording than LINE_FILTER["pce_deflator"]
+            # — LineNumber alone must still select this row.
+            _make_row("Personal consumption expenditures (PCE)", "2025Q1", 118.5, line_number="1"),
+            _make_row("Durable goods",    "2025Q1",  95.3, line_number="2"),
+            _make_row("Nondurable goods", "2025Q1", 110.2, line_number="3"),
         ]
         df = _fetch(spec, rows)
         assert df is not None
         assert len(df) == 1
         assert df["value"][0] == pytest.approx(118.5)
+        assert df["line_description"][0] == "Personal consumption expenditures (PCE)"
 
     def test_trade_balance_filters_correct_row(self):
-        spec = {"name": "trade_balance", "table_name": "T40100",
+        """FIX ADR-040: table switched T40100 -> T10105, matches by
+        LineNumber=15, NOT LineDescription — same wording-drift robustness
+        as pce_deflator above."""
+        spec = {"name": "trade_balance", "table_name": "T10105",
                 "dataset": "NIPA", "frequency": "Q"}
-        target = LINE_FILTER["trade_balance"]
+        assert LINE_NUMBER_FILTER["trade_balance"] == "15"
         rows = [
-            _make_row("Exports of goods and services", "2025Q1",  3500.0),
-            _make_row("Imports of goods and services", "2025Q1", -4700.0),
-            _make_row(target,                           "2025Q1", -1200.0),
+            _make_row("Exports of goods and services", "2025Q1",  3500.0, line_number="16"),
+            _make_row("Imports of goods and services", "2025Q1", -4700.0, line_number="19"),
+            # Deliberately different wording than LINE_FILTER["trade_balance"].
+            _make_row("Net exports of goods & services (net)", "2025Q1", -1200.0, line_number="15"),
         ]
         df = _fetch(spec, rows)
         assert df is not None
         assert len(df) == 1
         assert df["value"][0] == pytest.approx(-1200.0)
+        assert df["table_name"][0] == "T10105"
 
     def test_no_matching_row_returns_none_or_empty(self):
         """If no row matches the LineDescription, return None or empty."""
