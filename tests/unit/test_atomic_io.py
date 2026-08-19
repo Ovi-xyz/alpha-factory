@@ -143,3 +143,22 @@ class TestAtomicWriteParquetSafe:
             # Tidak boleh raise
             result = atomic_write_parquet_safe(sample_df, out, job_name="test_job")
         assert result is False
+
+
+class TestCleanupFailureDuringExceptionHandling:
+    """Coverage tranche (17 Aug 2026) — except OSError: pass around
+    tmp_path.unlink() inside the outer exception handler: a double
+    failure (write fails, THEN cleanup also fails) must still re-raise
+    the original exception rather than crash on the cleanup itself."""
+
+    def test_unlink_failure_during_cleanup_still_reraises_original(
+        self, tmp_path: Path, sample_df: pl.DataFrame
+    ):
+        target = tmp_path / "out.parquet"
+        with patch.object(
+            pl.DataFrame, "write_parquet", side_effect=ValueError("write failed")
+        ), patch.object(
+            Path, "unlink", side_effect=OSError("cleanup also failed")
+        ):
+            with pytest.raises(ValueError, match="write failed"):
+                atomic_write_parquet(sample_df, target)

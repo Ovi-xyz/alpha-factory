@@ -257,3 +257,127 @@ class TestModuleRunFunction:
         with patch.object(mod.BISCBRatesIngester, "run") as mock_run:
             mod.run(run_date=date(2026, 6, 30))
         mock_run.assert_called_once_with(run_date=date(2026, 6, 30))
+
+
+class TestRunParseCsvNone:
+    """Coverage tranche (17 Aug 2026) — run()'s abort branch (lines 145-146)
+    when _parse_csv() itself returns None despite a successful HTTP fetch
+    (garbage/unparseable content) — distinct from test_run_aborts_
+    gracefully_on_fetch_failure, which covers _fetch_csv() failing instead."""
+
+    def test_run_aborts_when_parse_returns_none(self):
+        ingester = BISCBRatesIngester.__new__(BISCBRatesIngester)
+        ingester._validator = MagicMock()
+        ingester.write = MagicMock()
+
+        with patch("requests.get", return_value=_mock_resp("not a valid bis csv at all")):
+            ingester.run(run_date=date(2026, 6, 30))   # must not raise
+
+        ingester.write.assert_not_called()
+        ingester._validator.validate.assert_not_called()
+
+
+class TestParseCsvColumnDetection:
+    """Coverage tranche (17 Aug 2026) — REF_AREA alternative-column-name
+    detection (lines 242-251) and the missing time_period/obs_value guard
+    (lines 253-257)."""
+
+    def setup_method(self):
+        self.ingester = BISCBRatesIngester.__new__(BISCBRatesIngester)
+
+    def test_alternative_ref_area_column_name_detected(self):
+        """'country' is accepted as an alias for 'ref_area'."""
+        csv_alt_col = (
+            "FREQ,COUNTRY,CB_POLICY_RATE,TIME_PERIOD,OBS_VALUE\n"
+            "D,XM,Policy Rate,2026-01-15,3.50\n"
+        )
+        df = self.ingester._parse_csv(csv_alt_col)
+        assert df is not None
+        assert df["ref_area"][0] == "XM"
+
+    def test_no_ref_area_column_at_all_returns_none(self):
+        csv_no_ref_area = (
+            "FREQ,SOMETHING_ELSE,CB_POLICY_RATE,TIME_PERIOD,OBS_VALUE\n"
+            "D,XM,Policy Rate,2026-01-15,3.50\n"
+        )
+        df = self.ingester._parse_csv(csv_no_ref_area)
+        assert df is None
+
+    def test_missing_obs_value_column_returns_none(self):
+        csv_no_obs_value = (
+            "FREQ,REF_AREA,CB_POLICY_RATE,TIME_PERIOD\n"
+            "D,XM,Policy Rate,2026-01-15\n"
+        )
+        df = self.ingester._parse_csv(csv_no_obs_value)
+        assert df is None
+
+    def test_missing_time_period_column_returns_none(self):
+        csv_no_time_period = (
+            "FREQ,REF_AREA,CB_POLICY_RATE,OBS_VALUE\n"
+            "D,XM,Policy Rate,3.50\n"
+        )
+        df = self.ingester._parse_csv(csv_no_time_period)
+        assert df is None
+
+
+class TestParseCsvCbLookupMiss:
+    """Coverage tranche (17 Aug 2026) — the `if cb is None: continue` branch
+    (line 276). Under normal data flow this is unreachable: the upstream
+    filter and this lookup both key off the SAME _REF_AREA_MAP, so any row
+    that survives the filter always resolves to a non-None cb. We construct
+    the divergent state directly by patching in a dict whose .keys() lists
+    the real codes (so the filter still passes them through) but whose
+    .get() always misses (so the lookup fails) — matching this branch's own
+    defensive intent (a REF_AREA present in the known set at filter-time
+    that somehow doesn't resolve at lookup-time)."""
+
+    class _FilterPassesLookupMissesMap(dict):
+        def get(self, key, default=None):
+            return None   # always miss, regardless of key
+
+    def test_cb_lookup_miss_row_skipped(self, monkeypatch):
+        from src.bronze import bis_rates_ingester as mod
+        fake_map = self._FilterPassesLookupMissesMap(_REF_AREA_MAP)
+        monkeypatch.setattr(mod, "_REF_AREA_MAP", fake_map)
+        ingester = BISCBRatesIngester.__new__(BISCBRatesIngester)
+        csv_text = (
+            "FREQ,REF_AREA,CB_POLICY_RATE,TIME_PERIOD,OBS_VALUE\n"
+            "D,XM,Policy Rate,2026-01-15,3.50\n"
+        )
+        df = ingester._parse_csv(csv_text)
+        # Row passes the is_in() filter (XM is a real key) but cb resolves
+        # to None at lookup time under the patched map -> skipped -> empty
+        # rows list -> the "zero valid rows" branch (lines 300-302) fires.
+        assert df is None
+
+
+class TestParseCsvRateValueError:
+    """Coverage tranche (17 Aug 2026) — except ValueError: rate_pct = None
+    (lines 288-289), distinct from test_missing_value_becomes_null which
+    covers the empty-string case handled by the guard clause, not this
+    except block."""
+
+    def test_unparseable_rate_value_becomes_null(self):
+        ingester = BISCBRatesIngester.__new__(BISCBRatesIngester)
+        csv_bad_value = (
+            "FREQ,REF_AREA,CB_POLICY_RATE,TIME_PERIOD,OBS_VALUE\n"
+            "D,XM,Policy Rate,2026-01-15,N/A\n"
+        )
+        df = ingester._parse_csv(csv_bad_value)
+        assert df is not None
+        assert df["rate_pct"][0] is None
+
+
+class TestParseCsvOuterException:
+    """Coverage tranche (17 Aug 2026) — the outer except Exception (lines
+    316-318) wrapping the whole parse body."""
+
+    def test_read_csv_exception_returns_none(self):
+        ingester = BISCBRatesIngester.__new__(BISCBRatesIngester)
+        with patch("polars.read_csv", side_effect=RuntimeError("corrupt stream")):
+            csv_text = (
+                "FREQ,REF_AREA,CB_POLICY_RATE,TIME_PERIOD,OBS_VALUE\n"
+                "D,XM,Policy Rate,2026-01-15,3.50\n"
+            )
+            df = ingester._parse_csv(csv_text)
+        assert df is None

@@ -484,3 +484,57 @@ class TestJobRegistryIntegration:
         assert bi < si, (
             f"bronze_finnhub_sentiment (idx={bi}) must precede silver_sentiment (idx={si})."
         )
+
+
+# ── Additional run() error/edge paths — coverage tranche (17 Aug 2026)
+
+class TestRunErrorPaths:
+
+    def test_corrupt_bronze_parquet_returns_without_raising(self, run_date, tmp_path):
+        """Covers the except Exception: ... return branch around scan_parquet."""
+        bad_bronze = tmp_path / "corrupt_bronze"
+        partition = bad_bronze / "source=finnhub" / f"symbol=sentiment_{run_date.isoformat()}"
+        partition.mkdir(parents=True)
+        (partition / "corrupt.parquet").write_bytes(b"not a real parquet file")
+        sentiment_module.BRONZE_SENTIMENT_PATH = bad_bronze
+        SentimentProcessor().run(run_date)   # must not raise
+        silver_dir = sentiment_module.SILVER_SENTIMENT_PATH / f"date={run_date.isoformat()}"
+        assert not silver_dir.exists()
+
+    def test_post_transform_all_null_returns_without_write(self, run_date, tmp_path):
+        """Covers the post-_transform() df_silver.is_empty() branch — distinct
+        from the pre-transform raw-scan is_empty() branch already covered by
+        test_no_bronze_data_for_date_returns_early."""
+        all_null_bronze = tmp_path / "all_null_bronze"
+        partition = all_null_bronze / "source=finnhub" / f"symbol=sentiment_{run_date.isoformat()}"
+        partition.mkdir(parents=True)
+        pl.DataFrame({
+            "symbol":          ["AAPL"],
+            "sentiment_score": [None],
+            "buzz_score":      [1.2],
+            "news_volume_7d":  [15],
+            "source":          ["finnhub"],
+            "fetched_date":    [str(run_date)],
+        }, schema={"symbol": pl.String, "sentiment_score": pl.Float64,
+                   "buzz_score": pl.Float64, "news_volume_7d": pl.Int64,
+                   "source": pl.String, "fetched_date": pl.String}
+        ).write_parquet(partition / "all_null.parquet")
+        sentiment_module.BRONZE_SENTIMENT_PATH = all_null_bronze
+        SentimentProcessor().run(run_date)   # must not raise
+        silver_dir = sentiment_module.SILVER_SENTIMENT_PATH / f"date={run_date.isoformat()}"
+        assert not silver_dir.exists()
+
+
+class TestModuleLevelRun:
+    """The bare run() wrapper (job_registry.py's actual entry point) had no
+    direct test anywhere — every existing test calls SentimentProcessor().run()."""
+
+    def test_run_wrapper_delegates_to_class(self, run_date):
+        from src.silver.sentiment_processor import run as module_run
+        module_run(run_date)
+        silver_file = (
+            sentiment_module.SILVER_SENTIMENT_PATH
+            / f"date={run_date.isoformat()}"
+            / "sentiment_silver.parquet"
+        )
+        assert silver_file.exists()

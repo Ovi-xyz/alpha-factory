@@ -76,6 +76,13 @@ class TestDependencyGuard:
         assert statuses["job_a"] is True
         assert statuses["job_b"] is False
 
+    def test_reset_job_missing_sentinel_logs_warning_no_raise(self, guard):
+        """Coverage tranche (17 Aug 2026) — else branch when reset_job() is
+        called for a job that was never marked done."""
+        run_date = date(2025, 1, 15)
+        guard.reset_job("never_ran_job", run_date)   # must not raise
+        assert not guard.is_done("never_ran_job", run_date)
+
     def test_sentinel_content_has_job_name(self, guard):
         """Sentinel file should contain job name for debugging."""
         run_date = date(2025, 1, 15)

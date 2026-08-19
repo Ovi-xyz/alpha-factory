@@ -1,5 +1,110 @@
 # CHANGELOG — Data Platform
 
+## v1.15.3 — Coverage Tranche Phase 1–2: 25 Modul ke 100%, Zero Bug Produksi Ditemukan (Agustus 2026)
+
+Diarahkan langsung oleh Ovi ("continue with the coverage tranche toward
+95%"), bukan berdasarkan GMI Decision Document tertulis — kelanjutan
+langsung dari precedent v1.12.1 Decision C coverage tranche (Juli 2026),
+metodologi dan exclusion policy identik: `correlation_matrix.py` dan
+`hmm_regime.py` tetap dikecualikan dari tranche ini per instruksi
+eksplisit, tetap di denominator coverage. Target akhir 95% line coverage
+aggregate; rilis ini menutup dua fase pertama dari lima fase yang
+direncanakan.
+
+Total: **120 test baru** (2 file baru: `test_base_ingester.py`,
+`test_bea_ingester.py`; 15 file existing diperluas) | **1613 passed / 0
+failed / 0 error** (Δ +120 dari v1.15.2 — 1493) | **coverage 81.46% →
+88.36%** (830 → 521 baris belum ter-cover, Δ −309). PATCH bump (1.15.2 →
+1.15.3): seluruh perubahan adalah penambahan test, tidak ada perubahan
+interface contract, schema Silver/Gold, atau perilaku runtime apapun.
+
+### Phase 1 — 17 file, 61 baris ditutup (81.46% → 82.82%)
+
+`symbol_utils.py`, `eia_ingester.py`, `bls_ingester.py`,
+`imf_ingester.py`, `schema_validator.py`, `base_ingester.py` (baru,
+sebelumnya nol test sama sekali), `source_adapter.py`,
+`dependency_guard.py`, `context_anchors.py`, `sentiment_processor.py`,
+`global_rates_processor.py`, `mtf_alignment.py`, `ohlcv_aggregator.py`,
+`views.py`, `atomic_io.py`, `progress_checkpoint.py`,
+`pipeline_dashboard.py` — seluruhnya ke 100% line coverage (module-level
+`if __name__ == "__main__":` guard dikecualikan via `pyproject.toml`'s
+`exclude_lines`, konsisten dengan konvensi existing).
+
+### Phase 2 — 8 file, 248 baris ditutup (82.82% → 88.36%)
+
+`alphavantage_adapter.py`, `polygon_adapter.py`, `yfinance_adapter.py`,
+`market_ingester.py`, `bea_ingester.py` (file test baru, melengkapi
+`test_bea_ingester_gld001.py` yang sudah ada), `fred_ingester.py`,
+`finnhub_ingester.py`, `bis_rates_ingester.py` — seluruhnya ke 100%.
+Fokus fase ini: seluruh HTTP request/response body tiga adapter Bronze
+utama (AlphaVantage, Polygon, yfinance) sebelumnya nol coverage — hanya
+guard clause pre-request dan helper statis (mis. `_parse_pair()`) yang
+teruji.
+
+### Catatan Temuan — Gap Struktural, Bukan Bug Produksi
+
+**`market_ingester.py` Layer 1 (`run()`/`_run_symbol()`/`_fetch()`) nol
+test sejak awal.** Hanya jalur Layer 2 (context anchors, ditambahkan
+belakangan pada GMI Wave 1 Cycle 3) yang punya test suite. Jalur trading
+utama — Bronze OHLCV untuk 640 instrumen Layer 1 — berjalan di produksi
+tanpa satupun test langsung selama ini. Tidak ada bug ditemukan pada
+kode produksinya sendiri; gap murni pada test suite. 26 test baru
+menutup `run()`, `_run_symbol()` (termasuk jalur ForexDayCache dan
+cache-failure non-critical), `_fetch()` (empat varian ChainedAdapter per
+market), dan dua cabang `_primary_source_for()` yang sebelumnya tidak
+teruji (idx, forex).
+
+**Test-isolation gap pada `SourceLimiters.alphavantage` (test
+infrastructure, bukan `src/`).** `DailyBudgetLimiter` singleton tidak
+pernah di-reset antar test dalam file yang sama —
+`test_budget_exhausted_returns_none` (deliberately menghabiskan budget)
+berpotensi meracuni test manapun yang berjalan setelahnya dalam sesi
+yang sama, termasuk `test_unsupported_tf_returns_none` yang mengklaim
+menguji cabang timeframe-tidak-didukung tapi bisa saja lolos karena
+short-circuit budget-exhausted yang tidak disengaja, tergantung urutan
+eksekusi pytest. Diperbaiki dengan fixture `autouse` yang me-reset
+`_reset_date` sebelum/sesudah setiap test di `TestFetchHttpFlow`, plus
+satu test baru (`test_unsupported_tf_returns_none_isolated`) yang secara
+eksplisit mengkonfirmasi `requests.get` tidak pernah dipanggil untuk
+cabang ini — membuktikan test lama PASS karena alasan yang benar, bukan
+kebetulan. Kode produksi `alphavantage_adapter.py` sendiri tidak
+berubah.
+
+| File | Fase | Sebelum | Sesudah |
+| --- | --- | --- | --- |
+| `utils/symbol_utils.py` | 1 | 66% | 100% |
+| `bronze/eia_ingester.py` | 1 | 95% | 100% |
+| `bronze/bls_ingester.py` | 1 | 94% | 100% |
+| `bronze/imf_ingester.py` | 1 | 95% | 100% |
+| `bronze/schema_validator.py` | 1 | 96% | 100% |
+| `bronze/base_ingester.py` | 1 | 0% (no tests) | 100% |
+| `bronze/source_adapter.py` | 1 | 94% | 100% |
+| `scheduler/dependency_guard.py` | 1 | 98% | 100% |
+| `silver/context_anchors.py` | 1 | 87% | 100% |
+| `silver/sentiment_processor.py` | 1 | 86% | 100% |
+| `silver/global_rates_processor.py` | 1 | 93% | 100% |
+| `gold/mtf_alignment.py` | 1 | 98% | 100% |
+| `silver/ohlcv_aggregator.py` | 1 | 98% | 100% |
+| `gold/views.py` | 1 | 98% | 100% |
+| `utils/atomic_io.py` | 1 | 94% | 100% |
+| `utils/progress_checkpoint.py` | 1 | 94% | 100% |
+| `utils/pipeline_dashboard.py` | 1 | 99% | 100% |
+| `bronze/alphavantage_adapter.py` | 2 | 47% | 100% |
+| `bronze/polygon_adapter.py` | 2 | 45% | 100% |
+| `bronze/yfinance_adapter.py` | 2 | 55% | 100% |
+| `bronze/market_ingester.py` | 2 | 59% | 100% |
+| `bronze/bea_ingester.py` | 2 | 59% | 100% |
+| `bronze/fred_ingester.py` | 2 | 87% | 100% |
+| `bronze/finnhub_ingester.py` | 2 | 82% | 100% |
+| `bronze/bis_rates_ingester.py` | 2 | 84% | 100% |
+
+Sisa gap menuju target 95%: **297 baris** across Silver
+(`quality_validator.py` — 110 baris, terbesar tunggal), Gold
+(`macro_regime.py`, `technical_signals.py`, dst. —
+`correlation_matrix.py` dan `hmm_regime.py` dikecualikan), dan
+orchestration (`job_registry.py`, `runner.py`, dst.) — Fase 3–5, belum
+dikerjakan.
+
 ## v1.15.2 — Data Source Preflight Remediation: EIA APIv2, BEA Table/Line Corrections, FRED Registry Hygiene (Agustus 2026)
 
 Dokumen referensi: GMI_Decision_Document_v9.docx (14 Aug 2026).

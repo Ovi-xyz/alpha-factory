@@ -384,3 +384,15 @@ class TestSessionAwareCompleteness:
             pl.Series([], dtype=pl.Date), pl.Series([], dtype=pl.Int32), "us_stocks"
         )
         assert len(result) == 0
+
+
+class TestRestorePassthroughEmptyDict:
+    """Coverage tranche (17 Aug 2026) — the not passthrough_vals early-return
+    branch (no passthrough columns captured, e.g. source df had none of the
+    _PASSTHROUGH_COLS present)."""
+
+    def test_empty_passthrough_vals_returns_agg_unchanged(self):
+        from src.silver.ohlcv_aggregator import _restore_passthrough
+        agg = pl.DataFrame({"symbol": ["AAPL"], "close": [150.0]})
+        result = _restore_passthrough(agg, {})
+        assert result is agg   # early return — same object, not a copy

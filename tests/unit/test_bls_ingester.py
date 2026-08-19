@@ -191,3 +191,44 @@ class TestRunEntryPoint:
         with patch.object(BLSIngester, "run") as mock_run:
             run(date(2026, 6, 1))
             mock_run.assert_called_once_with(date(2026, 6, 1))
+
+
+class TestRecordBuildingErrors:
+    """Coverage tranche (17 Aug 2026) — except (ValueError, KeyError): pass
+    around obs_date/release_date construction inside the per-item loop."""
+
+    def test_missing_year_key_row_skipped_others_kept(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BLS_API_KEY", "fake-key")
+        resp = _bls_response(series=[{
+            "seriesID": "PARTIALBAD",
+            "data": [
+                {"period": "M03", "periodName": "March", "value": "1.0"},  # missing 'year' -> KeyError
+                {"year": "2026", "period": "M05", "periodName": "May", "value": "2.0"},
+            ],
+        }])
+        with patch("requests.post", return_value=resp):
+            BLSIngester().run(date(2026, 6, 1), series_filter=["PARTIALBAD"])
+        out_dir = tmp_path / "bronze" / "macro" / "bls" / "labor_market"
+        written = pl.read_parquet(next(out_dir.glob("*.parquet")))
+        assert len(written) == 1   # only the valid M05 row survived
+
+
+class TestSchemaValidatorGateLiveRun:
+    """Coverage tranche (17 Aug 2026) — the actual quarantine branch (not
+    just SchemaValidator in isolation) exercised through a real run()."""
+
+    def test_quarantine_path_exercised_via_run(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BLS_API_KEY", "fake-key")
+        resp = _bls_response(series=[{
+            "seriesID": "CUUR0000SA0",
+            "data": [{"year": "2026", "period": "M03", "periodName": "March", "value": "312.1"}],
+        }])
+        ingester = BLSIngester()
+        mock_validator = MagicMock()
+        mock_validator.validate.return_value = (False, ["missing column"])
+        ingester._validator = mock_validator
+        with patch("requests.post", return_value=resp):
+            ingester.run(date(2026, 6, 1), series_filter=["CUUR0000SA0"])
+        mock_validator.handle_mismatch.assert_called_once()
+        out_dir = tmp_path / "bronze" / "macro" / "bls" / "labor_market"
+        assert not out_dir.exists() or not list(out_dir.glob("*.parquet"))

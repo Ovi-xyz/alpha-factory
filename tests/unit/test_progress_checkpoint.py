@@ -80,3 +80,22 @@ class TestProgressCheckpoint:
         checkpoint.mark_done("B")
         assert checkpoint.coverage_pct(4) == 50.0
         assert checkpoint.coverage_pct(2) == 100.0
+
+    def test_clear_all_run_dates_when_no_run_date_given(self, checkpoint):
+        """Coverage tranche (17 Aug 2026) — clear(run_date=None) branch:
+        deletes every checkpoint for this job across ALL run_dates, not
+        just one (distinct from test_clear_run_date_isolation, which only
+        exercises the run_date-specific DELETE)."""
+        checkpoint.mark_done("AAPL")
+        other_date_checkpoint = type(checkpoint)(checkpoint.job_name, date(2025, 2, 1))
+        other_date_checkpoint.mark_done("MSFT")
+
+        checkpoint.clear(None)
+
+        assert not checkpoint.is_done("AAPL")
+        assert not other_date_checkpoint.is_done("MSFT")
+
+    def test_coverage_pct_zero_total_expected_returns_100(self, checkpoint):
+        """Coverage tranche (17 Aug 2026) — total_expected=0 guard, avoiding
+        a ZeroDivisionError and treating 'nothing expected' as fully covered."""
+        assert checkpoint.coverage_pct(0) == 100.0

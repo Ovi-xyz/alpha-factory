@@ -209,3 +209,60 @@ class TestRunEntryPoint:
         with patch.object(FREDIngester, "run") as mock_run:
             run(date(2026, 6, 1))
             mock_run.assert_called_once_with(date(2026, 6, 1))
+
+
+class TestRunLoopExceptionHandling:
+    """Coverage tranche (17 Aug 2026) — run()'s own outer except (lines
+    189-191), distinct from _fetch_series()'s inner except which already
+    catches get_series() API errors (test_api_exception_for_one_series...
+    above never reaches run()'s own except, since _fetch_series() returns
+    None gracefully instead of propagating)."""
+
+    def test_write_macro_exception_increments_failed_without_raising(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FRED_API_KEY", "fake-key")
+        monkeypatch.setattr(
+            FREDIngester, "_load_registry",
+            lambda self: {"series": [{"id": "CPIAUCSL", "domain": "inflation"}]},
+        )
+        mock_client = MagicMock()
+        mock_client.get_series.return_value = _fake_series({"2026-05-01": 1.0})
+        with patch("fredapi.Fred", return_value=mock_client), \
+             patch.object(FREDIngester, "write_macro", side_effect=RuntimeError("disk full")):
+            FREDIngester().run(date(2026, 6, 1))   # must not raise
+
+
+class TestFetchSeriesImportError:
+    """Coverage tranche (17 Aug 2026) — the except ImportError: branch in
+    _fetch_series() when fredapi itself isn't installed."""
+
+    def test_fredapi_not_installed_returns_none(self, tmp_path, monkeypatch):
+        import sys
+        monkeypatch.setenv("FRED_API_KEY", "fake-key")
+        monkeypatch.setitem(sys.modules, "fredapi", None)
+        result = FREDIngester()._fetch_series("CPIAUCSL", date(2026, 6, 1))
+        assert result is None
+
+
+class TestBuildLastKnownCacheMalformedDate:
+    """Coverage tranche (17 Aug 2026) — except (ValueError, TypeError): pass
+    around date.fromisoformat in _build_last_known_cache()."""
+
+    def test_malformed_date_row_excluded_from_cache(self, tmp_path):
+        bronze_dir = tmp_path / "bronze" / "macro" / "fred" / "inflation"
+        bronze_dir.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "series_id": ["CPIAUCSL"],
+            "observation_date": ["not-a-date"],
+        }).write_parquet(bronze_dir / "seed.parquet")
+        cache = FREDIngester()._build_last_known_cache()
+        assert "CPIAUCSL" not in cache
+
+    def test_valid_date_row_included_in_cache(self, tmp_path):
+        bronze_dir = tmp_path / "bronze" / "macro" / "fred" / "inflation"
+        bronze_dir.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "series_id": ["CPIAUCSL"],
+            "observation_date": ["2026-05-01"],
+        }).write_parquet(bronze_dir / "seed.parquet")
+        cache = FREDIngester()._build_last_known_cache()
+        assert cache["CPIAUCSL"] == date(2026, 5, 1)

@@ -344,3 +344,47 @@ class TestSaveAndRun:
             mod.run(run_date=date(2026, 6, 30))
         out_file = tmp_path / "silver" / "global_rates" / "global_rates_policy.parquet"
         assert out_file.exists()
+
+
+class TestStructuralBreakRegistryMissingConfig:
+    """Coverage tranche (17 Aug 2026) — _BIS_CONFIG.exists() False branch."""
+
+    def test_missing_config_returns_empty_list(self, monkeypatch, tmp_path):
+        import src.silver.global_rates_processor as mod
+        monkeypatch.setattr(mod, "_BIS_CONFIG", tmp_path / "nonexistent.yaml")
+        assert mod._load_structural_breaks() == []
+
+
+class TestLoadBronzeEmptyResult:
+    """Coverage tranche (17 Aug 2026) — scan succeeds but collects zero rows
+    (distinct from test_returns_none_when_no_bronze, which hits the except
+    branch via a missing directory rather than this is_empty() branch)."""
+
+    def test_returns_none_when_bronze_has_zero_rows(self, tmp_path, monkeypatch):
+        import src.silver.global_rates_processor as mod
+        bronze_dir = tmp_path / "bronze_empty"
+        bronze_dir.mkdir(parents=True)
+        empty_df = pl.DataFrame(
+            schema={"ref_area": pl.String, "central_bank": pl.String,
+                    "obs_date": pl.Date, "rate_pct": pl.Float64,
+                    "_source": pl.String, "_ingested_at": pl.String}
+        )
+        empty_df.write_parquet(bronze_dir / "empty.parquet")
+        monkeypatch.setattr(mod, "_BRONZE_PATH", bronze_dir)
+        proc = GlobalRatesProcessor()
+        assert proc._load_bronze() is None
+
+
+class TestSaveAtomicWriteFailure:
+    """Coverage tranche (17 Aug 2026) — except Exception: cleanup + re-raise
+    around the tempfile + os.replace atomic write pattern in _save()."""
+
+    def test_replace_failure_cleans_up_tmp_and_reraises(self, processor, tmp_path):
+        from unittest.mock import patch
+        df = pl.DataFrame({"central_bank": ["ECB"], "observation_date": [date(2026, 6, 30)]})
+        with patch("os.replace", side_effect=OSError("disk full")):
+            with pytest.raises(OSError):
+                processor._save(df, date(2026, 6, 30))
+        import src.silver.global_rates_processor as mod
+        leftover_tmp = list(mod._OUTPUT_PATH.glob("*.parquet.tmp"))
+        assert leftover_tmp == []

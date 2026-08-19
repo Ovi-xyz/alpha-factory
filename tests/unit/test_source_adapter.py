@@ -148,3 +148,21 @@ class TestDailyBudgetLimiter:
         # (Implementation checks date.today() internally)
         # This test verifies the reset mechanism exists
         assert limiter.budget == 2   # Budget unchanged — just used count resets
+
+
+class TestAbstractMethodPlaceholderBodies:
+    """Coverage tranche (17 Aug 2026) — SourceAdapter.fetch()/name are
+    abstract but not decorated with @abstractmethod enforcement that blocks
+    direct invocation via the base class on a concrete instance; their `...`
+    placeholder bodies are reachable this way and worth covering since they
+    are real (if trivial) statements in the shipped module."""
+
+    def test_fetch_placeholder_body_returns_none(self):
+        result = SourceAdapter.fetch(
+            SuccessAdapter(), "AAPL", "1D", date(2025, 1, 1), date(2025, 1, 31)
+        )
+        assert result is None
+
+    def test_name_placeholder_body_returns_none(self):
+        result = SourceAdapter.name.fget(SuccessAdapter())
+        assert result is None

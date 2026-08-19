@@ -123,3 +123,20 @@ class TestSchemaValidator:
             validator.handle_mismatch(
                 valid_df, ["Error"], "AAPL", on_mismatch="fail"
             )
+
+    def test_unknown_strategy_defaults_to_quarantine(self, validator, tmp_path, monkeypatch):
+        """Coverage tranche (17 Aug 2026) — unrecognized on_mismatch string
+        falls through the else branch, logs an error, and defaults to quarantine."""
+        monkeypatch.setattr(
+            SchemaValidator, "QUARANTINE_PATH", tmp_path / "quarantine"
+        )
+        df = pl.DataFrame({
+            "open":  [100.0], "high": [105.0], "low": [98.0],
+            "close": [102.0], "volume": [1_000_000],
+        })
+        result = validator.handle_mismatch(
+            df, ["some error"], "AAPL", on_mismatch="not_a_real_strategy"
+        )
+        assert result is None   # falls through to quarantine, which returns None
+        quarantine_files = list((tmp_path / "quarantine").glob("*.parquet"))
+        assert len(quarantine_files) == 1

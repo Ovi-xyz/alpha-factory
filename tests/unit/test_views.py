@@ -217,3 +217,30 @@ class TestOhlcvViewsGlobScope:
         result = con.execute("SELECT symbol FROM v_ohlcv_1D").fetchall()
         con.close()
         assert result == [("AAPL",)]
+
+
+class TestRegisterViewsSuccessPath:
+    """Coverage tranche (17 Aug 2026) — created.append(view_name) on the
+    success path. test_register_views_runs_without_raising only exercises
+    the all-missing-data except branch; this exercises at least one view
+    actually resolving, using the same fixture proven queryable by
+    test_list_available_views_finds_populated_view."""
+
+    def test_register_views_with_real_data_appends_created(self, tmp_path, monkeypatch):
+        import polars as pl
+        from datetime import date
+        from src.config.instrument_loader import get_loader
+
+        get_loader()  # pre-warm before chdir
+        monkeypatch.chdir(tmp_path)
+        ohlcv_dir = (
+            tmp_path / "data" / "silver" / "market_ohlcv" / "us_stocks"
+            / "symbol=AAPL"
+        )
+        ohlcv_dir.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "symbol": ["AAPL"], "timestamp": [date(2026, 7, 1)],
+            "close": [150.0],
+        }).write_parquet(ohlcv_dir / "AAPL_1D_silver.parquet")
+
+        register_views()   # must not raise; v_ohlcv_1D resolves -> created.append() hit

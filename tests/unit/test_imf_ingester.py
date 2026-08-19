@@ -201,3 +201,31 @@ class TestRunEntryPoint:
         with patch.object(IMFIngester, "run") as mock_run:
             run(date(2026, 6, 1))
             mock_run.assert_called_once_with(date(2026, 6, 1))
+
+
+class TestRunLoopExceptionHandling:
+    """Coverage tranche (17 Aug 2026) — outer except in run()'s per-indicator loop."""
+
+    def test_write_macro_exception_increments_failed_without_raising(self, tmp_path, monkeypatch):
+        values = {"NGDP_RPCH": {"USA": {"2026": 2.1}}}
+        resp = _imf_response(values=values)
+        with patch("requests.get", return_value=resp), \
+             patch.object(IMFIngester, "write_macro", side_effect=RuntimeError("disk full")):
+            IMFIngester().run(date(2026, 6, 1))   # must not raise
+
+
+class TestFetchIndicatorRecordParsingErrors:
+    """Coverage tranche (17 Aug 2026) — except (ValueError, TypeError): pass
+    around float(value)/int(year_str) inside the per-country/year loop."""
+
+    def test_unparseable_value_row_skipped_others_kept(self):
+        values = {
+            "NGDP_RPCH": {
+                "USA": {"2025": "not-a-number", "2026": 2.1},
+            }
+        }
+        resp = _imf_response(values=values)
+        with patch("requests.get", return_value=resp):
+            df = IMFIngester()._fetch_indicator("NGDP_RPCH", date(2026, 6, 1))
+        assert df is not None
+        assert df["observation_date"].to_list() == ["2026-01-01"]

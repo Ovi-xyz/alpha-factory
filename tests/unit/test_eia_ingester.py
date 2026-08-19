@@ -205,3 +205,43 @@ class TestRunEntryPoint:
         with patch.object(EIAIngester, "run") as mock_run:
             run(date(2026, 6, 1))
             mock_run.assert_called_once_with(date(2026, 6, 1))
+
+
+class TestRunLoopExceptionHandling:
+    """Coverage tranche (17 Aug 2026) — outer except in run()'s per-series loop."""
+
+    def test_write_macro_exception_increments_failed_without_raising(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("EIA_API_KEY", "fake-key")
+        resp = _eia_response(series_data=[{"period": "2026-05-06", "value": 450000.0}])
+        with patch("requests.get", return_value=resp), \
+             patch.object(EIAIngester, "write_macro", side_effect=RuntimeError("disk full")):
+            EIAIngester().run(date(2026, 6, 1))   # must not raise
+
+
+class TestFetchSeriesRecordParsingErrors:
+    """Coverage tranche (17 Aug 2026) — malformed-row except/pass in _fetch_series."""
+
+    def test_unparseable_value_row_skipped_others_kept(self, monkeypatch):
+        monkeypatch.setenv("EIA_API_KEY", "fake-key")
+        resp = _eia_response(series_data=[
+            {"period": "2026-05-06", "value": "not-a-number"},
+            {"period": "2026-05-13", "value": 452000.0},
+        ])
+        with patch("requests.get", return_value=resp):
+            df = EIAIngester()._fetch_series("PET.RWTC.W", date(2026, 6, 1))
+        assert df is not None
+        assert df["observation_date"].to_list() == ["2026-05-13"]
+
+
+class TestBuildLastKnownCacheMalformedDate:
+    """Coverage tranche (17 Aug 2026) — except/pass around date.fromisoformat."""
+
+    def test_malformed_date_row_excluded_from_cache(self, tmp_path):
+        bronze_dir = tmp_path / "bronze" / "macro" / "eia" / "crude_oil"
+        bronze_dir.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "series_id": ["PET.RWTC.W"],
+            "observation_date": ["not-a-date"],
+        }).write_parquet(bronze_dir / "seed.parquet")
+        cache = EIAIngester()._build_last_known_cache()
+        assert "PET.RWTC.W" not in cache

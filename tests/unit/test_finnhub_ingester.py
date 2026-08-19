@@ -269,3 +269,83 @@ class TestGetDaysToEarnings:
 
         result = get_days_to_earnings("AAPL", date(2026, 7, 1))
         assert result == 14
+
+
+class TestRunEndToEnd:
+    """Coverage tranche (17 Aug 2026) — full run() body (lines 121-144): the
+    client construction on successful import, loader/us_symbols resolution,
+    the earnings-calendar call, and the per-symbol loop with success/failed
+    counters. Every existing test either short-circuits before this point
+    (early-exit tests) or calls _ingest_symbol()/_ingest_earnings_calendar()
+    directly, bypassing run() entirely."""
+
+    def test_successful_client_creation_and_full_loop(self, ingester, run_date, monkeypatch):
+        mock_client = MagicMock()
+        fake_mod = _fake_finnhub_module(mock_client)
+
+        fake_inst = MagicMock()
+        fake_inst.symbol = "AAPL"
+        fake_loader = MagicMock()
+        fake_loader.by_market.return_value = [fake_inst]
+        monkeypatch.setattr(
+            "src.bronze.finnhub_ingester.get_loader", lambda: fake_loader
+        )
+
+        earnings_calls = []
+        symbol_calls = []
+        monkeypatch.setattr(
+            ingester, "_ingest_earnings_calendar",
+            lambda rd: earnings_calls.append(rd),
+        )
+        monkeypatch.setattr(
+            ingester, "_ingest_symbol",
+            lambda sym, rd: symbol_calls.append(sym),
+        )
+
+        with patch.dict(sys.modules, {"finnhub": fake_mod}):
+            ingester.run(run_date)
+
+        assert ingester._client is mock_client   # line 113: client actually assigned
+        assert earnings_calls == [run_date]
+        assert symbol_calls == ["AAPL"]
+
+    def test_per_symbol_exception_isolated(self, ingester, run_date, monkeypatch):
+        mock_client = MagicMock()
+        fake_mod = _fake_finnhub_module(mock_client)
+
+        a, b = MagicMock(), MagicMock()
+        a.symbol, b.symbol = "AAPL", "MSFT"
+        fake_loader = MagicMock()
+        fake_loader.by_market.return_value = [a, b]
+        monkeypatch.setattr(
+            "src.bronze.finnhub_ingester.get_loader", lambda: fake_loader
+        )
+        monkeypatch.setattr(ingester, "_ingest_earnings_calendar", lambda rd: None)
+
+        def flaky(sym, rd):
+            if sym == "AAPL":
+                raise RuntimeError("simulated failure")
+
+        monkeypatch.setattr(ingester, "_ingest_symbol", flaky)
+
+        with patch.dict(sys.modules, {"finnhub": fake_mod}):
+            ingester.run(run_date)   # must not raise — both symbols attempted
+
+
+class TestEarningsCalendarFetchException:
+    """Coverage tranche (17 Aug 2026) — except Exception: logger.warning(...)
+    in _ingest_earnings_calendar() when the Finnhub API call itself raises."""
+
+    def test_calendar_fetch_exception_caught_no_raise(self, ingester, run_date):
+        ingester._client = MagicMock()
+        ingester._client.earnings_calendar.side_effect = RuntimeError("API down")
+        ingester._ingest_earnings_calendar(run_date)   # must not raise
+
+
+class TestModuleLevelRun:
+
+    def test_run_wrapper_delegates_to_class(self, run_date):
+        from src.bronze.finnhub_ingester import FinnhubIngester, run
+        with patch.object(FinnhubIngester, "run") as mock_run:
+            run(run_date)
+        mock_run.assert_called_once_with(run_date)

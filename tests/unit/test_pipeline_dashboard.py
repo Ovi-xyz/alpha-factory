@@ -109,6 +109,20 @@ class TestSectionJobStatus:
         out = capsys.readouterr().out
         assert "extra_job" in out
 
+    def test_stale_pipeline_sequence_entry_skipped(self, tmp_path, monkeypatch, capsys):
+        """Coverage tranche (17 Aug 2026) — if job_name not in statuses:
+        continue. Defensive branch for PIPELINE_SEQUENCE/JOB_REGISTRY drift:
+        a job name present in PIPELINE_SEQUENCE but removed from
+        JOB_REGISTRY must be silently skipped, not crash the dashboard."""
+        monkeypatch.chdir(tmp_path)
+        with patch("src.scheduler.job_registry.JOB_REGISTRY", self._registry()), \
+             patch("src.scheduler.job_registry.PIPELINE_SEQUENCE",
+                   ["bronze_a", "ghost_job_not_in_registry", "silver_b"]):
+            dash._section_job_status(date(2026, 6, 1))   # must not raise
+        out = capsys.readouterr().out
+        assert "ghost_job_not_in_registry" not in out
+        assert "0/2 completed" in out
+
 
 class TestSectionLayerCoverage:
 

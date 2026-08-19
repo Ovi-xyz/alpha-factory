@@ -198,3 +198,29 @@ class TestContextAnchorsRunEntryPoint:
         run_date = date(2025, 3, 13)
         run(run_date)
         assert (output_path / f"context_anchors_{run_date.isoformat()}.parquet").exists()
+
+
+class TestOutputPathProperty:
+    """Coverage tranche (17 Aug 2026) — the REAL OUTPUT_PATH property body.
+    Every other test in this file monkeypatches OUTPUT_PATH entirely (via
+    `_resolver_with_tmp_output`), so the actual property implementation
+    (PIPELINE_DATA_ROOT env resolution) had never been exercised."""
+
+    def test_output_path_uses_pipeline_data_root_env(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("PIPELINE_DATA_ROOT", str(tmp_path))
+        resolver = ContextAnchorsResolver()
+        assert resolver.OUTPUT_PATH == tmp_path / "silver" / "context_anchors"
+
+
+class TestResolveAtomicWriteFailure:
+    """Coverage tranche (17 Aug 2026) — except Exception: cleanup + re-raise
+    around the tempfile + os.replace atomic write pattern."""
+
+    def test_replace_failure_cleans_up_tmp_and_reraises(self, tmp_path, monkeypatch):
+        from unittest.mock import patch
+        resolver, output_path = _resolver_with_tmp_output(tmp_path, monkeypatch)
+        with patch("os.replace", side_effect=OSError("disk full")):
+            with pytest.raises(OSError):
+                resolver.resolve(date(2025, 3, 20))
+        leftover_tmp = list(output_path.glob("*.parquet.tmp"))
+        assert leftover_tmp == []

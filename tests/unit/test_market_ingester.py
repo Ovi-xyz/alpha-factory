@@ -301,3 +301,249 @@ class TestRunContextEntryPoint:
         layer1_ckpt = ProgressCheckpoint("bronze_ohlcv_daily", date(2026, 7, 1))
         assert not layer1_ckpt.is_done("DXY", timeframe="1D")
         assert not layer1_ckpt.is_done("VIX", timeframe="1D")
+
+
+# ── Layer 1 — coverage tranche (17 Aug 2026)
+# run() / _run_symbol() / _fetch() / _primary_source_for()'s idx+forex branches
+# had zero test coverage from the start (per this file's own original module
+# docstring, verified empty before Layer 2 work began and left untouched by
+# GMI Wave 1 Cycle 3). Same isolation pattern as TestRunContextEntryPoint
+# above: monkeypatch.chdir(tmp_path) + mock _fetch()/get_loader() to avoid
+# real network calls.
+
+def _fake_layer1_instrument(
+    symbol: str = "AAPL",
+    raw_symbol: str = None,
+    market: str = "us_stocks",
+    timezone: str = "America/New_York",
+) -> Instrument:
+    return Instrument(
+        symbol=symbol, raw_symbol=raw_symbol or symbol, market=market, sector=None,
+        yfinance_symbol=symbol, polygon_symbol=symbol, tvfeed_symbol=None,
+        eia_series=None, timezone=timezone, is_active=True, layer=1,
+    )
+
+
+class TestRunEntryPoint:
+    """Layer 1 equivalent of TestRunContextEntryPoint above."""
+
+    @staticmethod
+    def _fake_loader(instruments):
+        class _FakeLoader:
+            def all_symbols(self_inner):
+                return instruments
+        return _FakeLoader()
+
+    def test_iterates_all_active_instruments(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        a = _fake_layer1_instrument("AAPL")
+        b = _fake_layer1_instrument("MSFT")
+        monkeypatch.setattr(
+            "src.bronze.market_ingester.get_loader",
+            lambda: self._fake_loader([a, b]),
+        )
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        calls = []
+        monkeypatch.setattr(
+            ingester, "_run_symbol", lambda inst, tf, rd: calls.append(inst.symbol)
+        )
+        ingester.run(date(2026, 7, 1))
+        assert calls == ["AAPL", "MSFT"]
+
+    def test_resumable_via_checkpoint(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        inst = _fake_layer1_instrument("AAPL")
+        monkeypatch.setattr(
+            "src.bronze.market_ingester.get_loader",
+            lambda: self._fake_loader([inst]),
+        )
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        call_count = {"n": 0}
+        monkeypatch.setattr(
+            ingester, "_run_symbol",
+            lambda inst_arg, tf, rd: call_count.__setitem__("n", call_count["n"] + 1),
+        )
+        run_date = date(2026, 7, 1)
+        ingester.run(run_date)
+        ingester.run(run_date)   # second call — already-done symbol must skip
+        assert call_count["n"] == 1
+
+    def test_failure_isolated_per_symbol_and_namespace(self, monkeypatch, tmp_path):
+        """Uses the 'bronze_ohlcv_daily' namespace — never the Layer 2
+        'bronze_ohlcv_context_daily' namespace (mirror of the Layer 2 test's
+        cross-namespace-isolation assertion, in the opposite direction)."""
+        monkeypatch.chdir(tmp_path)
+        a = _fake_layer1_instrument("AAPL")
+        b = _fake_layer1_instrument("MSFT")
+        monkeypatch.setattr(
+            "src.bronze.market_ingester.get_loader",
+            lambda: self._fake_loader([a, b]),
+        )
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+
+        def flaky(inst_arg, tf, rd):
+            if inst_arg.symbol == "AAPL":
+                raise RuntimeError("simulated fetch failure")
+
+        monkeypatch.setattr(ingester, "_run_symbol", flaky)
+        ingester.run(date(2026, 7, 1))   # must not raise
+
+        from src.utils.progress_checkpoint import ProgressCheckpoint
+        layer1_ckpt = ProgressCheckpoint("bronze_ohlcv_daily", date(2026, 7, 1))
+        assert layer1_ckpt.is_done("MSFT", timeframe="1D")
+        assert not layer1_ckpt.is_done("AAPL", timeframe="1D")
+
+        ctx_ckpt = ProgressCheckpoint("bronze_ohlcv_context_daily", date(2026, 7, 1))
+        assert not ctx_ckpt.is_done("MSFT", timeframe="1D")
+
+
+class TestRunSymbol:
+    """_run_symbol() body — lines 148-199."""
+
+    def test_no_data_skips_write(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: None)
+        write_calls = []
+        monkeypatch.setattr(ingester, "write", lambda **kw: write_calls.append(kw))
+        inst = _fake_layer1_instrument("AAPL")
+        ingester._run_symbol(inst, "1D", date(2026, 7, 1))
+        assert write_calls == []
+
+    def test_successful_fetch_writes_with_actual_source_from_df(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        df = _sample_yf_df().with_columns(pl.lit("polygon").alias("_source"))
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: df)
+        ingester._schema_validators = {}   # skip schema gate for this test
+        write_calls = []
+        monkeypatch.setattr(ingester, "write", lambda **kw: write_calls.append(kw))
+        inst = _fake_layer1_instrument("AAPL")
+        ingester._run_symbol(inst, "1D", date(2026, 7, 1))
+        assert len(write_calls) == 1
+        assert write_calls[0]["source"] == "polygon"   # from df["_source"], not primary_src
+        assert write_calls[0]["asset_class"] == "market/ohlcv/us_stocks"
+        assert write_calls[0]["extra_metadata"] == {"_tz_hint": "America/New_York"}
+
+    def test_missing_source_column_falls_back_to_primary_src(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        df = _sample_yf_df()   # no _source column
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: df)
+        ingester._schema_validators = {}
+        write_calls = []
+        monkeypatch.setattr(ingester, "write", lambda **kw: write_calls.append(kw))
+        inst = _fake_layer1_instrument("AAPL")
+        ingester._run_symbol(inst, "1D", date(2026, 7, 1))
+        assert write_calls[0]["source"] == "yfinance"   # _primary_source_for fallback
+
+    def test_schema_mismatch_quarantines_and_skips_write(self, monkeypatch, tmp_path):
+        from unittest.mock import MagicMock
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        df = _sample_yf_df().with_columns(pl.lit("yfinance").alias("_source"))
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: df)
+        mock_validator = MagicMock()
+        mock_validator.validate.return_value = (False, ["bad schema"])
+        ingester._schema_validators = {"yfinance": mock_validator}
+        write_calls = []
+        monkeypatch.setattr(ingester, "write", lambda **kw: write_calls.append(kw))
+        inst = _fake_layer1_instrument("AAPL")
+        ingester._run_symbol(inst, "1D", date(2026, 7, 1))
+        assert write_calls == []
+        mock_validator.handle_mismatch.assert_called_once()
+
+    def test_forex_market_saves_to_day_cache(self, monkeypatch, tmp_path):
+        from src.bronze.forex_cache import ForexDayCache
+        from unittest.mock import patch
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        df = _sample_yf_df().with_columns(pl.lit("yfinance_forex").alias("_source"))
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: df)
+        ingester._schema_validators = {}
+        monkeypatch.setattr(ingester, "write", lambda **kw: None)
+        inst = _fake_layer1_instrument("EUR_USD", raw_symbol="EUR/USD", market="forex", timezone="UTC")
+        with patch.object(ForexDayCache, "save") as mock_save:
+            ingester._run_symbol(inst, "1D", date(2026, 7, 1))
+        mock_save.assert_called_once_with("EUR_USD", df, date(2026, 7, 1))
+
+    def test_forex_cache_save_failure_is_non_critical(self, monkeypatch, tmp_path):
+        """FIX B-F07: a ForexDayCache.save() exception must not propagate —
+        it's a best-effort cache write, not a required step."""
+        from src.bronze.forex_cache import ForexDayCache
+        from unittest.mock import patch
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        df = _sample_yf_df().with_columns(pl.lit("yfinance_forex").alias("_source"))
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: df)
+        ingester._schema_validators = {}
+        write_calls = []
+        monkeypatch.setattr(ingester, "write", lambda **kw: write_calls.append(kw))
+        inst = _fake_layer1_instrument("EUR_USD", raw_symbol="EUR/USD", market="forex", timezone="UTC")
+        with patch.object(ForexDayCache, "save", side_effect=OSError("disk full")):
+            ingester._run_symbol(inst, "1D", date(2026, 7, 1))   # must not raise
+        assert len(write_calls) == 1   # write still proceeds despite cache failure
+
+
+class TestFetchChainConstruction:
+    """_fetch() — lines 219-249: per-market ChainedAdapter composition."""
+
+    def test_idx_market_single_adapter_chain(self, monkeypatch, tmp_path):
+        from unittest.mock import patch
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        inst = _fake_layer1_instrument("BBCA", market="idx", timezone="Asia/Jakarta")
+        with patch("src.bronze.yfinance_adapter.YFinanceJKAdapter.fetch", return_value=_sample_yf_df()) as mock_fetch:
+            result = ingester._fetch("BBCA.JK", inst, "1D", date(2026, 6, 1), date(2026, 7, 1))
+        assert result is not None
+        assert result["_source"][0] == "yfinance_jk"
+        mock_fetch.assert_called_once()
+
+    def test_forex_market_three_adapter_chain(self, monkeypatch, tmp_path):
+        from unittest.mock import patch
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        inst = _fake_layer1_instrument("EUR_USD", market="forex", timezone="UTC")
+        # First adapter in chain succeeds — confirms chain is wired, not which one wins
+        with patch("src.bronze.yfinance_adapter.YFinanceForexAdapter.fetch", return_value=_sample_yf_df()) as mock_fetch:
+            result = ingester._fetch("EURUSD=X", inst, "1D", date(2026, 6, 1), date(2026, 7, 1))
+        assert result is not None
+        assert result["_source"][0] == "yfinance_forex"
+        mock_fetch.assert_called_once()
+
+    def test_us_stocks_market_yfinance_polygon_chain(self, monkeypatch, tmp_path):
+        from unittest.mock import patch
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        inst = _fake_layer1_instrument("AAPL", market="us_stocks")
+        with patch("src.bronze.yfinance_adapter.YFinanceAdapter.fetch", return_value=_sample_yf_df()) as mock_fetch:
+            result = ingester._fetch("AAPL", inst, "1D", date(2026, 6, 1), date(2026, 7, 1))
+        assert result is not None
+        assert result["_source"][0] == "yfinance"
+        mock_fetch.assert_called_once()
+
+    def test_other_markets_yfinance_only_chain(self, monkeypatch, tmp_path):
+        from unittest.mock import patch
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        inst = _fake_layer1_instrument("CL", market="commodity")
+        with patch("src.bronze.yfinance_adapter.YFinanceAdapter.fetch", return_value=_sample_yf_df()) as mock_fetch:
+            result = ingester._fetch("CL=F", inst, "1D", date(2026, 6, 1), date(2026, 7, 1))
+        assert result is not None
+        assert result["_source"][0] == "yfinance"
+        mock_fetch.assert_called_once()
+
+
+class TestPrimarySourceForRemainingBranches:
+    """_primary_source_for() — lines 262 (idx), 264 (forex). The default
+    fallback branch (line 265) was already exercised elsewhere; the idx and
+    forex branches specifically (which return the same value but via a
+    distinct code path) were not."""
+
+    def test_idx_returns_yfinance(self):
+        inst = _fake_layer1_instrument("BBCA", market="idx")
+        assert MarketOHLCVIngester._primary_source_for(inst) == "yfinance"
+
+    def test_forex_returns_yfinance(self):
+        inst = _fake_layer1_instrument("EUR_USD", market="forex")
+        assert MarketOHLCVIngester._primary_source_for(inst) == "yfinance"

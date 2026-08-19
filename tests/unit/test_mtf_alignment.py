@@ -509,3 +509,36 @@ class TestGetMtfSummaryFullPath:
         assert summary == {
             "total_symbols": 4, "grade_A": 2, "grade_B": 1, "grade_C": 0, "grade_D": 1,
         }
+
+
+class TestNoAtrColumnAnywhere:
+    """Coverage tranche (17 Aug 2026) — the atr_1h_df is None branch (both
+    the primary 1H lookup and the fallback-across-all-TFs lookup come up
+    empty). The real DuckDB query explicitly SELECTs atr_14 by name, so a
+    successful query always yields that column — this branch is only
+    reachable if atr_14 is genuinely absent from every per-TF result,
+    which we construct by mocking the DuckDB connection layer directly
+    rather than writing malformed fixture Parquet (which would just raise
+    inside the query's own try/except and be skipped before reaching
+    tf_dfs at all)."""
+
+    def test_missing_atr_everywhere_fills_null_zone_columns(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock, patch
+        sig_dir = tmp_path / "signals"
+        monkeypatch.setattr(mtf_mod, "GOLD_SIGNALS_PATH", sig_dir)
+        _write_tech_signals(
+            sig_dir / "tech_signals_1D.parquet",
+            [_row("AAPL", close=110.0, ema_9=12.0, ema_21=10.0, ema_50=100.0)],
+        )
+        no_atr_df = pl.DataFrame({
+            "symbol": ["AAPL"], "timeframe": ["1D"], "trend_dir": [1],
+            "rsi_14": [50.0], "macd_hist": [0.0], "close": [110.0],
+            "signal_date": ["2026-06-01"],
+        })   # deliberately missing 'atr_14'
+        mock_con = MagicMock()
+        mock_con.execute.return_value.pl.return_value = no_atr_df
+        with patch("duckdb.connect", return_value=mock_con):
+            result = _compute_mtf_alignment(date(2026, 6, 1))
+        row = result.filter(pl.col("symbol") == "AAPL").row(0, named=True)
+        assert row["reward_risk_ratio"] is None
+        assert row["entry_zone_low"] is None
