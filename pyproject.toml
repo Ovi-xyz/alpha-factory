@@ -1,6 +1,23 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.15.3"
+version = "1.16.0"
+# ADD GMI-JR-003 (Ovi, 20 Aug 2026): `python src/runner.py --job bronze|
+# silver|gold` -- run every job on one layer, sequentially, without a full
+# `--job all` run. Requested directly for live testing (not a GMI Decision
+# Document item). src/scheduler/job_registry.py gained layer_sequence() +
+# LAYER_JOB_NAMES, derived from WEEKLY_SEQUENCE (not hand-maintained) so
+# the three lists can't drift from DAILY_SEQUENCE/WEEKLY_SEQUENCE; this
+# also means bronze_finnhub (stub), silver_fundamental (orphaned), and the
+# 3 manual-only BLS/BEA jobs are excluded automatically, matching `--job
+# all`'s own scope. src/runner.py gained run_layer(). Dependency checks
+# across layers are intentionally NOT bypassed: `--job silver` without a
+# same-day bronze run still sys.exit(1)s without --force -- this enforces
+# the Bronze -> Silver -> Gold order (GD Section 17.2) during staged
+# testing, it is not a bug. MINOR bump: new capability, fully backward-
+# compatible, no interface-contract or schema change, no existing job
+# touched. 18 new tests, 1613 -> 1631 passed/skipped, 0 failed, 0
+# regressions. See CHANGELOG.md v1.16.0 and dev-log/2026-08-20-layer-
+# scoped-runner-commands.md for full detail.
 # FIX (Ovi, 17 Aug 2026): Coverage Tranche Phase 1-2 -- 25 modules to 100%
 # line coverage (17 files Phase 1, 8 files Phase 2), aggregate 81.46% ->
 # 88.36%. Test-only: no src/ behavior change. See CHANGELOG.md v1.15.3

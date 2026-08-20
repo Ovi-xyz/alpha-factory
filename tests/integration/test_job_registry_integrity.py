@@ -416,3 +416,96 @@ class TestGMIJR003ContextAnchorsWiring:
     def test_silver_context_anchors_job_does_not_disturb_daily_sequence_length_floor(self):
         from src.scheduler.job_registry import DAILY_SEQUENCE
         assert len(DAILY_SEQUENCE) >= 15
+
+
+class TestLayerJobNames:
+    """
+    GMI-JR-003 — LAYER_JOB_NAMES integrity, backing `--job bronze/silver/gold`.
+    Derived from WEEKLY_SEQUENCE, not hand-maintained — these tests guard
+    against layer_sequence() silently drifting from JOB_REGISTRY/DAILY_
+    SEQUENCE/WEEKLY_SEQUENCE as jobs are added, removed, or re-tagged.
+    """
+
+    def test_exactly_three_layers_present(self):
+        from src.scheduler.job_registry import LAYER_JOB_NAMES
+        assert set(LAYER_JOB_NAMES.keys()) == {"bronze", "silver", "gold"}
+
+    def test_every_listed_job_exists_in_registry(self):
+        from src.scheduler.job_registry import LAYER_JOB_NAMES
+        for layer, names in LAYER_JOB_NAMES.items():
+            missing = [n for n in names if n not in JOB_REGISTRY]
+            assert not missing, f"{layer}: unregistered job names {missing}"
+
+    def test_every_listed_job_matches_its_own_layer_field(self):
+        """LAYER_JOB_NAMES['bronze'] must contain only layer='bronze' jobs
+        (and so on) — a mismatch here would mean layer_sequence() is
+        grouping by the wrong key."""
+        from src.scheduler.job_registry import LAYER_JOB_NAMES
+        for layer, names in LAYER_JOB_NAMES.items():
+            mismatched = [n for n in names if JOB_REGISTRY[n]["layer"] != layer]
+            assert not mismatched, f"{layer}: layer-field mismatch on {mismatched}"
+
+    def test_no_duplicate_job_names_within_a_layer(self):
+        from src.scheduler.job_registry import LAYER_JOB_NAMES
+        for layer, names in LAYER_JOB_NAMES.items():
+            assert len(names) == len(set(names)), f"{layer}: duplicate job names {names}"
+
+    def test_deliberately_unsequenced_jobs_are_excluded(self):
+        """bronze_finnhub (stub, FIX R-F04), silver_fundamental (orphaned,
+        FIX NEW-2), and the 3 manual-only BLS/BEA jobs are absent from both
+        DAILY_SEQUENCE and WEEKLY_SEQUENCE by design — they must not leak
+        into any layer list."""
+        from src.scheduler.job_registry import LAYER_JOB_NAMES
+        all_listed = set().union(*LAYER_JOB_NAMES.values())
+        deliberately_excluded = {
+            "bronze_finnhub", "silver_fundamental",
+            "bronze_bls_cpi", "bronze_bls_nfp", "bronze_bea_gdp",
+        }
+        leaked = all_listed & deliberately_excluded
+        assert not leaked, f"Deliberately unsequenced jobs leaked into LAYER_JOB_NAMES: {leaked}"
+
+    def test_util_layer_jobs_excluded_from_all_three_lists(self):
+        """health_report (layer='util') must not appear under bronze/silver/
+        gold — `--job gold` scope is literally the gold layer, nothing else."""
+        from src.scheduler.job_registry import LAYER_JOB_NAMES
+        util_jobs = {n for n, j in JOB_REGISTRY.items() if j["layer"] == "util"}
+        all_listed = set().union(*LAYER_JOB_NAMES.values())
+        assert not (all_listed & util_jobs)
+
+    def test_layer_lists_cover_every_sequenced_bronze_silver_gold_job(self):
+        """Every job that IS sequenced (in DAILY_SEQUENCE or WEEKLY_SEQUENCE)
+        with layer in {bronze, silver, gold} must appear in the matching
+        LAYER_JOB_NAMES list — i.e. layer_sequence() never silently drops a
+        real, scheduled job."""
+        from src.scheduler.job_registry import LAYER_JOB_NAMES, WEEKLY_SEQUENCE
+        all_listed = set().union(*LAYER_JOB_NAMES.values())
+        for job_name in set(WEEKLY_SEQUENCE):
+            layer = JOB_REGISTRY[job_name]["layer"]
+            if layer in LAYER_JOB_NAMES:
+                assert job_name in all_listed, (
+                    f"{job_name} (layer={layer}) is sequenced but missing "
+                    f"from LAYER_JOB_NAMES['{layer}']"
+                )
+
+    def test_layer_sequence_helper_matches_precomputed_dict(self):
+        """LAYER_JOB_NAMES is a snapshot taken at import time — confirm it's
+        still exactly what calling layer_sequence() fresh would produce."""
+        from src.scheduler.job_registry import LAYER_JOB_NAMES, layer_sequence
+        for layer in ("bronze", "silver", "gold"):
+            assert layer_sequence(layer) == LAYER_JOB_NAMES[layer]
+
+    def test_layer_sequence_deduplicates_repeated_job_names(self, monkeypatch):
+        """Defensive dedup branch in layer_sequence(): a job name appearing
+        twice in WEEKLY_SEQUENCE must only be counted once. Not reachable
+        via the current WEEKLY_SEQUENCE (no job is listed twice there), so
+        this constructs a synthetic duplicate to exercise the branch
+        directly rather than leaving it silently untested."""
+        import src.scheduler.job_registry as job_registry_module
+
+        synthetic_sequence = [
+            "bronze_ohlcv_daily", "bronze_treasury", "bronze_ohlcv_daily",
+        ]
+        monkeypatch.setattr(job_registry_module, "WEEKLY_SEQUENCE", synthetic_sequence)
+
+        result = job_registry_module.layer_sequence("bronze")
+        assert result == ["bronze_ohlcv_daily", "bronze_treasury"]

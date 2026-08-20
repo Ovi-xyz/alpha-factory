@@ -22,6 +22,10 @@ class TestRunnerImports:
         from src.runner import run_all
         assert callable(run_all)
 
+    def test_run_layer_importable(self):
+        from src.runner import run_layer
+        assert callable(run_layer)
+
     def test_parse_args_importable(self):
         from src.runner import parse_args
         assert callable(parse_args)
@@ -37,6 +41,13 @@ class TestParseArgs:
     def test_job_flag(self):
         args = self._parse(["--job", "bronze_ohlcv_daily"])
         assert args.job == "bronze_ohlcv_daily"
+
+    def test_job_flag_accepts_layer_name(self):
+        """--job bronze/silver/gold parse as plain strings, routed to
+        run_layer() by main() (GMI-JR-003)."""
+        for layer in ("bronze", "silver", "gold"):
+            args = self._parse(["--job", layer])
+            assert args.job == layer
 
     def test_force_flag(self):
         args = self._parse(["--job", "gold_regime", "--force"])
@@ -170,3 +181,71 @@ class TestScheduleGuardInRunner:
         # Sentinel should NOT be written (job was skipped, not completed)
         guard = DependencyGuard(sentinel_dir=sentinel_dir)
         assert not guard.is_done("bronze_eia", monday)
+
+
+class TestRunLayer:
+    """GMI-JR-003 — `--job bronze/silver/gold` layer-scoped runs."""
+
+    def test_unknown_layer_raises_system_exit(self, monkeypatch, tmp_path):
+        """Layer name not in LAYER_JOB_NAMES → sys.exit(1), no jobs run."""
+        from src.runner import run_layer
+        from src.scheduler.dependency_guard import DependencyGuard
+
+        sentinel_dir = tmp_path / ".sentinels"
+        sentinel_dir.mkdir()
+        monkeypatch.setattr("src.runner.guard",
+                            DependencyGuard(sentinel_dir=sentinel_dir))
+
+        with pytest.raises(SystemExit) as exc:
+            run_layer("platinum", force=True, run_date=date(2025, 1, 2))
+        assert exc.value.code == 1
+
+    def test_bronze_layer_runs_every_bronze_job_in_order(self, monkeypatch, tmp_path):
+        """--job bronze executes every LAYER_JOB_NAMES['bronze'] job, in order."""
+        from src.runner import run_layer
+        from src.scheduler.dependency_guard import DependencyGuard
+        from src.scheduler.job_registry import JOB_REGISTRY, LAYER_JOB_NAMES
+
+        sentinel_dir = tmp_path / ".sentinels"
+        sentinel_dir.mkdir()
+        monkeypatch.setattr("src.runner.guard",
+                            DependencyGuard(sentinel_dir=sentinel_dir))
+
+        called: list[str] = []
+        originals = {}
+        for name in LAYER_JOB_NAMES["bronze"]:
+            originals[name] = JOB_REGISTRY[name]["fn"]
+            JOB_REGISTRY[name]["fn"] = (lambda d, _n=name: called.append(_n))
+
+        try:
+            # force=True: bronze_eia's Wednesday-only schedule guard would
+            # otherwise skip on an arbitrary date — force isolates this test
+            # from the schedule guard, which TestScheduleGuardInRunner above
+            # already covers directly.
+            run_layer("bronze", force=True, run_date=date(2025, 1, 2))
+        finally:
+            for name, fn in originals.items():
+                JOB_REGISTRY[name]["fn"] = fn
+
+        assert called == LAYER_JOB_NAMES["bronze"]
+
+    def test_silver_layer_without_bronze_raises_system_exit(self, monkeypatch, tmp_path):
+        """`--job silver` alone (no bronze sentinel yet today) fails its
+        dependency check without --force — the intended staged-testing
+        guard (bronze before silver before gold), not a bug."""
+        from src.runner import run_layer
+        from src.scheduler.dependency_guard import DependencyGuard
+
+        sentinel_dir = tmp_path / ".sentinels"
+        sentinel_dir.mkdir()
+        monkeypatch.setattr("src.runner.guard",
+                            DependencyGuard(sentinel_dir=sentinel_dir))
+
+        with pytest.raises(SystemExit):
+            run_layer("silver", force=False, run_date=date(2025, 1, 2))
+
+    def test_gold_layer_excludes_util_jobs(self):
+        """health_report (layer='util') must never appear in the gold list —
+        `--job gold` scope is literally the gold layer, nothing else."""
+        from src.scheduler.job_registry import LAYER_JOB_NAMES
+        assert "health_report" not in LAYER_JOB_NAMES["gold"]

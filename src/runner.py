@@ -45,6 +45,7 @@ from src.scheduler.job_registry import (
     PIPELINE_SEQUENCE,
     DAILY_SEQUENCE,
     WEEKLY_SEQUENCE,
+    LAYER_JOB_NAMES,
     _passes_schedule,
 )
 from src.utils.pipeline_logger import PipelineLogger
@@ -148,6 +149,37 @@ def run_all(force: bool = False, run_date: date | None = None) -> None:
         run_job(job_name, force=force, run_date=run_date)  # FIX R-F02
 
 
+def run_layer(layer: str, force: bool = False, run_date: date | None = None) -> None:
+    """
+    ADD GMI-JR-003: jalankan seluruh job pada satu layer (bronze/silver/gold)
+    secara sequential — untuk live testing per-layer tanpa `--job all`.
+
+    Job list diambil dari job_registry.LAYER_JOB_NAMES (derived dari
+    WEEKLY_SEQUENCE, lihat komentar di sana) — urutan sudah menghormati
+    dependency chain karena WEEKLY_SEQUENCE/DAILY_SEQUENCE sendiri disusun
+    dependency-aware.
+
+    Dependency check antar-layer TETAP berlaku tanpa --force: `--job silver`
+    akan sys.exit(1) jika bronze belum jalan hari ini, `--job gold` akan
+    sys.exit(1) jika silver belum jalan — ini disengaja (bukan bug), karena
+    memverifikasi urutan Bronze -> Silver -> Gold yang benar (GD §17.2 Layer
+    Independence Guarantee), persis seperti perilaku menjalankan job
+    individual apapun tanpa --force hari ini.
+    """
+    job_names = LAYER_JOB_NAMES.get(layer)
+    if not job_names:
+        pipeline_logger.error(
+            f"Layer '{layer}' tidak dikenali atau tidak punya job terdaftar."
+        )
+        sys.exit(1)
+
+    run_date = run_date or date.today()
+    pipeline_logger.banner(f"{layer.upper()} LAYER RUN — {run_date}")
+
+    for job_name in job_names:
+        run_job(job_name, force=force, run_date=run_date)
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
@@ -157,6 +189,9 @@ def parse_args() -> argparse.Namespace:
         epilog="""
 Examples:
   python runner.py --job bronze_ohlcv_daily
+  python runner.py --job bronze
+  python runner.py --job silver
+  python runner.py --job gold
   python runner.py --job all
   python runner.py --job silver_ohlcv --force
   python runner.py --job all --date 2026-05-13
@@ -168,7 +203,7 @@ Examples:
   python runner.py --reset-all
         """,
     )
-    p.add_argument("--job",       type=str,  help="Job name to run (or 'all')")
+    p.add_argument("--job",       type=str,  help="Job name, layer ('bronze'/'silver'/'gold'), or 'all'")
     p.add_argument("--list",      action="store_true", help="List all available jobs")
     p.add_argument("--status",    action="store_true", help="Show today's job completion status")
     p.add_argument("--force",     action="store_true", help="Skip dependency + schedule check")
@@ -214,6 +249,9 @@ def main() -> None:
 
     elif args.reset:
         guard.reset_job(args.reset, run_date)
+
+    elif args.job in LAYER_JOB_NAMES:
+        run_layer(args.job, force=args.force, run_date=run_date)
 
     elif args.job == "all":
         run_all(force=args.force, run_date=run_date)

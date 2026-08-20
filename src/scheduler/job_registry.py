@@ -695,3 +695,52 @@ WEEKLY_SEQUENCE: list[str] = [
 # PIPELINE_SEQUENCE dipertahankan sebagai alias DAILY_SEQUENCE untuk backward-compat
 # runner.py --job all menggunakan DAILY_SEQUENCE
 PIPELINE_SEQUENCE = DAILY_SEQUENCE
+
+
+# ── Layer-Scoped Job Names ────────────────────────────────────────────────────
+# ADD GMI-JR-003 — Ovi, this thread: `python src/runner.py --job bronze|silver|gold`
+# for live testing one layer at a time without a full `--job all` run.
+#
+# Derived from WEEKLY_SEQUENCE (the superset — weekly-only jobs + all of
+# DAILY_SEQUENCE, see above) rather than a separately hand-maintained list,
+# so these three names can never drift from DAILY_SEQUENCE/WEEKLY_SEQUENCE
+# the way a hand-copied list would (the same staleness class this project's
+# own preflight/coverage work exists to catch).
+#
+# This means the deliberate exclusions already baked into the two sequences
+# carry over automatically — NOT reproduced as a second list to maintain:
+#   - bronze_finnhub          — stub, raises NotImplementedError (FIX R-F04)
+#   - silver_fundamental      — depends on bronze_finnhub, orphaned (FIX NEW-2)
+#   - bronze_bls_cpi/nfp,
+#     bronze_bea_gdp          — registered but never sequenced; bronze_macro_weekly
+#                                already covers BLS/BEA via FRED mirror (see
+#                                _bronze_macro_weekly above) — manual-only jobs.
+#
+# health_report keeps layer="util", not "gold" — `--job gold` intentionally
+# excludes it, matching the literal per-layer scope this was asked for.
+
+def layer_sequence(layer: str) -> list[str]:
+    """
+    Return job names tagged `layer` in JOB_REGISTRY, ordered per their first
+    position in WEEKLY_SEQUENCE (the ordered superset of every sequenced job
+    — weekly-only jobs followed by DAILY_SEQUENCE), deduplicated. Jobs that
+    exist in JOB_REGISTRY but are absent from both DAILY_SEQUENCE and
+    WEEKLY_SEQUENCE (deliberately unsequenced — see module comment above)
+    are excluded, matching `--job all`'s own scope.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for job_name in WEEKLY_SEQUENCE:
+        if job_name in seen:
+            continue
+        seen.add(job_name)
+        if JOB_REGISTRY[job_name]["layer"] == layer:
+            ordered.append(job_name)
+    return ordered
+
+
+LAYER_JOB_NAMES: dict[str, list[str]] = {
+    "bronze": layer_sequence("bronze"),
+    "silver": layer_sequence("silver"),
+    "gold":   layer_sequence("gold"),
+}

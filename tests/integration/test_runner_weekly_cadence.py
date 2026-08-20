@@ -166,3 +166,58 @@ class TestGoldScreenerNotLocked:
         run_job("bronze_finnhub", force=True, run_date=run_date)
         run_job("silver_fundamental", force=True, run_date=run_date)
         assert sandboxed_guard.is_done("silver_fundamental", run_date)
+
+
+class TestLayerCommands:
+    """
+    GMI-JR-003 — `--job bronze/silver/gold`: staged per-layer live testing.
+    Uses the same stubbed_registry/sandboxed_guard pattern as the rest of
+    this file so job orchestration (not job content) is what's exercised.
+    """
+
+    def test_bronze_layer_completes_standalone(self, stubbed_registry, sandboxed_guard):
+        from src.runner import run_layer
+        from src.scheduler.job_registry import LAYER_JOB_NAMES
+
+        # Wednesday — satisfies bronze_eia's run_on_weekdays=[2] guard too,
+        # so this exercises the real schedule guard, not force=True.
+        run_date = date(2026, 8, 19)
+        assert run_date.weekday() == 2
+
+        run_layer("bronze", force=False, run_date=run_date)
+
+        for job_name in LAYER_JOB_NAMES["bronze"]:
+            assert sandboxed_guard.is_done(job_name, run_date), (
+                f"{job_name} did not complete during the bronze layer run"
+            )
+
+    def test_silver_without_bronze_fails_dependency_check(
+        self, stubbed_registry, sandboxed_guard
+    ):
+        """`--job silver` on a fresh sentinel dir (bronze never ran today)
+        must sys.exit(1) — not silently skip or partially complete."""
+        from src.runner import run_layer
+
+        with pytest.raises(SystemExit):
+            run_layer("silver", force=False, run_date=date(2026, 8, 20))
+
+    def test_bronze_then_silver_then_gold_completes_full_chain(
+        self, stubbed_registry, sandboxed_guard
+    ):
+        """The staged live-testing workflow this feature was built for:
+        run each layer separately, in order, no --force needed once the
+        upstream layer's sentinels exist for the same run_date."""
+        from src.runner import run_layer
+        from src.scheduler.job_registry import LAYER_JOB_NAMES
+
+        run_date = date(2026, 8, 19)   # Wednesday, see test above
+
+        run_layer("bronze", force=False, run_date=run_date)
+        run_layer("silver", force=False, run_date=run_date)
+        run_layer("gold",   force=False, run_date=run_date)
+
+        for layer in ("bronze", "silver", "gold"):
+            for job_name in LAYER_JOB_NAMES[layer]:
+                assert sandboxed_guard.is_done(job_name, run_date), (
+                    f"{job_name} ({layer}) did not complete in the staged chain"
+                )

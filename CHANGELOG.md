@@ -1,5 +1,57 @@
 # CHANGELOG — Data Platform
 
+## v1.16.0 — Layer-Scoped Runner Commands: `--job bronze/silver/gold` (Agustus 2026)
+
+Diarahkan langsung oleh Ovi ("add these commands to runner... during live
+testing"), bukan berdasarkan GMI Decision Document tertulis. Menambahkan
+tiga command aggregate baru ke `src/runner.py` yang menjalankan seluruh
+job pada satu layer (Bronze, Silver, atau Gold) secara sequential, tanpa
+perlu `--job all` — untuk mempermudah live testing satu layer pada satu
+waktu.
+
+Total: **18 test baru** (`tests/unit/test_runner.py` +7,
+`tests/integration/test_job_registry_integrity.py` +9,
+`tests/integration/test_runner_weekly_cadence.py` +3) | **1613 → 1631
+passed/skipped / 0 failed / 0 error** | coverage aggregate tetap ~87.7%
+(gate ≥80%, tidak turun). MINOR bump (1.15.3 → 1.16.0): kapabilitas baru,
+backward-compatible sepenuhnya — tidak ada perubahan interface contract,
+schema Silver/Gold, atau perilaku job existing manapun.
+
+### ADD GMI-JR-003 [src/scheduler/job_registry.py, src/runner.py] — `--job bronze/silver/gold`
+
+- **Apa:** `python src/runner.py --job bronze`, `--job silver`, dan
+  `--job gold` masing-masing menjalankan seluruh job pada layer tersebut
+  secara sequential, dalam urutan yang menghormati dependency chain.
+- **Sumber job list:** `job_registry.layer_sequence(layer)` /
+  `LAYER_JOB_NAMES` diturunkan dari `WEEKLY_SEQUENCE` (superset — weekly-
+  only jobs + seluruh `DAILY_SEQUENCE`) alih-alih list terpisah yang
+  di-maintain manual. Ini memastikan ketiga list tidak bisa drift dari
+  `DAILY_SEQUENCE`/`WEEKLY_SEQUENCE` seiring job ditambah/dihapus/re-tag.
+- **Exclusion otomatis:** `bronze_finnhub` (stub, FIX R-F04),
+  `silver_fundamental` (orphaned, FIX NEW-2), dan 3 job manual-only
+  (`bronze_bls_cpi`, `bronze_bls_nfp`, `bronze_bea_gdp` — sudah dicover
+  `bronze_macro_weekly` via FRED mirror) otomatis tidak ikut karena memang
+  tidak pernah masuk `DAILY_SEQUENCE`/`WEEKLY_SEQUENCE` — sama persis
+  dengan scope `--job all` hari ini, tanpa list pengecualian kedua yang
+  perlu di-maintain terpisah.
+- **`health_report` (layer='util') sengaja tidak ikut** `--job gold` —
+  scope command literal per-layer, bukan "gold + util cleanup".
+- **Dependency check antar-layer TETAP berlaku tanpa `--force`:**
+  `--job silver` akan `sys.exit(1)` jika bronze belum jalan hari ini;
+  `--job gold` akan `sys.exit(1)` jika silver belum jalan. Ini disengaja —
+  memverifikasi urutan Bronze → Silver → Gold yang benar (GD §17.2 Layer
+  Independence Guarantee) selama staged live testing, bukan bug. Workflow
+  yang dimaksud: `--job bronze` → `--job silver` → `--job gold`,
+  berurutan, pada `run_date` yang sama.
+- **Test baru:** integrity check `LAYER_JOB_NAMES` (semua job terdaftar
+  di `JOB_REGISTRY`, layer field cocok, tidak ada duplikat, exclusion
+  list terverifikasi, dedup branch di `layer_sequence()` diuji via
+  `WEEKLY_SEQUENCE` sintetis); unit test `run_layer()` (layer tidak
+  dikenal → `SystemExit(1)`, seluruh job bronze terpanggil sesuai urutan);
+  integration test staged workflow penuh (bronze → silver → gold, tanpa
+  `--force`, memakai `stubbed_registry`/`sandboxed_guard` fixture yang
+  sudah ada).
+
 ## v1.15.3 — Coverage Tranche Phase 1–2: 25 Modul ke 100%, Zero Bug Produksi Ditemukan (Agustus 2026)
 
 Diarahkan langsung oleh Ovi ("continue with the coverage tranche toward
