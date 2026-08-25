@@ -1002,21 +1002,6 @@ polars = ["polars (>=1)"]
 pyarrow = ["pyarrow (>=8.0.0)"]
 
 [[package]]
-name = "finnhub-python"
-version = "2.4.29"
-description = "Finnhub API"
-optional = false
-python-versions = "*"
-groups = ["main"]
-files = [
-    {file = "finnhub_python-2.4.29-py3-none-any.whl", hash = "sha256:5fbec39b40b9501d4165d94cb6fc7600017059d29719edbb01ae5c1ed13374c5"},
-    {file = "finnhub_python-2.4.29.tar.gz", hash = "sha256:0aaab7c60bd663cb97937fbdd95006e109aae81ed7982a3f97391cf70968533e"},
-]
-
-[package.dependencies]
-requests = ">=2.22.0"
-
-[[package]]
 name = "fonttools"
 version = "4.63.0"
 description = "Tools to manipulate font files"
@@ -4377,4 +4362,4 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.13"
-content-hash = "2957f8eae2ec6c1dc2afe916844a5931189be903a68a414f0dd7f0fc3f99c51b"
+content-hash = "8c766d080a4a759c19d7f7191bcd3365d1fcbcfa003f946de24e69e14630f264"
