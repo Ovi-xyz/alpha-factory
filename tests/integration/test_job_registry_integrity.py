@@ -89,48 +89,51 @@ class TestJobRegistryCompleteness:
                     )
         assert not violations, f"Dependency order violations: {violations}"
 
-    def test_silver_fundamental_not_required_in_daily_sequence(self):
+    def test_finnhub_jobs_do_not_exist_in_registry(self):
         """
-        FIX NEW-2 (audit_v1_7_3_uncovered_findings.docx §3, Opsi A): silver_fundamental
-        intentionally absent from PIPELINE_SEQUENCE (alias DAILY_SEQUENCE).
-
-        Superseded assumption: this test previously asserted the OPPOSITE
-        ("silver_fundamental must appear in PIPELINE_SEQUENCE") under the
-        expectation that bronze_finnhub would already be implemented
-        (refactor_plan_sentiment_bronze.docx). That assumption was the root
-        cause of NEW-2 — bronze_finnhub is a deliberate NotImplementedError
-        stub (FIX R-F04), so silver_fundamental can never complete, and
-        forcing it into the sequence would make --job all fail unconditionally.
-        Correct contract (Opsi A, short-term): silver_fundamental stays out of
-        the sequence until bronze_finnhub gets a real implementation (Opsi B,
-        tracked separately) — gold_screener no longer hard-depends on it
-        (see test_gold_screener_not_dependent_on_silver_fundamental below).
+        FIX ADR-043 (GMI_Decision_Document_v10.docx): Finnhub retired in full
+        — sentiment (403 plan-tier gate on every symbol) and earnings/quotes
+        (never-activated NotImplementedError stub, FIX R-F04) alike.
+        bronze_finnhub, bronze_finnhub_sentiment, silver_fundamental, and
+        silver_sentiment no longer exist in JOB_REGISTRY at all — this
+        supersedes FIX NEW-2's narrower contract, where bronze_finnhub and
+        silver_fundamental still existed but were deliberately excluded from
+        PIPELINE_SEQUENCE.
         """
-        assert "silver_fundamental" not in PIPELINE_SEQUENCE
+        retired = {
+            "bronze_finnhub", "bronze_finnhub_sentiment",
+            "silver_fundamental", "silver_sentiment",
+        }
+        present = retired & set(JOB_REGISTRY.keys())
+        assert not present, f"Retired Finnhub jobs still in JOB_REGISTRY: {present}"
 
-    def test_gold_screener_not_dependent_on_silver_fundamental(self):
+    def test_finnhub_jobs_absent_from_both_sequences(self):
+        """FIX ADR-043: the four retired jobs must not appear in
+        PIPELINE_SEQUENCE (alias DAILY_SEQUENCE) or WEEKLY_SEQUENCE."""
+        from src.scheduler.job_registry import WEEKLY_SEQUENCE
+        retired = {
+            "bronze_finnhub", "bronze_finnhub_sentiment",
+            "silver_fundamental", "silver_sentiment",
+        }
+        for seq_name, seq in (("PIPELINE_SEQUENCE", PIPELINE_SEQUENCE),
+                               ("WEEKLY_SEQUENCE", WEEKLY_SEQUENCE)):
+            present = retired & set(seq)
+            assert not present, f"Retired Finnhub jobs still in {seq_name}: {present}"
+
+    def test_gold_screener_not_dependent_on_finnhub_jobs(self):
         """
-        FIX NEW-2 [BLOCKING]: gold_screener.depends_on must NOT include
-        silver_fundamental — GD §5.2.4 already designs earnings_calendar as a
-        LEFT JOIN ("data boleh null"); making it a hard dependency permanently
-        locks gold_screener since silver_fundamental's own dependency
-        (bronze_finnhub) is an intentional stub that never completes.
+        FIX ADR-043: gold_screener.depends_on must not reference any retired
+        Finnhub-derived job. Supersedes FIX NEW-2 [BLOCKING], which guarded
+        only against silver_fundamental — GD §5.2.4 already designs
+        earnings_calendar/sentiment as informational DATA fields (LEFT
+        JOIN, "data boleh null"); a hard dependency on either would
+        permanently lock gold_screener since neither upstream job can ever
+        complete (sentiment: 403 on every symbol; earnings/quotes: never
+        implemented).
         """
-        assert "silver_fundamental" not in JOB_REGISTRY["gold_screener"]["depends_on"]
-
-    def test_silver_fundamental_before_screener(self):
-        """If silver_fundamental is ever added back to the sequence (Opsi B),
-        it must precede gold_screener. Currently a no-op since silver_fundamental
-        is intentionally absent (FIX NEW-2) — kept for forward-compatibility."""
-        seq = PIPELINE_SEQUENCE
-        if "silver_fundamental" in seq and "gold_screener" in seq:
-            assert seq.index("silver_fundamental") < seq.index("gold_screener")
-
-    def test_active_symbols_before_sentiment(self):
-        """silver_active_symbols must precede silver_sentiment."""
-        seq = PIPELINE_SEQUENCE
-        if "silver_active_symbols" in seq and "silver_sentiment" in seq:
-            assert seq.index("silver_active_symbols") < seq.index("silver_sentiment")
+        retired = {"silver_fundamental", "silver_sentiment"}
+        deps = set(JOB_REGISTRY["gold_screener"]["depends_on"])
+        assert not (retired & deps), f"gold_screener still depends on: {retired & deps}"
 
     def test_regime_before_sector_before_screener(self):
         """gold_regime → gold_sector → gold_screener ordering."""
@@ -348,9 +351,17 @@ class TestGMIJR002ContextOHLCVWiring:
 
     def test_context_ohlcv_jobs_do_not_disturb_existing_daily_sequence_length_floor(self):
         """Anti-pattern guard (CI/CD Ops Guide §Anti-Pattern Test table):
-        assert a floor, not an exact count — sequence grows over cycles."""
+        assert a floor, not an exact count — sequence grows over cycles.
+
+        Floor lowered 15 -> 13 (FIX ADR-043, GMI_Decision_Document_v10.docx):
+        DAILY_SEQUENCE dropped from 16 to 14 entries when
+        bronze_finnhub_sentiment and silver_sentiment were retired in full
+        (Finnhub 403 plan-tier gate). This is a deliberate, documented
+        reduction, not a regression the floor should mask — 13 is the new
+        correct floor (14 actual, with 1 unit of headroom matching this
+        test's own original margin above the then-16-job actual count)."""
         from src.scheduler.job_registry import DAILY_SEQUENCE
-        assert len(DAILY_SEQUENCE) >= 15
+        assert len(DAILY_SEQUENCE) >= 13
 
 
 class TestGMIJR003ContextAnchorsWiring:
@@ -414,8 +425,12 @@ class TestGMIJR003ContextAnchorsWiring:
         assert hasattr(ContextAnchorsResolver, "load_full")
 
     def test_silver_context_anchors_job_does_not_disturb_daily_sequence_length_floor(self):
+        """Floor lowered 15 -> 13 (FIX ADR-043) — see the sibling test in
+        TestGMIJR002ContextOHLCVWiring above for the full rationale;
+        DAILY_SEQUENCE's actual length dropped from 16 to 14 when
+        bronze_finnhub_sentiment/silver_sentiment were retired in full."""
         from src.scheduler.job_registry import DAILY_SEQUENCE
-        assert len(DAILY_SEQUENCE) >= 15
+        assert len(DAILY_SEQUENCE) >= 13
 
 
 class TestLayerJobNames:
@@ -451,14 +466,16 @@ class TestLayerJobNames:
             assert len(names) == len(set(names)), f"{layer}: duplicate job names {names}"
 
     def test_deliberately_unsequenced_jobs_are_excluded(self):
-        """bronze_finnhub (stub, FIX R-F04), silver_fundamental (orphaned,
-        FIX NEW-2), and the 3 manual-only BLS/BEA jobs are absent from both
-        DAILY_SEQUENCE and WEEKLY_SEQUENCE by design — they must not leak
-        into any layer list."""
+        """The 3 manual-only BLS/BEA jobs are absent from both DAILY_SEQUENCE
+        and WEEKLY_SEQUENCE by design — they must not leak into any layer
+        list. (bronze_finnhub and silver_fundamental were previously in this
+        same "registered but unsequenced" category; per ADR-043 they no
+        longer exist in JOB_REGISTRY at all — see
+        test_finnhub_jobs_do_not_exist_in_registry above — so they are not
+        checked here.)"""
         from src.scheduler.job_registry import LAYER_JOB_NAMES
         all_listed = set().union(*LAYER_JOB_NAMES.values())
         deliberately_excluded = {
-            "bronze_finnhub", "silver_fundamental",
             "bronze_bls_cpi", "bronze_bls_nfp", "bronze_bea_gdp",
         }
         leaked = all_listed & deliberately_excluded

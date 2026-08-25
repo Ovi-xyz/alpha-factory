@@ -134,38 +134,42 @@ class TestJobAllAcrossWeek:
 
 
 class TestGoldScreenerNotLocked:
-    """GATE-N2: gold_screener must not be permanently locked by silver_fundamental."""
+    """GATE-N2: gold_screener must not be permanently locked by an orphaned
+    Finnhub-derived dependency. Originally written against silver_fundamental
+    (FIX NEW-2); updated per ADR-043 (GMI_Decision_Document_v10.docx), which
+    retired Finnhub in full — silver_sentiment no longer exists either."""
 
-    def test_gold_screener_completes_without_silver_fundamental(
+    def test_gold_screener_completes_with_only_its_current_dependencies(
         self, stubbed_registry, sandboxed_guard
     ):
         from src.runner import run_job
 
         run_date = date(2026, 6, 23)
 
-        # Satisfy gold_screener's actual (post-fix) dependencies directly,
-        # WITHOUT ever running silver_fundamental or bronze_finnhub.
-        for dep in ("gold_mtf", "gold_regime", "gold_sector", "silver_sentiment"):
+        # Satisfy gold_screener's actual (post-ADR-043) dependencies directly.
+        # Neither silver_fundamental nor silver_sentiment exist any more —
+        # gold_screener does not wait on either.
+        for dep in ("gold_mtf", "gold_regime", "gold_sector"):
             run_job(dep, force=True, run_date=run_date)
-
-        # silver_fundamental's sentinel is deliberately absent here.
-        assert not sandboxed_guard.is_done("silver_fundamental", run_date)
 
         run_job("gold_screener", force=False, run_date=run_date)
         assert sandboxed_guard.is_done("gold_screener", run_date)
 
-    def test_silver_fundamental_remains_runnable_standalone(
+    def test_bronze_finnhub_and_silver_fundamental_no_longer_runnable(
         self, stubbed_registry, sandboxed_guard
     ):
-        """silver_fundamental is still a valid job — just no longer required
-        by gold_screener. Confirms Opsi B (future) remains possible without
-        further registry changes once bronze_finnhub is implemented."""
+        """FIX ADR-043: bronze_finnhub and silver_fundamental were retired in
+        full, not merely deprioritized — attempting to run either by name
+        must fail the same clean way as any other unknown job name
+        (SystemExit(1) via runner.py's own JOB_REGISTRY membership check),
+        not a KeyError or a silent no-op."""
         from src.runner import run_job
 
         run_date = date(2026, 6, 23)
-        run_job("bronze_finnhub", force=True, run_date=run_date)
-        run_job("silver_fundamental", force=True, run_date=run_date)
-        assert sandboxed_guard.is_done("silver_fundamental", run_date)
+        for retired_job in ("bronze_finnhub", "silver_fundamental", "silver_sentiment"):
+            with pytest.raises(SystemExit):
+                run_job(retired_job, force=True, run_date=run_date)
+            assert not sandboxed_guard.is_done(retired_job, run_date)
 
 
 class TestLayerCommands:

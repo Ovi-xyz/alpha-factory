@@ -348,76 +348,15 @@ class TestBRZSQL001BronzeIngesters:
 # SIL-AIO-004 + SIL-SQL-003 [P1 HIGH] — fundamental_processor.py + sentiment
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestSILAIO004FundamentalProcessor:
-    """Non-atomic writes dan f-string SQL di fundamental_processor.py."""
-
-    TARGET = SRC / "silver" / "fundamental_processor.py"
-
-    def test_syntax_valid(self):
-        ast.parse(self.TARGET.read_text())
-
-    def test_no_fstring_sql(self):
-        hits = _fstring_sql_violations(self.TARGET)
-        assert not hits, (
-            f"SIL-SQL-003 REGRESSION: f-string SQL di fundamental_processor.py:\n"
-            + "\n".join(f"  :{ln} → {s}" for ln, s in hits)
-        )
-
-    def test_no_direct_write_parquet(self):
-        hits = _direct_write_parquet(self.TARGET)
-        assert not hits, (
-            f"SIL-AIO-004 REGRESSION: direct write_parquet:\n"
-            + "\n".join(f"  :{ln} → {s}" for ln, s in hits)
-        )
-
-    def test_atomic_write_parquet_imported(self):
-        assert "atomic_write_parquet" in self.TARGET.read_text()
-
-    def test_no_eager_read_parquet(self):
-        src = self.TARGET.read_text()
-        eager = [
-            (i+1, l) for i, l in enumerate(src.splitlines())
-            if "pl.read_parquet(" in l and not l.lstrip().startswith("#")
-        ]
-        assert not eager, (
-            f"SIL-RPQ-001: eager pl.read_parquet() di fundamental_processor.py:\n"
-            + "\n".join(f"  :{ln} → {l.strip()}" for ln, l in eager)
-        )
-
-    def test_earnings_sql_parameterized(self):
-        src = self.TARGET.read_text()
-        # process_earnings harus menggunakan $glob
-        assert '"$glob"' in src or "$glob" in src, (
-            "SIL-SQL-003: process_earnings harus menggunakan $glob parameter"
-        )
-
-    def test_quotes_sql_parameterized(self):
-        src = self.TARGET.read_text()
-        assert "$glob" in src, (
-            "SIL-SQL-003: process_quotes harus menggunakan $glob parameter"
-        )
-
-
-class TestSILAIO004SentimentProcessor:
-    """Non-atomic write di sentiment_processor.py."""
-
-    TARGET = SRC / "silver" / "sentiment_processor.py"
-
-    def test_syntax_valid(self):
-        ast.parse(self.TARGET.read_text())
-
-    def test_no_direct_write_parquet(self):
-        hits = _direct_write_parquet(self.TARGET)
-        assert not hits, (
-            f"SIL-AIO-004 REGRESSION: sentiment_processor direct write_parquet:\n"
-            + "\n".join(f"  :{ln} → {s}" for ln, s in hits)
-        )
-
-    def test_atomic_write_parquet_used(self):
-        src = self.TARGET.read_text()
-        assert "atomic_write_parquet" in src, (
-            "SIL-AIO-004: atomic_write_parquet belum digunakan di sentiment_processor.py"
-        )
+#
+# FIX ADR-043 (GMI_Decision_Document_v10.docx, 22 Aug 2026): TestSILAIO004-
+# FundamentalProcessor and TestSILAIO004SentimentProcessor removed --
+# src/silver/fundamental_processor.py and src/silver/sentiment_processor.py
+# were both deleted in full (Finnhub retired: sentiment 403 plan-tier gate
+# on every symbol; earnings/quotes never left its NotImplementedError
+# stub). These regression guards protected atomic-write and $glob-
+# parameterization discipline in code that no longer exists -- there is
+# nothing left to regress. See KNOWN_RISKS.md RISK-4 for full detail.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -610,8 +549,11 @@ class TestGlobalAuditClearance:
         "silver/ohlcv_processor.py",
         "silver/macro_processor.py",
         "silver/active_symbols.py",
-        "silver/fundamental_processor.py",
-        "silver/sentiment_processor.py",
+        # fundamental_processor.py, sentiment_processor.py REMOVED — FIX
+        # ADR-043 (GMI_Decision_Document_v10.docx): both deleted in full,
+        # Finnhub retired. Previously skipped gracefully here via the
+        # exists() guard below; removed outright rather than left as a
+        # dangling reference to a file that no longer exists.
         # Bronze
         "bronze/base_ingester.py",
         "bronze/forex_cache.py",
@@ -654,8 +596,7 @@ class TestGlobalAuditClearance:
         "silver/quality_validator.py",
         "silver/ohlcv_processor.py",
         "silver/macro_processor.py",
-        "silver/fundamental_processor.py",
-        "silver/sentiment_processor.py",
+        # fundamental_processor.py, sentiment_processor.py REMOVED — FIX ADR-043
         "bronze/base_ingester.py",
         "bronze/forex_cache.py",
         "bronze/schema_validator.py",

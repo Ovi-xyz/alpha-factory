@@ -3,12 +3,12 @@ rate_limiter.py — GD §11 (API Rate Limiting & Fallback Strategy)
 Rate limiting utilities for all 11 data sources.
 
 Two complementary mechanisms:
-    RateLimiter:        Token-bucket based req/min throttle (FRED, Finnhub, etc.)
+    RateLimiter:        Token-bucket based req/min throttle (FRED, Polygon, etc.)
     DailyBudgetLimiter: Daily quota enforcement (AlphaVantage: 25 req/day)
 
 Usage:
     # Per-request throttle (blocks until slot available)
-    limiter = RateLimiter(calls_per_minute=50)  # Finnhub: 60 rpm → 50 safe
+    limiter = RateLimiter(calls_per_minute=50)  # Polygon: 5 rpm free tier
     limiter.wait()                               # call before each API request
     response = requests.get(url)
 
@@ -49,7 +49,7 @@ class RateLimiter:
     ) -> None:
         """
         Args:
-            calls_per_minute: API rate limit (e.g. 60 for Finnhub)
+            calls_per_minute: API rate limit (e.g. 100 for FRED)
             safety_margin:    Use only this fraction of limit (e.g. 0.85 = 85%)
                               Prevents hitting the exact limit boundary.
         """
@@ -151,7 +151,12 @@ class SourceLimiters:
     fred      = RateLimiter(calls_per_minute=120, safety_margin=0.80)  # → 96/min
     bls       = RateLimiter(calls_per_minute=500, safety_margin=0.80)  # per-day actually, use gently
     bea       = RateLimiter(calls_per_minute=100, safety_margin=0.85)  # → 85/min
-    finnhub   = RateLimiter(calls_per_minute=60,  safety_margin=0.83)  # → 50/min
+    # finnhub REMOVED — FIX ADR-043 (GMI_Decision_Document_v10.docx): Finnhub
+    # retired in full. This limiter's only conceivable consumers
+    # (finnhub_ingester.py, finnhub_sentiment_ingester.py) were deleted in
+    # the same fix; zero other src/ module referenced SourceLimiters.finnhub
+    # (confirmed via grep sweep, unlike .polygon/.alphavantage/.yfinance
+    # below, each of which has a live adapter consumer).
     polygon   = RateLimiter(calls_per_minute=5,   safety_margin=0.80)  # → 4/min
     yfinance  = RateLimiter(calls_per_minute=100, safety_margin=0.90)  # ~2000/hr ÷ 60
 

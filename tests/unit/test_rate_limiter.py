@@ -88,7 +88,6 @@ class TestSourceLimiters:
     def test_all_limiters_defined(self):
         """SourceLimiters class has all expected attributes."""
         assert hasattr(SourceLimiters, "fred")
-        assert hasattr(SourceLimiters, "finnhub")
         assert hasattr(SourceLimiters, "polygon")
         assert hasattr(SourceLimiters, "yfinance")
         assert hasattr(SourceLimiters, "alphavantage")
@@ -103,6 +102,11 @@ class TestSourceLimiters:
         """FRED uses RateLimiter (120 req/min)."""
         assert isinstance(SourceLimiters.fred, RateLimiter)
 
-    def test_finnhub_limit_under_60(self):
-        """Finnhub effective limit must be under 60/min."""
-        assert SourceLimiters.finnhub._limit < 60
+    def test_finnhub_limiter_removed(self):
+        """FIX ADR-043 (GMI_Decision_Document_v10.docx): Finnhub retired in
+        full — SourceLimiters.finnhub must not exist. Its only conceivable
+        consumers (finnhub_ingester.py, finnhub_sentiment_ingester.py) were
+        deleted in the same fix, and no other src/ module ever referenced
+        it (unlike .polygon/.alphavantage/.yfinance, each of which has a
+        live adapter consumer)."""
+        assert not hasattr(SourceLimiters, "finnhub")

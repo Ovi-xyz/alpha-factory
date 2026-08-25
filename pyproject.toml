@@ -1,6 +1,37 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.16.0"
+version = "1.17.0"
+# FIX ADR-043 + ADR-044 (GMI_Decision_Document_v10.docx, 22 Aug 2026): Finnhub
+# retired in full. Sentiment returned HTTP 403 on every symbol in a live
+# `--job bronze` run (21 Aug 2026) -- a plan-tier gate, not a defect.
+# Earnings/quotes never left its NotImplementedError stub (FIX R-F04,
+# KNOWN_RISKS.md RISK-4) -- schema-validated, tested, never wired to
+# anything live. Removed from active codebase: 2 Bronze ingesters, 2
+# Silver processors, 3 schema YAMLs, 1 preflight script, 4 dedicated
+# unit test files -- moved byte-identical to
+# archive/finnhub_retirement_2026_08/ (not git-rm'd outright as
+# originally planned -- pivoted mid-implementation once a file-deletion
+# tooling constraint surfaced; see archive/finnhub_retirement_2026_08/README.md
+# and dev-log Section 8) -- plus the
+# SourceLimiters.finnhub rate limiter (zero remaining consumers -- a direct
+# mechanical consequence of the same retirement, not a separate decision).
+# job_registry.py: 4 JOB_REGISTRY entries + 4 wrapper functions removed;
+# DAILY_SEQUENCE 16 -> 14; gold_screener.depends_on no longer references
+# silver_sentiment (supersedes FIX NEW-2's narrower silver_fundamental-only
+# guard). screener.py: _enrich_earnings()/_enrich_sentiment() and their call
+# sites removed (ADR-044) -- watchlist output schema unchanged (GD Section
+# 0.4/17.6 Interface Contract intact): days_to_earnings, next_earnings_date,
+# near_earnings_flag, sentiment_score, buzz_score remain, permanently NULL
+# via the main query's own placeholders, not via either enrichment step.
+# pipeline_scheduler.py (GD Section 14.5, not yet activated): bronze_finnhub/
+# silver_sentiment removed from the documented cron schedule and the actual
+# daily_schedule list -- both would KeyError against JOB_REGISTRY today.
+# MINOR bump (not PATCH): structural change to JOB_REGISTRY and the Bronze/
+# Silver dependency graph -- comparable in scope to GMI-JR-003's own MINOR
+# bump for a no-schema-change capability addition; this is the inverse
+# (capability removal), same magnitude. No Interface Contract or Silver/Gold
+# schema change. 1631 -> see tests/COUNT_BASELINE.txt for the post-removal
+# collected count. See CHANGELOG.md v1.17.0 for full detail.
 # ADD GMI-JR-003 (Ovi, 20 Aug 2026): `python src/runner.py --job bronze|
 # silver|gold` -- run every job on one layer, sequentially, without a full
 # `--job all` run. Requested directly for live testing (not a GMI Decision
@@ -142,7 +173,13 @@ pandas = ">=2.0"
 # maintained continuation of the same abandoned 0.3.x lineage with genuine
 # stable releases (up to 0.6.52) — Python floor held at >=3.11, not bumped.
 pandas-ta-classic = ">=0.3.14"
-finnhub-python = "*"
+# REMOVED (ADR-043, GMI_Decision_Document_v10.docx, 22 Aug 2026): finnhub-python.
+# Finnhub retired in full — sentiment returns HTTP 403 on every symbol (plan-tier
+# gate, live-test discovery 21 Aug 2026) and earnings/quotes never left its
+# NotImplementedError stub (FIX R-F04, KNOWN_RISKS.md RISK-4). Both Bronze
+# ingesters, both Silver processors, all 3 schema files, and the preflight
+# script were deleted in the same fix. No src/ module imports finnhub-python
+# any longer (verified via grep sweep before this line was removed).
 polygon-api-client = "*"
 fredapi = "*"
 loguru = "*"

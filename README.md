@@ -87,7 +87,7 @@ poetry install --with dev
 poetry env activate   # prints the activation command — eval/source it
 
 cp .env.example .env
-# Edit .env: FRED_API_KEY, FINNHUB_API_KEY, POLYGON_API_KEY, TV_USERNAME, etc.
+# Edit .env: FRED_API_KEY, POLYGON_API_KEY, TV_USERNAME, etc.
 ```
 
 > **Dependency note (v1.10.0):** `pandas-ta` was migrated to
@@ -137,7 +137,7 @@ python scripts/validate_instruments.py              # CI Gate G-3 (instrument un
 | Layer | Allowed | Forbidden |
 |-------|---------|-----------|
 | **Bronze** | Fetch external APIs, write Parquet, validate schema, quarantine invalid data | Read Silver/Gold; business transformation (joins, derived columns) |
-| **Silver** | Read Bronze via `scan_parquet()`; one sanctioned supplement API call (Finnhub sentiment) | Fetch external APIs for primary enrichment; read Gold |
+| **Silver** | Read Bronze via `scan_parquet()` | Fetch external APIs for primary enrichment; read Gold |
 | **Gold** | Read Silver via DuckDB views; write Gold | Read Bronze directly; call external APIs; modify Silver; make trading decisions |
 
 Enforced by CI Gate G-2 (no f-string SQL — DuckDB `$name` parameterized
@@ -185,7 +185,7 @@ a future `compute_broad_dollar()` and CPO currency normalization
 respectively (both `contributes_to: []`, zero direct domain-score weight,
 CrossAssetEngine computation itself not yet built).
 
-### Data Sources (12)
+### Data Sources (11)
 
 | # | Source | Domain | Rate Limit | Role |
 |---|--------|--------|-----------|------|
@@ -196,25 +196,28 @@ CrossAssetEngine computation itself not yet built).
 | 5 | **BIS** | Central bank rates | Unlimited | 12 non-FED central banks, `WS_CBPOL_D` |
 | 6 | tvdatafeed | OHLCV | Session-based | IDX primary |
 | 7 | yfinance | OHLCV | ~2k/hr | US stocks + FX + Commodity + Layer 2 context |
-| 8 | Finnhub | Market + Sentiment | 60 req/min | Real-time, earnings, sentiment (`bronze_finnhub` gated — not yet live) |
-| 9 | AlphaVantage | OHLCV | **25 req/DAY** | FX supplemental only |
-| 10 | Polygon.io | OHLCV | 5 req/min | US stocks fallback |
-| 11 | EIA | Energy | Unlimited | Oil/gas inventories (Wednesday only) |
-| 12 | US Treasury | Bond | Unlimited | Yield curve 1M–30Y |
+| 8 | AlphaVantage | OHLCV | **25 req/DAY** | FX supplemental only |
+| 9 | Polygon.io | OHLCV | 5 req/min | US stocks fallback |
+| 10 | EIA | Energy | Unlimited | Oil/gas inventories (Wednesday only) |
+| 11 | US Treasury | Bond | Unlimited | Yield curve 1M–30Y |
+
+> Finnhub retired in full (ADR-043, `GMI_Decision_Document_v10.docx`, 22
+> Aug 2026) — sentiment returned HTTP 403 on every symbol (plan-tier
+> gate); earnings/quotes never left its `NotImplementedError` stub. See
+> `KNOWN_RISKS.md` RISK-4.
 
 ---
 
-## Pipeline Jobs (27 registered, `JOB_REGISTRY`)
+## Pipeline Jobs (23 registered, `JOB_REGISTRY`)
 
-### DAILY_SEQUENCE (16 jobs — `python src/runner.py --job all`)
+### DAILY_SEQUENCE (14 jobs — `python src/runner.py --job all`)
 
 ```
 bronze_ohlcv_daily          bronze_ohlcv_context_daily     bronze_treasury
-bronze_finnhub_sentiment    silver_ohlcv                   silver_ohlcv_context
-silver_validate             silver_active_symbols          silver_context_anchors
-silver_sentiment            gold_signals                   gold_mtf
-gold_regime                 gold_sector                    gold_screener
-health_report
+silver_ohlcv                silver_ohlcv_context           silver_validate
+silver_active_symbols       silver_context_anchors         gold_signals
+gold_mtf                    gold_regime                    gold_sector
+gold_screener                health_report
 ```
 
 ### WEEKLY_SEQUENCE (6 weekly-only jobs, prepended to DAILY_SEQUENCE — run Sunday)
@@ -321,7 +324,7 @@ alpha-factory/
 │   ├── bis_cb_rates.yaml           # 12 REF_AREA map + structural break registry
 │   ├── fred_series.yaml           # 60 FRED series registry
 │   ├── pipeline.yaml
-│   └── schemas/                    # Bronze schema registry (12 YAML files)
+│   └── schemas/                    # Bronze schema registry (10 YAML files)
 │
 ├── scripts/
 │   ├── validate_instruments.py     # Gate G-3 + domain-score weight-sum guard
@@ -334,30 +337,28 @@ alpha-factory/
 │   │   └── README.md
 │   └── preflight/                  # NEW v1.10.0 — authored, network-execution deferred
 │       ├── check_yfinance_tickers.py
-│       ├── check_bis_cbpol_d.py
-│       └── check_finnhub_shape.py
+│       └── check_bis_cbpol_d.py
 │
 ├── src/
 │   ├── config/
 │   │   ├── instrument_loader.py    # Dual-layer InstrumentLoader (Layer 1 + Layer 2 API)
 │   │   └── instruments_raw.py
 │   │
-│   ├── bronze/                     # 18 ingesters/adapters — append-only, immutable
+│   ├── bronze/                     # 16 ingesters/adapters — append-only, immutable
 │   │   ├── base_ingester.py · schema_validator.py · source_adapter.py
 │   │   ├── market_ingester.py      # Layer 1 + Layer 2 context OHLCV
 │   │   ├── bis_rates_ingester.py   # 12 non-FED central banks
-│   │   ├── finnhub_ingester.py · finnhub_sentiment_ingester.py
 │   │   ├── fred_ingester.py · bls_ingester.py · bea_ingester.py · imf_ingester.py
 │   │   ├── eia_ingester.py · treasury_ingester.py
 │   │   ├── forex_cache.py · inc_fetch.py
 │   │   └── tvdatafeed_session.py · tvdatafeed_adapter.py · yfinance_adapter.py · polygon_adapter.py · alphavantage_adapter.py
 │   │
-│   ├── silver/                     # 10 processors — clean, enrich, UTC-normalize
+│   ├── silver/                     # 8 processors — clean, enrich, UTC-normalize
 │   │   ├── ohlcv_processor.py · ohlcv_aggregator.py (4H synthesis)
 │   │   ├── active_symbols.py       # Layer 1 ONLY (post-GMI extraction)
 │   │   ├── context_anchors.py      # Layer 2 ONLY — separated from active_symbols.py
 │   │   ├── global_rates_processor.py  # BIS rates, dedicated PIT table
-│   │   ├── macro_processor.py · fundamental_processor.py · sentiment_processor.py
+│   │   ├── macro_processor.py
 │   │   └── quality_validator.py    # Layer 1 CRITICAL + Layer 2 WARNING checks
 │   │
 │   ├── gold/
@@ -463,7 +464,6 @@ EIA_API_KEY=
 # BIS: no API key required
 
 # Market data
-FINNHUB_API_KEY=
 ALPHAVANTAGE_API_KEY=      # 25 req/day free tier
 POLYGON_API_KEY=
 TV_USERNAME=                # TradingView account (tvdatafeed)

@@ -81,53 +81,6 @@ class TestCheckBisCbpolD:
             assert ref_area in key
 
 
-class TestCheckFinnhubShape:
-
-    def test_check_quote_detects_missing_fields(self):
-        import check_finnhub_shape as mod
-        client = MagicMock()
-        client.quote.return_value = {"c": 1.0, "d": 0.1}  # missing most fields
-        ok, msg = mod._check_quote(client, "AAPL")
-        assert ok is False
-        assert "missing expected fields" in msg
-
-    def test_check_quote_passes_with_all_fields(self):
-        import check_finnhub_shape as mod
-        client = MagicMock()
-        client.quote.return_value = {
-            "c": 152.3, "d": 1.2, "dp": 0.8, "h": 155.0, "l": 149.0,
-            "o": 150.0, "pc": 151.1, "t": 1751500000,
-        }
-        ok, msg = mod._check_quote(client, "AAPL")
-        assert ok is True
-
-    def test_check_quote_flags_all_zero_response(self):
-        """Documented Finnhub quirk (Checkpoint v3 §4.6): invalid/delisted
-        symbols return all-zero numeric fields, not a missing-key error."""
-        import check_finnhub_shape as mod
-        client = MagicMock()
-        client.quote.return_value = {
-            "c": 0, "d": 0, "dp": 0, "h": 0, "l": 0, "o": 0, "pc": 0, "t": 0,
-        }
-        ok, msg = mod._check_quote(client, "INVALIDTICKER")
-        assert ok is True  # shape is still correct, just flagged
-        assert "all-zero" in msg
-
-    def test_check_earnings_no_upcoming_is_not_a_failure(self):
-        import check_finnhub_shape as mod
-        client = MagicMock()
-        client.earnings_calendar.return_value = {"earningsCalendar": []}
-        ok, msg = mod._check_earnings(client, "AAPL")
-        assert ok is True
-        assert "no upcoming earnings" in msg
-
-    def test_main_returns_1_without_api_key(self, monkeypatch):
-        import check_finnhub_shape as mod
-        monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
-        monkeypatch.setattr(sys, "argv", ["check_finnhub_shape.py"])
-        assert mod.main() == 1
-
-
 class TestCheckYfinanceTickers:
 
     def test_gate_2_unconfirmed_symbols_matches_decision_docs(self):

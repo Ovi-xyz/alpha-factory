@@ -6,8 +6,14 @@ terminal deliverable... highest consequence of the 7 if buggy"). Prior to
 this file, screener.py had only tests/unit/test_screener_gld005.py, which
 covers _check_data_freshness() exclusively — build_watchlist() (the actual
 multi-source join), _simplified_watchlist(), _deduplicate_by_cluster(),
-_enrich_earnings(), _enrich_sentiment(), run(), and load_watchlist() had
-zero coverage.
+run(), and load_watchlist() had zero coverage.
+
+FIX ADR-043/ADR-044 (GMI_Decision_Document_v10.docx): TestEnrichEarnings and
+TestEnrichSentiment (direct-unit tests for _enrich_earnings()/_enrich_sentiment())
+were removed from this file along with the functions themselves — Finnhub was
+retired in full. TestRunIntegration gained a schema-stability assertion in
+their place, confirming the watchlist's 5 Finnhub-derived output columns
+remain present and permanently null via the main query's own placeholders.
 
 Two genuine, previously-undetected bugs were found empirically while
 building these fixtures (both fixed in this same thread — see CHANGELOG):
@@ -43,8 +49,6 @@ import src.gold.screener as scr_mod
 from src.gold.screener import (
     _check_data_freshness,
     _deduplicate_by_cluster,
-    _enrich_earnings,
-    _enrich_sentiment,
     _simplified_watchlist,
     build_watchlist,
     load_watchlist,
@@ -101,7 +105,6 @@ def _patch_all_optional_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(scr_mod, "GOLD_SECTOR_PATH", tmp_path / "sector.parquet")
     monkeypatch.setattr(scr_mod, "GOLD_CORR_PATH", tmp_path / "corr.parquet")
     monkeypatch.setattr(scr_mod, "SILVER_ACTIVE_SYMBOLS_ROOT", tmp_path / "active_symbols")
-    monkeypatch.setattr(scr_mod, "SILVER_SENTIMENT_ROOT", tmp_path / "sentiment")
     monkeypatch.setattr(scr_mod, "GOLD_SCREENER_PATH", tmp_path / "screener")
     return tmp_path / "mtf"
 
@@ -417,103 +420,12 @@ class TestSimplifiedWatchlistDirect:
 
 # ── Earnings enrichment ──────────────────────────────────────────────────────
 
-class TestEnrichEarnings:
-
-    def test_populates_days_to_earnings_and_near_flag(self):
-        df = pl.DataFrame({"symbol": ["AAPL", "MSFT"], "mtf_score": [7, 6]})
-        upcoming = pl.DataFrame({
-            "symbol": ["AAPL"], "earnings_date": ["2026-06-03"], "days_to_earnings": [2],
-        })
-        with patch(
-            "src.silver.fundamental_processor.FundamentalProcessor.get_upcoming_earnings",
-            return_value=upcoming,
-        ):
-            result = _enrich_earnings(df, date(2026, 6, 1))
-        row = result.filter(pl.col("symbol") == "AAPL").row(0, named=True)
-        assert row["days_to_earnings"] == 2
-        assert row["near_earnings_flag"] is True
-        msft = result.filter(pl.col("symbol") == "MSFT").row(0, named=True)
-        assert msft["days_to_earnings"] is None
-        assert msft["near_earnings_flag"] is False
-
-    def test_beyond_near_threshold_flag_false(self):
-        df = pl.DataFrame({"symbol": ["AAPL"], "mtf_score": [7]})
-        upcoming = pl.DataFrame({
-            "symbol": ["AAPL"], "earnings_date": ["2026-07-01"], "days_to_earnings": [30],
-        })
-        with patch(
-            "src.silver.fundamental_processor.FundamentalProcessor.get_upcoming_earnings",
-            return_value=upcoming,
-        ):
-            result = _enrich_earnings(df, date(2026, 6, 1))
-        row = result.row(0, named=True)
-        assert row["days_to_earnings"] == 30
-        assert row["near_earnings_flag"] is False
-
-    def test_exception_leaves_df_unchanged(self):
-        df = pl.DataFrame({"symbol": ["AAPL"], "mtf_score": [7]})
-        with patch(
-            "src.silver.fundamental_processor.FundamentalProcessor.get_upcoming_earnings",
-            side_effect=RuntimeError("boom"),
-        ):
-            result = _enrich_earnings(df, date(2026, 6, 1))
-        assert result["symbol"].to_list() == ["AAPL"]
-        assert "days_to_earnings" not in result.columns
 
 
-# ── Sentiment enrichment ──────────────────────────────────────────────────────
 
-class TestEnrichSentiment:
+# ── Earnings & sentiment enrichment: retired in full (ADR-043/ADR-044, GMI_Decision_Document_v10.docx) -- see KNOWN_RISKS.md RISK-4 and dev-log/2026-08-22-adr043-044-finnhub-full-retirement.md for full detail ──────────────────────────────────────────────────────
 
-    def test_joins_sentiment_when_file_present(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(scr_mod, "SILVER_SENTIMENT_ROOT", tmp_path / "sentiment")
-        run_date = date(2026, 6, 1)
-        path = tmp_path / "sentiment" / f"date={run_date.isoformat()}" / "sentiment_silver.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame({
-            "symbol": ["AAPL"], "sentiment_score": [0.6], "buzz_score": [1.2],
-        }).write_parquet(path)
-        df = pl.DataFrame({"symbol": ["AAPL"], "mtf_score": [7]})
-        result = _enrich_sentiment(df, run_date)
-        row = result.row(0, named=True)
-        assert row["sentiment_score"] == pytest.approx(0.6)
-        assert row["buzz_score"] == pytest.approx(1.2)
 
-    def test_missing_file_returns_unchanged(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(scr_mod, "SILVER_SENTIMENT_ROOT", tmp_path / "sentiment")
-        df = pl.DataFrame({"symbol": ["AAPL"], "mtf_score": [7]})
-        result = _enrich_sentiment(df, date(2026, 6, 1))
-        assert result.equals(df)
-
-    def test_preexisting_sentiment_columns_resolved_not_duplicated(self, tmp_path, monkeypatch):
-        """If df already carries sentiment_score/buzz_score (defensive:
-        re-entrant call, or upstream already populated them), the join
-        must resolve the name collision rather than leaving _sent-suffixed
-        duplicates behind."""
-        monkeypatch.setattr(scr_mod, "SILVER_SENTIMENT_ROOT", tmp_path / "sentiment")
-        run_date = date(2026, 6, 1)
-        path = tmp_path / "sentiment" / f"date={run_date.isoformat()}" / "sentiment_silver.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame({
-            "symbol": ["AAPL"], "sentiment_score": [0.9], "buzz_score": [2.0],
-        }).write_parquet(path)
-        df = pl.DataFrame({
-            "symbol": ["AAPL"], "sentiment_score": [None], "buzz_score": [None],
-        })
-        result = _enrich_sentiment(df, run_date)
-        assert "sentiment_score_sent" not in result.columns
-        assert result.row(0, named=True)["sentiment_score"] == pytest.approx(0.9)
-
-    def test_corrupt_sentiment_file_exception_leaves_df_unchanged(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(scr_mod, "SILVER_SENTIMENT_ROOT", tmp_path / "sentiment")
-        run_date = date(2026, 6, 1)
-        path = tmp_path / "sentiment" / f"date={run_date.isoformat()}" / "sentiment_silver.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("not a parquet file")
-        df = pl.DataFrame({"symbol": ["AAPL"], "mtf_score": [7]})
-        result = _enrich_sentiment(df, run_date)
-        assert result["symbol"].to_list() == ["AAPL"]
-        assert "sentiment_score" not in result.columns
 
 
 # ── run() integration ────────────────────────────────────────────────────────
@@ -541,6 +453,39 @@ class TestRunIntegration:
         run(run_date)
         out = scr_mod.GOLD_SCREENER_PATH / f"watchlist_{run_date.isoformat()}.parquet"
         assert not out.exists()
+
+    def test_watchlist_schema_stable_without_finnhub_enrichment(self, tmp_path, monkeypatch):
+        """FIX ADR-044 (GMI_Decision_Document_v10.docx): with _enrich_earnings()
+        and _enrich_sentiment() removed entirely, the watchlist output schema
+        must be byte-identical to before — column names and types unchanged,
+        values permanently null instead of sometimes-populated. The NULL
+        placeholders live in build_watchlist()'s own main query, not in
+        either (now-deleted) enrichment step, so this must hold with zero
+        Silver fundamental/sentiment data present at all."""
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        monkeypatch.setattr(scr_mod, "SILVER_OHLCV_ROOT", tmp_path / "silver_ohlcv_missing")
+        run(run_date)
+        out = scr_mod.GOLD_SCREENER_PATH / f"watchlist_{run_date.isoformat()}.parquet"
+        written = pl.read_parquet(out)
+
+        expected_dtypes = {
+            "days_to_earnings":   pl.Int32,
+            "next_earnings_date": pl.Date,
+            "near_earnings_flag": pl.Boolean,
+            "sentiment_score":    pl.Float64,
+            "buzz_score":         pl.Float64,
+        }
+        for col, dtype in expected_dtypes.items():
+            assert col in written.columns, f"{col} missing from watchlist output"
+            assert written.schema[col] == dtype, (
+                f"{col} dtype changed: expected {dtype}, got {written.schema[col]}"
+            )
+            assert written[col].null_count() == len(written), (
+                f"{col} expected to be permanently null (no enrichment source), "
+                f"found {len(written) - written[col].null_count()} non-null value(s)"
+            )
 
 
 class TestLoadWatchlist:

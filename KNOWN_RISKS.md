@@ -330,20 +330,17 @@ Full suite: 1055 passed, 0 failed (up from 1036 pre-audit). CI Gate G-2
 
 ---
 
-## RISK-4: `finnhub_ingester.py` writes to Bronze with zero schema validation — RESOLVED (fixed)
+## RISK-4: `finnhub_ingester.py` writes to Bronze with zero schema validation — RESOLVED (retired)
 
-**Status:** ✅ **FIXED.** Both write paths (`_ingest_earnings_calendar`,
-`_ingest_symbol`) now gate through `SchemaValidator` before `self.write()`,
-against two new schema YAML files grounded in Finnhub's publicly
-documented API field names and nullability (verified via web search
-against Finnhub's official docs and community SDK type definitions —
-this sandbox still has no live network access to Finnhub itself, but
-that blocker was for *response data*, not documentation, and the schema
-only needs the latter).
+**Status:** ✅ **RESOLVED — Finnhub retired entirely as a platform data
+source (both halves: sentiment and earnings/quotes).** Fixed via
+`GMI_Decision_Document_v10.docx` (ADR-043, ADR-044, 22 Aug 2026). The
+hardening work below (schema validation, dtype-casting fragility fixes)
+is now moot rather than in reserve — see "Resolution" below.
 
 **GD Reference:** GD §3.1, §3.7 (unchanged from original entry).
 
-### What was blocking this, and how it was resolved
+### What was blocking this, and how it was resolved (historical — pre-retirement)
 
 The original entry correctly identified the real blocker: designing a
 schema from the ingester's own field list alone (`symbol`,
@@ -354,7 +351,7 @@ shapes were looked up directly (field names, types, and — critically —
 which fields are nullable) and used as the schema source of truth:
 `config/schemas/finnhub_quote.yaml`, `config/schemas/finnhub_earnings_calendar.yaml`.
 
-### A second fragility found and fixed in the same pass
+### A second fragility found and fixed in the same pass (historical)
 
 Designing the schema against real documentation surfaced a problem a
 naive schema-plus-validator wiring would NOT have caught: this ingester
@@ -366,18 +363,22 @@ dtype, not `Float64` — which would fail an exact-match schema check on
 the single most common case. A related fragility: `revenueEstimate` can
 arrive as a whole-number JSON integer (no decimal point) or a float
 depending on the value, so an all-integer batch would infer `Int64`
-against a `Float64` schema declaration. Both write paths now explicitly
+against a `Float64` schema declaration. Both write paths explicitly
 `.cast(pl.Float64, strict=False)` / `.cast(pl.Int64, strict=False)` every
 column immediately after DataFrame construction, before validation —
-this makes the schema contract stable regardless of what values happen
+this made the schema contract stable regardless of what values happen
 to be present in a given fetch, rather than merely "usually correct."
+All of this — the schema files, the casting fix, `finnhub_ingester.py`
+itself — was deleted intact as part of ADR-043; none of it was found to
+be wrong, it simply no longer has anything to validate.
 
-### What was intentionally NOT touched
+### What was intentionally NOT touched (historical, now superseded)
 
-`_bronze_finnhub`'s `NotImplementedError` block (job_registry.py) is
-unchanged — this fix hardens `FinnhubIngester` for when that block is
-eventually lifted ("Finnhub Integration" roadmap item), it does not lift
-it.
+`_bronze_finnhub`'s `NotImplementedError` block (job_registry.py) was
+originally left unchanged — this fix hardened `FinnhubIngester` for when
+that block might eventually be lifted ("Finnhub Integration" roadmap
+item). ADR-043 closes that roadmap item as retired rather than lifting
+it — see Resolution below.
 
 **UPD v1.10.0:** the `high_52w`/`low_52w` column-naming misnomer mentioned
 below (fixed at the time as "out of scope, no current consumer") was
@@ -388,22 +389,110 @@ migration cost") was verified **false** during that rename:
 consumer that reads these exact columns from Bronze and writes them
 through to Silver unchanged — both the Bronze producer and the Silver
 consumer were updated together. See CHANGELOG.md v1.10.0 for full detail.
+(`fundamental_processor.py` itself was deleted under ADR-043 — this
+history is kept for the record, not because the code still exists.)
 
-### Blast radius — still currently dormant, same as before
+### Blast radius — historical, moot post-retirement
 
-Unchanged from the original entry: `_bronze_finnhub`'s unconditional
-`NotImplementedError` means this code path is not reachable through the
-normal pipeline today. The difference is that when it IS lifted, it will
-now validate its own output instead of writing unchecked.
+Unchanged from the original entry until ADR-043: `_bronze_finnhub`'s
+unconditional `NotImplementedError` meant this code path was never
+reachable through the normal pipeline. Post-retirement, there is no
+code path at all — `bronze_finnhub` does not exist in `JOB_REGISTRY`.
 
-### Verification
+### Verification (historical, pre-retirement)
 
 40 new tests added across `tests/unit/test_finnhub_ingester.py` (16 —
 first test file this module ever had) and `tests/unit/test_pandas_indicators.py`
 (10, unrelated discovery — see new entry below) plus others from the same
-session. Full suite: 1131 passed, 0 failed.
+session. Full suite: 1131 passed, 0 failed. (`test_finnhub_ingester.py`
+itself was deleted under ADR-043, along with the module it tested.)
 
----
+### Resolution (ADR-043 + ADR-044, 22 Aug 2026)
+
+A live `--job bronze` run (21 Aug 2026) surfaced `bronze_finnhub_sentiment`
+returning `FinnhubAPIException(status_code: 403)` for every symbol in the
+640-instrument universe — a plan-tier gate (confirmed against Finnhub's
+own documented tier-gating response and an identical, independently-
+reported occurrence on Finnhub's public issue tracker), not an invalid
+key (which returns 401) or a code defect. The job still "succeeded" —
+zero real records is only a WARNING-level log, the sentinel is still
+written, silently indistinguishable from success in a status check that
+only looks at sentinel presence.
+
+Exploring "treat Finnhub like `tvdatafeed`" (RISK-1 above) surfaced a real
+disanalogy: RISK-1's retirement rested on a *structural* failure (sign-in
+itself broken) with a *proven substitute already in place*
+(`YFinanceJKAdapter`). Neither holds for Finnhub sentiment — its 403 is a
+purchasable-plan gap, and nothing stands in for it. The earnings/quotes
+half (this entry's original subject) is the closer match to RISK-1: it
+never ran in production (permanent `NotImplementedError` stub, FIX
+R-F04) and nothing in the live pipeline consumed its output
+(`gold_screener` was already decoupled from it, FIX NEW-2).
+
+**Decision:** Ovi's explicit instruction — full retirement of both halves
+together, rather than a split verdict (sentiment kept dormant/accepted-
+risk, only earnings/quotes retired). The disanalogy above was presented
+as the case for a split; recorded here as the honest basis for the full-
+retirement call, not as an unresolved objection. Treating both halves
+identically avoids a subtler cost than the disanalogy alone would
+suggest: a partial retirement leaves one Finnhub integration fully gone
+and one merely paused, a harder distinction for a future reader to hold
+onto correctly than "Finnhub is not currently a data source in this
+platform, full stop."
+
+**What changed:** Removed from the active codebase — `src/bronze/finnhub_ingester.py`,
+`src/bronze/finnhub_sentiment_ingester.py`,
+`src/silver/fundamental_processor.py`, `src/silver/sentiment_processor.py`,
+all 3 `config/schemas/finnhub_*.yaml` files, `scripts/preflight/check_finnhub_shape.py`,
+and all 4 dedicated unit test files. ADR-043's own Consequences section
+originally specified outright deletion (`git rm`) — that changed
+mid-implementation for a purely mechanical reason: the session mirroring
+these changes to the live repository had read/write/move access but no
+file *deletion* capability, and Ovi's direction was to use an archive
+approach instead of deletion given that constraint. All 12 files were
+moved byte-identical (verified via size comparison against their git
+blobs; original mtimes preserved) into
+`archive/finnhub_retirement_2026_08/`, mirroring their original paths,
+with its own README explaining the archival and warning against
+importing from it, collecting its tests, or treating it as a drop-in
+restore path. Functionally this is equivalent to deletion — none of
+these files are imported, scheduled, or reachable from any live code
+path — the difference is that the bytes persist in the archive
+directory rather than only in git history. `job_registry.py`: 4 `JOB_REGISTRY`
+entries + 4 wrapper functions removed; `bronze_finnhub_sentiment` and
+`silver_sentiment` removed from `DAILY_SEQUENCE` (16 → 14 entries); the
+commented-out `silver_fundamental` line removed from `WEEKLY_SEQUENCE`;
+`gold_screener.depends_on` no longer references `silver_sentiment`
+(supersedes FIX NEW-2's narrower `silver_fundamental`-only guard).
+`screener.py` (ADR-044): `_enrich_earnings()`/`_enrich_sentiment()` and
+their call sites removed — rather than left importing a now-deleted
+module inside a broad `except Exception` (the exact RISK-13 anti-pattern
+this codebase's own history argues against). Watchlist output schema
+unchanged: `days_to_earnings`, `next_earnings_date`, `near_earnings_flag`,
+`sentiment_score`, `buzz_score` remain, permanently `NULL` via the main
+query's own placeholders, not via either enrichment step — no Interface
+Contract change (GD §0.4, §17.6). `SourceLimiters.finnhub`
+(`rate_limiter.py`) removed as a direct mechanical consequence — zero
+remaining consumers once the two ingesters above were deleted, unlike
+`.polygon`/`.alphavantage`/`.yfinance`, each of which has a live adapter.
+`pipeline_scheduler.py` (GD §14.5, dormant APScheduler path): `bronze_finnhub`/
+`silver_sentiment` removed from both the documented cron table and the
+actual `daily_schedule` list — both would have `KeyError`'d against
+`JOB_REGISTRY` on first activation. `pyproject.toml`: `finnhub-python`
+removed; `poetry.lock` regenerated (diff: exactly 1 package removed, 0
+added). `FINNHUB_API_KEY` removed from `.env.example` (this file's own
+stated convention is reconciliation against real `os.getenv()` call
+sites, not aspirational listing — zero remain).
+
+**What this does NOT resolve / still open:** Sentiment's 403 is a
+purchasable-plan gap, not a structural one — reversible any time Finnhub's
+plan is upgraded, unlike RISK-1's tvdatafeed sign-in failure. Retiring it
+now (rather than carrying it as a dormant/accepted-risk entry) trades that
+reversibility for a simpler, smaller, more honestly-described system
+today — a real trade-off, accepted knowingly per Ovi's explicit
+instruction, not defaulted into. Re-integrating either half in future
+means writing new ingesters/processors from scratch, not un-commenting
+anything — nothing was archived, everything was deleted.
 
 ## RISK-5 (NEW): `add_adx()` crashed on every real invocation — RESOLVED (fixed)
 

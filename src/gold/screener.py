@@ -1,18 +1,20 @@
 """
 screener.py — GD §5.2.4 (Gold Screener & Watchlist)
-DuckDB query join: MTF + Regime + Sector + Correlation + Earnings + Sentiment.
+DuckDB query join: MTF + Regime + Sector + Correlation.
 
-v1.2 additions:
-    - days_to_earnings: DATA field (tidak memfilter — Trading Engine yang decide)
-    - near_earnings_flag: Boolean field (days_to_earnings <= 3)
-    - sentiment_score: dari Silver sentiment layer
+FIX ADR-043/ADR-044 (GMI_Decision_Document_v10.docx): Finnhub retired in
+full — _enrich_earnings() and _enrich_sentiment() (and their call sites)
+removed. days_to_earnings, next_earnings_date, near_earnings_flag,
+sentiment_score, and buzz_score remain in the watchlist output schema
+exactly as before — sourced entirely from this module's own main query,
+which hardcodes each as a typed NULL placeholder. No Interface Contract
+change (GD §0.4, §17.6): the promised columns still exist, still
+correctly typed, simply permanently null instead of sometimes-populated.
+
+v1.2 additions (retained):
     - Correlation cluster deduplication: max 2 per cluster
 
 Output: data/gold/screener/watchlist_{date}.parquet
-
-Separation of Concerns (GD §0.3):
-    - near_earnings_flag: DATA, bukan filter. Trading Engine yang decide.
-    - sentiment_score: DATA informational. Bukan keputusan.
 """
 
 from __future__ import annotations
@@ -33,17 +35,17 @@ GOLD_MTF_PATH       = Path("data/gold/mtf")
 GOLD_REGIME_PATH    = Path("data/gold/macro/regime_store.parquet")
 GOLD_SECTOR_PATH    = Path("data/gold/sector/sector_regime_weights.parquet")
 GOLD_CORR_PATH      = Path("data/gold/correlation/correlation_clusters.parquet")
-SILVER_SENTIMENT    = "data/silver/sentiment/date=*/*.parquet"
 GOLD_SCREENER_PATH  = Path("data/gold/screener")
-# FIX GLD-SCR-002: these two were previously built inline as ad hoc string/
-# f-string Path constructions inside build_watchlist()/_enrich_sentiment()
-# (not the SQL-injection kind — plain filesystem paths — but un-patchable
-# hardcodes all the same, matching the same class of issue fixed via
-# REGIME_STORE_PATH in mtf_alignment.py this same thread). Promoted to
-# module-level roots alongside the constants above; the per-run_date
-# filename is still built dynamically where it's used.
+# FIX GLD-SCR-002: this was previously built inline as an ad hoc string/
+# f-string Path construction inside build_watchlist() (not the SQL-injection
+# kind — a plain filesystem path — but an un-patchable hardcode all the
+# same, matching the same class of issue fixed via REGIME_STORE_PATH in
+# mtf_alignment.py this same thread). Promoted to a module-level root
+# alongside the constants above; the per-run_date filename is still built
+# dynamically where it's used.
+# FIX ADR-044: SILVER_SENTIMENT and SILVER_SENTIMENT_ROOT removed —
+# _enrich_sentiment() (their sole consumer) was removed in the same fix.
 SILVER_ACTIVE_SYMBOLS_ROOT = Path("data/silver/active_symbols")
-SILVER_SENTIMENT_ROOT      = Path("data/silver/sentiment")
 
 # Screening filters (hard thresholds for watchlist inclusion)
 MIN_MTF_SCORE      = 5       # |score| >= 5 → grade A or B only
@@ -340,14 +342,14 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     if df.is_empty():
         return df
 
-    # ── Enrich with earnings data (v1.2 DATA field) ──────────────────────────
-    # days_to_earnings is a DATA field — Trading Engine decides what to do
-    if not df.is_empty():
-        df = _enrich_earnings(df, run_date)
-
-    # ── Enrich with sentiment data (v1.2 DATA field) ──────────────────────────
-    if not df.is_empty():
-        df = _enrich_sentiment(df, run_date)
+    # FIX ADR-044 (GMI_Decision_Document_v10.docx): _enrich_earnings() and
+    # _enrich_sentiment() call sites removed — Finnhub retired in full
+    # (ADR-043). days_to_earnings, next_earnings_date, near_earnings_flag,
+    # sentiment_score, buzz_score remain in the watchlist output schema
+    # exactly as before, sourced entirely from the main query's own typed
+    # NULL placeholders above — no Interface Contract change (GD §0.4,
+    # §17.6): the promised columns still exist, still correctly typed,
+    # simply permanently null instead of sometimes-populated.
 
     # Correlation cluster deduplication (GD §15.1: max 2 per cluster)
     if has_corr:
@@ -414,73 +416,6 @@ def _deduplicate_by_cluster(
         df = df.drop(["cluster_id", "cluster_rank"])
     except Exception as e:
         logger.debug(f"[gold_screener] Cluster dedup skipped: {e}")
-
-    return df
-
-
-def _enrich_earnings(df: pl.DataFrame, run_date: date) -> pl.DataFrame:
-    """
-    Populate days_to_earnings and near_earnings_flag from Silver fundamental.
-    GD §5.2.4: DATA field — Trading Engine decides whether to trade around earnings.
-    Reads from data/silver/fundamental/earnings_{date}.parquet (processed from Finnhub).
-    """
-    try:
-        from src.silver.fundamental_processor import FundamentalProcessor
-        proc           = FundamentalProcessor()
-        upcoming       = proc.get_upcoming_earnings(run_date, within_days=90)
-        earnings_map: dict[str, int] = {}
-
-        if not upcoming.is_empty():
-            for row in upcoming.iter_rows(named=True):
-                sym = row.get("symbol", "")
-                dte = row.get("days_to_earnings")
-                if sym and dte is not None:
-                    # Keep smallest (soonest) if multiple entries
-                    if sym not in earnings_map or dte < earnings_map[sym]:
-                        earnings_map[sym] = int(dte)
-
-        symbols = df["symbol"].to_list()
-        dte_vals  = [earnings_map.get(s) for s in symbols]
-
-        df = df.with_columns([
-            pl.Series("days_to_earnings", dte_vals, dtype=pl.Int32),
-        ]).with_columns([
-            (
-                pl.col("days_to_earnings").is_not_null()
-                & (pl.col("days_to_earnings") <= 3)
-            ).alias("near_earnings_flag"),
-        ])
-
-    except Exception as e:
-        logger.debug(f"[Screener] Earnings enrichment skipped: {e}")
-
-    return df
-
-
-def _enrich_sentiment(df: pl.DataFrame, run_date: date) -> pl.DataFrame:
-    """
-    Join Silver sentiment data into screener output.
-    GD §5.2.4: sentiment_score is a DATA field (informational).
-    """
-    sentiment_path = (
-        SILVER_SENTIMENT_ROOT
-        / f"date={run_date.isoformat()}"
-        / "sentiment_silver.parquet"
-    )
-    if not sentiment_path.exists():
-        return df
-
-    try:
-        sentiment = pl.read_parquet(sentiment_path).select([
-            "symbol", "sentiment_score", "buzz_score"
-        ])
-        df = df.join(sentiment, on="symbol", how="left", suffix="_sent")
-        # Resolve column name conflicts if already present
-        for col in ["sentiment_score", "buzz_score"]:
-            if f"{col}_sent" in df.columns:
-                df = df.drop(col).rename({f"{col}_sent": col})
-    except Exception as e:
-        logger.debug(f"[Screener] Sentiment enrichment skipped: {e}")
 
     return df
 

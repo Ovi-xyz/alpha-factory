@@ -330,12 +330,18 @@ class TestFullSystemPipeline:
 
         The previous >= 14 floor baked in the assumption that silver_fundamental
         would be part of PIPELINE_SEQUENCE (DAILY_SEQUENCE) — true only once
-        bronze_finnhub gets a real implementation (Opsi B, not yet done;
-        bronze_finnhub is presently an intentional NotImplementedError stub,
-        FIX R-F04). Per NEW-2 Opsi A, silver_fundamental is deliberately kept
-        out of the daily sequence and gold_screener's hard dependency on it
-        removed — DAILY_SEQUENCE's correct current length is 13. The floor
-        (rather than an exact ==13) still guards against accidental step removal.
+        bronze_finnhub gets a real implementation (Opsi B). Per NEW-2 Opsi A,
+        silver_fundamental was deliberately kept out of the daily sequence and
+        gold_screener's hard dependency on it removed.
+
+        UPDATE (FIX ADR-043, GMI_Decision_Document_v10.docx): Opsi B is now
+        closed, not merely deferred — Finnhub was retired in full. bronze_finnhub
+        and silver_fundamental no longer exist in JOB_REGISTRY at all (see
+        tests/integration/test_job_registry_integrity.py::
+        test_finnhub_jobs_do_not_exist_in_registry). This floor (>= 13) still
+        holds under the current actual length of 14 and continues to guard
+        against accidental step removal — kept as a floor, not tightened to
+        ==14, per this suite's own stated anti-pattern discipline.
         """
         from src.scheduler.job_registry import PIPELINE_SEQUENCE
         assert len(PIPELINE_SEQUENCE) >= 13, (

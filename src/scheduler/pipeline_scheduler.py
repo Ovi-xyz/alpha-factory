@@ -15,11 +15,12 @@ Requirements:
 
 Cron schedule (WIB — Asia/Jakarta):
     02:00  bronze_ohlcv_daily    (45m)
-    02:30  bronze_finnhub        (20m)
+    02:45  bronze_treasury       (2m)
     03:00  silver_ohlcv          (60m)
-    03:30  silver_sentiment      (15m) — after silver_active_symbols
-    04:00  gold_signals          (90m)
-    05:30  gold_mtf              (30m)
+    03:45  silver_validate       (10m)
+    03:55  silver_active_symbols (5m)
+    04:15  gold_signals          (90m)
+    05:45  gold_mtf              (30m)
     06:00  gold_regime           (5m)
     06:05  gold_sector           (2m)
     06:15  gold_screener         (5m)
@@ -31,6 +32,12 @@ Cron schedule (WIB — Asia/Jakarta):
 
     Wednesday only:
     03:00  bronze_eia            (2m)
+
+    FIX ADR-043 (GMI_Decision_Document_v10.docx): bronze_finnhub and
+    silver_sentiment removed from this schedule — Finnhub retired in full
+    (sentiment: 403 plan-tier gate on every symbol; earnings/quotes: never
+    activated, NotImplementedError stub). Neither job exists in
+    JOB_REGISTRY any more.
 """
 
 from __future__ import annotations
@@ -96,15 +103,14 @@ def create_scheduler():
     sched = BlockingScheduler(timezone=WIB)
 
     # ── Daily jobs ────────────────────────────────────────────────────────────
+    # FIX ADR-043: bronze_finnhub, silver_sentiment removed — retired in full.
     daily_schedule = [
         ("bronze_ohlcv_daily",   2,  0),
-        ("bronze_finnhub",       2, 30),
         ("bronze_treasury",      2, 45),
         ("silver_ohlcv",         3,  0),
         ("silver_macro",         3,  0),   # runs parallel-ish
         ("silver_validate",      3, 45),
         ("silver_active_symbols", 3, 55),
-        ("silver_sentiment",     4,  0),
         ("gold_signals",         4, 15),
         ("gold_mtf",             5, 45),
         ("gold_regime",          6,  0),

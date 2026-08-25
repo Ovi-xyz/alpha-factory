@@ -110,38 +110,6 @@ def _bronze_bis_rates(run_date: date) -> None:
     bis_rates_run(run_date)
 
 
-def _bronze_finnhub(run_date: date) -> None:
-    """FIX R-F04: stub yang hanya logger.info() adalah silent failure —
-    job akan dianggap berhasil tapi tidak menghasilkan data apapun.
-    Downstream silver_fundamental dan gold_screener (earnings, sentiment)
-    akan silently melewati Finnhub data tanpa error.
-
-    Solusi: raise NotImplementedError agar DependencyGuard TIDAK menulis
-    .done sentinel, dan silver_fundamental tidak berjalan tanpa data.
-    Ganti raise ini dengan FinnhubIngester().run(run_date) saat diimplementasi.
-    """
-    raise NotImplementedError(
-        "[bronze_finnhub] FinnhubIngester belum diimplementasikan. "
-        "Implementasikan src/bronze/finnhub_ingester.py terlebih dahulu. "
-        "Gunakan --force untuk skip dependency bronze_finnhub jika "
-        "Finnhub data tidak diperlukan dalam run ini."
-    )
-
-
-def _bronze_finnhub_sentiment(run_date: date) -> None:
-    """
-    Bronze Finnhub Sentiment Ingester — NEW post-refactor (GD §17.3, §17.7).
-
-    Replaces the architectural debt where silver/sentiment_processor.py
-    called Finnhub API directly from Silver layer (GD §17.7 anti-pattern).
-
-    Scope : 643 instrument universe via InstrumentLoader (depends_on=[]).
-    Output: data/bronze/market/fundamental/sentiment/
-    """
-    from src.bronze.finnhub_sentiment_ingester import run as sentiment_bronze_run
-    sentiment_bronze_run(run_date)
-
-
 def _bronze_treasury(run_date: date) -> None:
     from src.bronze.treasury_ingester import TreasuryIngester
     TreasuryIngester().run(run_date)
@@ -170,12 +138,6 @@ def _bronze_bea_gdp(run_date: date) -> None:
     BEAIngester().run(run_date)
 
 
-def _silver_fundamental(run_date: date) -> None:
-    """Process Finnhub earnings calendar + quotes → Silver fundamental."""
-    from src.silver.fundamental_processor import run as fundamental_run
-    fundamental_run(run_date)
-
-
 def _silver_ohlcv(run_date: date) -> None:
     """
     Process Bronze OHLCV → Silver (VWAP, adj_factor, is_clean).
@@ -189,7 +151,7 @@ def _silver_ohlcv(run_date: date) -> None:
     is a drift risk: a fix applied to one copy and not the other silently
     diverges (the same "half-fix" failure pattern GAP-1 was caused by).
     Matches the delegate-only pattern every other wrapper in this file uses
-    (_silver_macro, _silver_fundamental, _silver_active_symbols, etc.).
+    (_silver_macro, _silver_active_symbols, etc.).
 
     2-pass design (unchanged, now owned by ohlcv_processor.run()):
       PASS 1: Bronze raw TFs (5m,15m,1H,1D,1W,1M) → Silver.
@@ -256,11 +218,6 @@ def _silver_context_anchors(run_date: date) -> None:
     """
     from src.silver.context_anchors import run as context_anchors_run
     context_anchors_run(run_date)
-
-
-def _silver_sentiment(run_date: date) -> None:
-    from src.silver.sentiment_processor import run as sentiment_run
-    sentiment_run(run_date)
 
 
 def _silver_validate(run_date: date) -> None:
@@ -353,25 +310,6 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         # No run_on_weekdays — called explicitly on weekly SOP (after bronze_macro_weekly)
     },
 
-    "bronze_finnhub": {
-        "description": "Ingest Finnhub — real-time quote, earnings, fundamental",
-        "fn":          _bronze_finnhub,
-        "depends_on":  [],
-        "layer":       "bronze",
-        "est_minutes": 20,
-    },
-
-    "bronze_finnhub_sentiment": {
-        "description": (
-            "Ingest Finnhub news sentiment — 643 universe via InstrumentLoader. "
-            "Eliminates GD §17.7 debt: Bronze is sole external API gateway."
-        ),
-        "fn":          _bronze_finnhub_sentiment,
-        "depends_on":  [],    # KRITIS: no Silver dependency — scope from InstrumentLoader
-        "layer":       "bronze",
-        "est_minutes": 15,    # 643 symbols × 1.2s throttle ≈ 13min + overhead
-    },
-
     "bronze_treasury": {
         "description": "Ingest US Treasury — daily yield curve 1M–30Y",
         "fn":          _bronze_treasury,
@@ -418,20 +356,6 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
     },
 
     # ── SILVER LAYER ──────────────────────────────────────────────────────────
-
-    "silver_fundamental": {
-        "description": "Process Finnhub earnings calendar + quotes → Silver",
-        "fn":          _silver_fundamental,
-        # depends_on bronze_finnhub — stub yang SENGAJA NotImplementedError
-        # (FIX R-F04). Job ini tetap terdaftar di JOB_REGISTRY (runnable manual
-        # via `python runner.py --job silver_fundamental --force` setelah
-        # bronze_finnhub diimplementasikan nyata — Opsi B, lihat audit
-        # NEW-2 §3.5) tapi TIDAK ada di DAILY_SEQUENCE/WEEKLY_SEQUENCE, dan
-        # gold_screener TIDAK lagi hard-depend padanya (FIX NEW-2, Opsi A).
-        "depends_on":  ["bronze_finnhub"],
-        "layer":       "silver",
-        "est_minutes": 5,
-    },
 
     "silver_ohlcv": {
         "description": "Clean + enrich OHLCV — VWAP, log_return, adj_factor, is_clean; 2-pass incl. 4H synthesis",
@@ -491,7 +415,7 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "est_minutes": 10,
     },
 
-    # IDD §7: silver_active_symbols HARUS ada di antara silver_validate dan silver_sentiment
+    # IDD §7: silver_active_symbols HARUS ada setelah silver_validate
     "silver_active_symbols": {
         "description": "Resolve Layer 1 active symbols via dollar_volume_20d — ~190 symbols",
         "fn":          _silver_active_symbols,
@@ -514,21 +438,6 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "depends_on":  [],
         "layer":       "silver",
         "est_minutes": 1,
-    },
-
-    "silver_sentiment": {
-        "description": (
-            "Transform Bronze Finnhub sentiment → Silver — pure read/normalize, zero API calls. "
-            "REFACTORED: eliminated GD §17.7 debt (Silver → Finnhub API). "
-            "Now reads Bronze Parquet written by bronze_finnhub_sentiment."
-        ),
-        "fn":          _silver_sentiment,
-        "depends_on":  ["bronze_finnhub_sentiment"],  # Bronze → Silver (GD §17.2 compliant)
-        # CHANGED: was ["silver_active_symbols"] — lateral Silver coupling (GD §17.7 anti-pattern).
-        # silver_active_symbols is still used by gold_signals, gold_correlation, gold_screener.
-        # silver_sentiment no longer depends on it — scope is 643 universe from Bronze.
-        "layer":       "silver",
-        "est_minutes": 5,    # pure transform — no API calls, much faster than v1.5 (15m)
     },
 
     # ── GOLD LAYER ────────────────────────────────────────────────────────────
@@ -570,24 +479,22 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
     },
 
     "gold_screener": {
-        "description": "Watchlist top-20 — MTF + Regime + Sector + Earnings + Sentiment",
+        "description": "Watchlist top-20 — MTF + Regime + Sector",
         "fn":          _gold_screener,
-        # FIX NEW-2 [BLOCKING] (audit_v1_7_3_uncovered_findings.docx §3, Opsi A):
-        # "silver_fundamental" DIHAPUS dari depends_on keras.
-        # silver_fundamental.depends_on=["bronze_finnhub"], dan bronze_finnhub
-        # adalah stub yang SENGAJA selalu raise NotImplementedError (FIX R-F04) —
-        # artinya silver_fundamental TIDAK PERNAH bisa selesai, dan gold_screener
-        # akan terkunci permanen selama dependency ini bersifat hard-required.
-        # GD §5.2.4 sendiri sudah mendesain earnings_calendar sebagai LEFT JOIN
-        # ("data boleh null") — days_to_earnings/near_earnings_flag adalah DATA
-        # field opsional (GD §0.3), bukan hard requirement untuk screener jalan.
-        # gold/screener.py::_enrich_earnings() sudah menangani silver/fundamental/
-        # yang kosong/tidak ada secara graceful (try/except, kolom tetap NULL) —
-        # tidak ada perubahan diperlukan di screener.py untuk Opsi A ini.
-        # Opsi B (jangka panjang, BELUM diimplementasikan): buat FinnhubIngester
-        # earnings/quotes nyata, ganti bronze_finnhub dari stub, lalu silver_fundamental
-        # bisa dikembalikan ke depends_on ini secara sah. Lihat audit §3.5.
-        "depends_on":  ["gold_mtf", "gold_regime", "gold_sector", "silver_sentiment"],
+        # FIX ADR-043 (GMI_Decision_Document_v10.docx): "silver_sentiment" DIHAPUS
+        # dari depends_on. Finnhub diretired penuh (sentiment + earnings/quotes) —
+        # sentiment 403 setiap simbol (plan-tier gate, bukan defect) dan
+        # earnings/quotes tidak pernah live (stub NotImplementedError, FIX R-F04).
+        # Supersedes FIX NEW-2 (audit_v1_7_3_uncovered_findings.docx §3, Opsi A),
+        # yang sebelumnya sudah menghapus "silver_fundamental" dari sini dengan
+        # alasan yang sama (hard-dependency ke job yang tidak pernah bisa selesai).
+        # "silver_fundamental" dan "silver_sentiment" kini tidak ada sama sekali di
+        # JOB_REGISTRY (dihapus, bukan sekadar di-skip) — lihat ADR-043 Consequences.
+        # gold/screener.py::_enrich_earnings() dan _enrich_sentiment() juga dihapus
+        # (FIX ADR-044) — kolom days_to_earnings/near_earnings_flag/sentiment_score/
+        # buzz_score tetap ada di watchlist output, permanently NULL (Interface
+        # Contract GD §0.4/§17.6 tidak berubah — hanya nilainya, bukan skema).
+        "depends_on":  ["gold_mtf", "gold_regime", "gold_sector"],
         "layer":       "gold",
         "est_minutes": 5,
     },
@@ -630,10 +537,8 @@ DAILY_SEQUENCE: list[str] = [
     "bronze_ohlcv_daily",
     "bronze_ohlcv_context_daily",  # ADD GMI-JR-002: Layer 2, independen dari Layer 1
     "bronze_treasury",
-    "bronze_finnhub_sentiment",   # NEW: Bronze sentiment job (depends_on=[])
-    #                               Refactor: moved from Silver layer (GD §17.7 debt elimination)
-    #                               Scope: 643 universe via InstrumentLoader
-    # bronze_finnhub DIHAPUS dari daily — NotImplementedError (FIX R-F04)
+    # bronze_finnhub, bronze_finnhub_sentiment DIHAPUS — ADR-043 (Finnhub full
+    # retirement): sentiment 403 plan-tier gate, earnings/quotes never live.
     # bronze_macro_weekly DIHAPUS dari daily — weekly-only (FIX R-F03)
     # bronze_eia DIHAPUS dari daily — Rabu-only via schedule guard
 
@@ -650,10 +555,7 @@ DAILY_SEQUENCE: list[str] = [
     # a real ordering requirement.
     "silver_context_anchors",
 
-    # Silver Phase 3 — sentiment
-    # RE-ENABLED: depends_on bronze_finnhub_sentiment (not bronze_finnhub NotImplementedError)
-    # Refactor eliminates lateral Silver coupling: silver_sentiment no longer reads silver_active_symbols
-    "silver_sentiment",
+    # silver_sentiment DIHAPUS — ADR-043 (Finnhub full retirement)
 
     # Gold — urutan KRITIS: regime -> sector -> screener
     "gold_signals",
@@ -678,13 +580,8 @@ WEEKLY_SEQUENCE: list[str] = [
     "silver_macro",         # FIX R-F03: hanya di weekly, bukan daily
     "silver_global_rates",  # ADD GMI-JR-001: dep bronze_bis_rates, dedicated PIT table (§9.1)
 
-    # Silver fundamental — TETAP commented-out (Opsi B, belum diimplementasikan).
-    # FIX NEW-2: gold_screener TIDAK LAGI hard-depend pada silver_fundamental
-    # (lihat entry gold_screener), jadi mengaktifkan baris ini tidak lagi
-    # blocking untuk --job all. Tetap di-comment sampai bronze_finnhub punya
-    # implementasi nyata (job ini akan selalu gagal selama bronze_finnhub
-    # adalah stub NotImplementedError) — aktifkan saat Opsi B dikerjakan.
-    # "silver_fundamental",
+    # silver_fundamental line DIHAPUS — ADR-043 (Finnhub full retirement);
+    # bronze_finnhub, silver_fundamental no longer exist in JOB_REGISTRY.
 
     # Gold correlation — rolling 60D, weekly refresh
     "gold_correlation",
@@ -709,12 +606,17 @@ PIPELINE_SEQUENCE = DAILY_SEQUENCE
 #
 # This means the deliberate exclusions already baked into the two sequences
 # carry over automatically — NOT reproduced as a second list to maintain:
-#   - bronze_finnhub          — stub, raises NotImplementedError (FIX R-F04)
-#   - silver_fundamental      — depends on bronze_finnhub, orphaned (FIX NEW-2)
 #   - bronze_bls_cpi/nfp,
 #     bronze_bea_gdp          — registered but never sequenced; bronze_macro_weekly
 #                                already covers BLS/BEA via FRED mirror (see
 #                                _bronze_macro_weekly above) — manual-only jobs.
+#
+# NOTE (ADR-043, GMI_Decision_Document_v10.docx): bronze_finnhub,
+# bronze_finnhub_sentiment, silver_fundamental, and silver_sentiment are NOT
+# listed above because they no longer exist in JOB_REGISTRY at all — Finnhub
+# was retired in full, not merely excluded from sequencing. This is a change
+# from the prior state (bronze_finnhub / silver_fundamental existed but were
+# deliberately unsequenced, per the note this replaces).
 #
 # health_report keeps layer="util", not "gold" — `--job gold` intentionally
 # excludes it, matching the literal per-layer scope this was asked for.

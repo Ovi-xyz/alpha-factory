@@ -1,5 +1,184 @@
 # CHANGELOG — Data Platform
 
+## v1.17.0 — Finnhub Full Retirement: Sentiment + Earnings/Quotes (Agustus 2026)
+
+Diarahkan oleh `GMI_Decision_Document_v10.docx` (ADR-043, ADR-044) —
+retirement penuh Finnhub sebagai data source. Sentiment
+(`bronze_finnhub_sentiment`) mengembalikan `FinnhubAPIException(403)`
+untuk seluruh 640 simbol universe pada live run `python src/runner.py
+--job bronze` (21 Aug 2026) — plan-tier gate, bukan defect (401 untuk key
+salah, bukan 403). Earnings/quotes (`bronze_finnhub`) tidak pernah live —
+stub `NotImplementedError` sejak FIX R-F04, meski `FinnhubIngester`-nya
+sendiri sudah schema-validated dan diuji (KNOWN_RISKS.md RISK-4, 40 test).
+Ovi eksplisit memilih retirement penuh kedua-duanya sekaligus, bukan
+verdict terpisah (sentiment dormant/accepted-risk, earnings/quotes saja
+yang retired) — lihat ADR-043 Rationale untuk trade-off yang diterima.
+
+Implementasi mengikuti checklist Section 3 dokumen tersebut secara
+berurutan, ditambah **dua temuan baru** hasil grep sweep repo-wide wajib
+pasca-retirement (bukan bagian checklist literal, tapi konsekuensi
+mekanis langsung): `pipeline_scheduler.py` (GD §14.5, dormant APScheduler
+path) akan `KeyError` saat diaktifkan karena masih menjadwalkan
+`bronze_finnhub`/`silver_sentiment`; `SourceLimiters.finnhub`
+(`rate_limiter.py`) sudah nol consumer sejak kedua ingester Finnhub
+dihapus.
+
+Total: **17 test dihapus** (4 file test dedicated + `TestCheckFinnhubShape`
+di `test_preflight_scripts.py` + `TestSILAIO004FundamentalProcessor`/
+`TestSILAIO004SentimentProcessor` di `test_preexisting_violations_v1.py`
++ `TestEnrichEarnings`/`TestEnrichSentiment` di `test_screener.py` + 6
+parametrized `TestGlobalAuditClearance` case via 2 path removed dari 3
+list), **9 test baru** (schema-stability assertion di `test_screener.py`;
+3 replacement test di `test_job_registry_integrity.py`; 2 replacement
+test di `test_runner_weekly_cadence.py`; `test_finnhub_limiter_removed`
+di `test_rate_limiter.py`; 2 floor-assertion recalibration) | **1631 →
+1510 passed / 0 failed / 0 error** (Δ −121, dikonfirmasi via 2x full
+suite run berturut-turut, 0 skipped). MINOR bump (1.16.0 → 1.17.0):
+perubahan struktural pada `JOB_REGISTRY` dan dependency graph
+Bronze/Silver — sepadan skalanya dengan MINOR bump GMI-JR-003 sebelumnya
+(kapabilitas baru tanpa perubahan schema); ini kebalikannya (penghapusan
+kapabilitas), magnitude sama. Tidak ada perubahan Interface Contract (GD
+§0.4, §17.6) atau schema Silver/Gold manapun.
+
+### ARCHIVE ADR-043 [src/bronze/finnhub_ingester.py, src/bronze/finnhub_sentiment_ingester.py, src/silver/fundamental_processor.py, src/silver/sentiment_processor.py, config/schemas/finnhub_*.yaml (3 file), scripts/preflight/check_finnhub_shape.py] — Finnhub Bronze/Silver Modules Dipindah ke archive/, Dihapus dari Codebase Aktif
+
+- ADR-043 awalnya menetapkan `git rm` langsung (bukan archive) —
+  berbeda dari precedent RISK-1 (`tvdatafeed`, ADR-029) yang dipindah ke
+  `scripts/archive/`. Rencana ini berubah di tengah implementasi karena
+  alasan mekanis semata: sesi yang mem-mirror perubahan ke live repo
+  punya akses read/write/move via Filesystem MCP connector tapi TIDAK
+  punya kapabilitas delete file. Arahan Ovi: gunakan pendekatan archive
+  sebagai gantinya. Seluruh 12 file dipindah byte-identical (diverifikasi
+  via perbandingan ukuran terhadap git blob masing-masing; mtime asli
+  dipertahankan) ke `archive/finnhub_retirement_2026_08/`, mencerminkan
+  path aslinya persis, lengkap dengan README yang menjelaskan alasan
+  archival dan memperingatkan agar tidak di-import, tidak di-collect
+  sebagai test, dan tidak dijadikan restore path langsung. Secara
+  fungsional ekuivalen dengan penghapusan — tidak ada satupun file ini
+  yang di-import, dijadwalkan, atau reachable dari code path manapun
+  yang live — bedanya hanya bytes-nya tetap ada di direktori archive,
+  bukan cuma di git history.
+- 4 file test dedicated ikut dipindah: `test_finnhub_ingester.py`,
+  `test_finnhub_sentiment_ingester.py`, `test_fundamental_processor.py`,
+  `test_sentiment_processor.py`.
+- `tests/unit/test_preflight_scripts.py`: class `TestCheckFinnhubShape`
+  dihapus (5 test) — file lain di test ini untuk preflight script lain
+  tetap ada, tidak ikut terhapus. (File test ini sendiri TIDAK dipindah
+  ke archive — hanya class di dalamnya yang dihapus, karena file ini
+  masih menguji banyak preflight script lain yang tetap aktif.)
+
+### FIX ADR-043 [src/scheduler/job_registry.py] — 4 Entry + 4 Wrapper Function Dihapus dari JOB_REGISTRY
+
+- `_bronze_finnhub`, `_bronze_finnhub_sentiment`, `_silver_fundamental`,
+  `_silver_sentiment` (wrapper function) dan 4 `JOB_REGISTRY` entry-nya
+  dihapus total — bukan sekadar di-comment atau di-exclude dari sequence
+  seperti FIX NEW-2 sebelumnya terhadap `silver_fundamental` saja.
+- `bronze_finnhub_sentiment` + `silver_sentiment` dihapus dari
+  `DAILY_SEQUENCE` (16 → 14 entry). Baris `silver_fundamental` yang
+  sebelumnya di-comment-out di `WEEKLY_SEQUENCE` (menunggu Opsi B) juga
+  dihapus — Opsi B kini closed, bukan deferred.
+- `gold_screener.depends_on` tidak lagi mereferensikan
+  `silver_sentiment` — supersedes guard FIX NEW-2 yang lebih sempit
+  (hanya `silver_fundamental`). Comment block riwayat NEW-2/Opsi-B
+  ditulis ulang untuk mencatat ADR-043/044 sebagai pengganti.
+- `LAYER_JOB_NAMES` module comment diupdate: `bronze_finnhub` dan
+  `silver_fundamental` sekarang tidak ada sama sekali di registry
+  (bukan "terdaftar tapi sengaja di-exclude" seperti sebelumnya).
+- Verifikasi import-level: 23 job tersisa di `JOB_REGISTRY` (dari 27),
+  `DAILY_SEQUENCE` 14 entry, `gold_screener.depends_on ==
+  ['gold_mtf', 'gold_regime', 'gold_sector']`.
+
+### FIX ADR-044 [src/gold/screener.py] — _enrich_earnings()/_enrich_sentiment() Dihapus, Watchlist Schema Tidak Berubah
+
+- `_enrich_earnings()` dan `_enrich_sentiment()` beserta kedua call site
+  di `build_watchlist()` dihapus total — bukan dibiarkan meng-import
+  modul yang sudah dihapus di dalam `except Exception` yang luas
+  (persis anti-pattern RISK-13 yang sudah didokumentasikan sejarahnya
+  di codebase ini).
+- `days_to_earnings`, `next_earnings_date`, `near_earnings_flag`,
+  `sentiment_score`, `buzz_score` tetap ada di skema output watchlist —
+  sumbernya sudah selalu placeholder `NULL` bertipe eksplisit di main
+  query `build_watchlist()`, bukan di kedua fungsi enrichment yang
+  dihapus. Tidak ada perubahan Interface Contract (GD §0.4/§17.6):
+  kolom yang dijanjikan tetap ada, tetap bertipe benar, sekadar
+  permanently null, bukan sometimes-populated.
+- Konstanta mati `SILVER_SENTIMENT`/`SILVER_SENTIMENT_ROOT` ikut
+  dihapus — nol consumer tersisa setelah `_enrich_sentiment()` hilang.
+- `tests/unit/test_screener.py`: `TestEnrichEarnings` (3 test) dan
+  `TestEnrichSentiment` (4 test) dihapus; ditambahkan
+  `test_watchlist_schema_stable_without_finnhub_enrichment` yang
+  meng-assert langsung terhadap Parquet output tertulis — nama kolom,
+  tipe (`Int32`/`Date`/`Boolean`/`Float64`/`Float64`), dan bahwa
+  seluruh 5 kolom 100% null tanpa data Finnhub apapun.
+
+### FIX ADR-043 [src/scheduler/pipeline_scheduler.py, src/utils/rate_limiter.py] — 2 Konsekuensi Tambahan dari Grep Sweep Repo-Wide
+
+- `pipeline_scheduler.py` (GD §14.5, dormant APScheduler upgrade path,
+  belum pernah diaktifkan): `_make_job()` melakukan `JOB_REGISTRY[name]`
+  lookup langsung tanpa guard — akan `KeyError` pertama kali diaktifkan
+  karena cron schedule masih menjadwalkan `bronze_finnhub` (02:30) dan
+  `silver_sentiment` (03:30). Kedua entry dihapus dari docstring cron
+  table dan dari `daily_schedule` list yang sesungguhnya.
+- `SourceLimiters.finnhub` (`rate_limiter.py`): dikonfirmasi nol
+  consumer di seluruh `src/` (grep sweep) — satu-satunya consumer yang
+  mungkin, `finnhub_ingester.py`/`finnhub_sentiment_ingester.py`, sudah
+  dihapus di fix yang sama. Dihapus sebagai konsekuensi mekanis
+  langsung, bukan keputusan arsitektural terpisah.
+  `tests/unit/test_rate_limiter.py`: `test_finnhub_limit_under_60`
+  diganti `test_finnhub_limiter_removed` (assert `not hasattr(...)`).
+
+### UPDATE [tests/, KNOWN_RISKS.md, pyproject.toml, .env.example, README.md] — Rekonsiliasi Test Suite, Dependency, dan Dokumentasi
+
+- `tests/integration/test_job_registry_integrity.py`: 4 test stale
+  (asumsi `silver_fundamental`/`silver_sentiment` masih terdaftar tapi
+  di-exclude) diganti 3 test baru (assert tidak ada sama sekali di
+  `JOB_REGISTRY`/kedua sequence/`gold_screener.depends_on`). 2 floor
+  assertion (`len(DAILY_SEQUENCE) >= 15`) diturunkan ke `>= 13` dengan
+  trace eksplisit ke ADR-043 — pengurangan yang disengaja, bukan
+  regresi yang perlu disamarkan floor.
+- `tests/integration/test_runner_weekly_cadence.py` (`GATE-N2`): ditulis
+  ulang — `gold_screener` kini disatisfy langsung via 3 dependency
+  aktualnya; test baru mengkonfirmasi `bronze_finnhub`/
+  `silver_fundamental`/`silver_sentiment` gagal bersih via
+  `SystemExit` yang sama seperti nama job tidak dikenal manapun.
+- `tests/integration/test_full_system.py`: docstring
+  `test_l7_pipeline_sequence_comprehensive` diupdate — Opsi B kini
+  closed (retired), bukan "belum diimplementasikan"; floor `>= 13`
+  tidak berubah nilainya, hanya rationale-nya.
+- `tests/unit/test_preexisting_violations_v1.py`: 2 class dihapus
+  (`TestSILAIO004FundamentalProcessor`, `TestSILAIO004SentimentProcessor`
+  — 10 test) — target file sudah tidak ada. `TestGlobalAuditClearance`:
+  2 entry `silver/fundamental_processor.py`/`silver/sentiment_processor.py`
+  dihapus dari `AUDIT_SCOPE_FILES` dan dari parametrize
+  `test_no_direct_write_parquet` — sebelumnya di-skip graceful via
+  `exists()` guard (sumber "6 skipped" yang sempat muncul di satu run
+  antara), kini dihapus total sebagai referensi basi, bukan dibiarkan
+  skip selamanya.
+- `KNOWN_RISKS.md`: RISK-4 judul + status diubah dari "✅ FIXED (dormant,
+  hardened)" ke "✅ RESOLVED (retired)", struktur mengikuti persis RISK-1
+  (`tvdatafeed`) — section historis dipertahankan sebagai catatan, section
+  "Resolution (ADR-043 + ADR-044, 22 Aug 2026)" baru ditambahkan.
+- `pyproject.toml`: `finnhub-python = "*"` dihapus dengan dated comment;
+  `poetry.lock` diregenerasi (diff: persis 1 package dihapus, 0
+  ditambahkan — `finnhub-python`); versi 1.16.0 → 1.17.0 dengan dated
+  comment block mengikuti gaya GMI-JR-003/ADR-020/ADR-029 yang sudah ada.
+- `.env.example`: `FINNHUB_API_KEY` dihapus total (bukan di-comment) —
+  mengikuti convention file ini sendiri (direkonsiliasi terhadap
+  `os.getenv()` call site nyata, dikonfirmasi nol via grep sweep), bukan
+  precedent `TV_USERNAME`/`TV_PASSWORD` ADR-029 ("left as dead").
+- `README.md`: "Data Sources (12)" → "(11)", baris Finnhub dihapus,
+  dengan catatan pointer ke RISK-4; "Pipeline Jobs (27 registered)" →
+  "(23 registered)"; `DAILY_SEQUENCE (16 jobs)` → "(14 jobs)" dengan
+  listing job diupdate; project tree: `bronze/` 18→16 file,
+  `silver/` 10→8 file, `config/schemas/` 12→10 YAML,
+  `scripts/preflight/` — `check_finnhub_shape.py` dihapus dari listing;
+  Layer Independence Guarantee table — baris Silver tidak lagi
+  menyebut "one sanctioned supplement API call (Finnhub sentiment)";
+  Environment Variables template — `FINNHUB_API_KEY` dihapus. Referensi
+  historis (roadmap table "Solidification... Finnhub schema validation
+  ✅ Complete (v1.9.0)") sengaja TIDAK diubah — catatan historis akurat
+  pada waktunya, bukan klaim tentang state sekarang.
+
 ## v1.16.0 — Layer-Scoped Runner Commands: `--job bronze/silver/gold` (Agustus 2026)
 
 Diarahkan langsung oleh Ovi ("add these commands to runner... during live
