@@ -1,6 +1,154 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.17.0"
+version = "1.17.1"
+# FIX ADR-045 + ADR-046 + ADR-047 (GMI_Decision_Document_v11.docx, 22 Aug
+# 2026): all three items from GMI v11 reconciled into one version bump.
+# Bronze OHLCV write/scan path gains a timeframe partition (ADR-045); MTF
+# score coverage repaired via Path C, Ovi's explicit choice (ADR-046); AU/AG
+# commodity tickers routed through inst.yfinance_symbol (ADR-047). All
+# three are independently-scoped fixes to existing broken components --
+# nothing here changes an Interface Contract (GD §0.4/§17.6) or Silver/Gold
+# output schema, so this stays a single PATCH bump rather than fragmenting
+# into three.
+#
+# ADR-045: market_ingester.py::_run_symbol() previously passed a
+# symbol+market+source-scoped bronze_path/asset_class (no timeframe
+# dimension) to both IncFetchProtocol.resolve_start_date() and
+# BronzeIngester.write(). Since DEFAULT_TIMEFRAMES=[1D,1W,1M] processes 1D
+# first, 1D's freshly-written file made the read-side scan report a
+# near-today last_date for 1W/1M (trivial ~7-day fetch instead of a
+# multi-year cold-start backfill), AND the write-side same-day idempotency
+# check (FIX GD-F08) then found 1D's file and skipped 1W/1M's write
+# entirely -- confirmed via a direct read of base_ingester.py this thread,
+# matching the exact "[Bronze] Idempotent skip" log line from the 21 Aug
+# 2026 live-test bug report. Fix: timeframe folded into both paths at the
+# call site only (asset_class=f"market/ohlcv/{market}/timeframe={tf}") --
+# BronzeIngester/IncFetchProtocol signatures unchanged, since they are
+# shared by every non-OHLCV Bronze domain (FRED/BLS/BEA/Treasury/IMF/BIS),
+# none of which have a timeframe concept.
+#
+# CONSEQUENTIAL to ADR-045 (not named in its own Consequences, found
+# empirically during this implementation -- fixed within scope, approved
+# by Ovi mid-session, per this project's own consequential-edit-discipline
+# precedent):
+#   (a) market_ingester.py::_run_context_symbol() (Layer 2 / GMI-BRZ-001)
+#       shares the identical bronze_path/asset_class construction as
+#       _run_symbol() and therefore the identical starvation bug --
+#       ADR-045's own text was written against _run_symbol() only. Fixed
+#       in the same pass; left unfixed it would mean Layer 2 context
+#       anchors (VIX, DXY, global indices, ETFs) inherit the exact bug
+#       ADR-045 exists to close for Layer 1.
+#   (b) FAR MORE SEVERE, genuinely new finding: ohlcv_processor.py's Bronze
+#       read glob (both run() PASS 1 and run_context()) has NEVER been
+#       timeframe-scoped -- it globs market/**/symbol={symbol}/**/*.parquet
+#       with no tf segment at all. Empirically reproduced against a real
+#       production Bronze AAPL file this thread (2,512 daily-cadence rows,
+#       the only Bronze data that has ever successfully persisted, per (a)
+#       above): the pre-fix glob matched IDENTICALLY for tf='5m','15m',
+#       '1H','1D','1W','1M' alike. Silver had never actually been run in
+#       this repo (no data/silver/ directory existed pre-fix), so this had
+#       not yet corrupted real output -- but it would have on the very
+#       first silver_ohlcv run, independent of ADR-045: every declared
+#       _RUN_BRONZE_TFS timeframe would silently write the SAME underlying
+#       1D-cadence rows under a different timeframe label. Left unfixed,
+#       ADR-045's own Bronze-side partition fix would have made this
+#       WORSE, not moot -- once Bronze genuinely separates 1D/1W/1M/1H
+#       (ADR-046 Path C below), this glob's recursive '**' would union all
+#       of them back together into one blended multi-cadence series per
+#       Silver TF file instead of scoping to the one Bronze partition that
+#       actually matches. Fixed in the same pass: timeframe={tf} segment
+#       added to both glob sites, matching Bronze's new partition
+#       structure exactly. New regression test:
+#       test_run_does_not_blend_timeframes_across_bronze_partitions (two
+#       differently-sized Bronze fixtures at 1D vs 1W must produce two
+#       differently-sized Silver outputs, not an identical union).
+#   This finding directly fed ADR-046's own calculus: even the old
+#   3-working-timeframe state (1D/1W/1M) was never 3 independent votes
+#   pre-fix -- Silver's glob bug meant all three would have read the
+#   identical Bronze blob, so mtf_score's only non-zero values would have
+#   been -3/0/+3, never anything reflecting genuine weekly/monthly
+#   divergence from daily.
+#
+# ADR-046 (Path C, Ovi's explicit choice among the three options GMI v11
+# presented): MTF score coverage was structurally unreachable before this
+# fix -- 5m/15m/1H were never fetched into Bronze, and since 4H synthesizes
+# from Silver 1H only (ohlcv_aggregator.py), 4H was empty too. Only 1D/1W/
+# 1M ever contributed a real value (and per the consequential finding
+# above, not even independently), capping |mtf_score| at 3 while
+# screener.py required >=5 AND signal_quality IN ('A','B') -- the watchlist
+# was mathematically incapable of returning a single row. Path C: 1H wired
+# up alone (not 5m/15m) via a new LAYER1_TIMEFRAMES constant
+# (DEFAULT_TIMEFRAMES + ["1H"]) applied only to job_registry.py's
+# _bronze_ohlcv() -- Layer 2 context (_bronze_ohlcv_context()) deliberately
+# untouched, still DEFAULT_TIMEFRAMES only, per run_context()'s own
+# docstring (no Layer 2 consumer needs intraday context data this cycle).
+# 1H both contributes a real trend value directly and unblocks 4H's
+# existing 1H->4H Silver synthesis, raising real contributors from 3 to 5.
+# FALLBACK_YEARS["1H"]=2 and the yfinance "1H"->"1h" interval mapping were
+# both already correct (no change needed -- verified, not assumed).
+#
+# Score range and grade boundaries recalibrated to the 5-contributor
+# reality per Ovi's explicit instruction, rather than left at their old
+# 7-timeframe values while quietly serving fewer real inputs (the exact
+# failure mode ADR-046 exists to close): TIMEFRAMES trimmed to
+# ["1H","4H","1D","1W","1M"] in both technical_signals.py and
+# mtf_alignment.py (5m/15m removed entirely, not padded to permanent 0 --
+# both files must agree, since technical_signals.py only computes
+# tech_signals_{TF}.parquet for TFs in its own list, and mtf_alignment.py
+# only reads what exists). New score range -5..+5. New grades (D removed
+# -- C is now the catch-all "weak" bucket that D used to be): A >= 4,
+# B == 3, C <= 2. screener.py's MIN_MTF_SCORE: 5 -> 3 (matches the new
+# grade B boundary exactly, same relationship the old 5 had to the old
+# grade B). Downstream consumers of the old scheme updated to match:
+# backtest/engine.py's BacktestConfig.min_mtf_score default (5 -> 3) and
+# its quality-degradation exit/default-sentinel logic ("D" -> "C", the new
+# catch-all); config/pipeline_config.py's min_mtf_score_screener default
+# (5 -> 3, though this field currently has no source-code reader --
+# screener.py's own MIN_MTF_SCORE module constant is what's actually
+# wired); mtf_alignment.py's get_mtf_summary() no longer returns grade_D.
+#
+# ADR-047: market_ingester.py::_run_symbol()'s commodity branch now reads
+# inst.yfinance_symbol directly for market=='commodity', mirroring
+# _run_context_symbol()'s already-established Layer 2 pattern -- rather
+# than to_api_symbol(inst.raw_symbol, inst.market, primary_src), whose
+# commodity branch has no override table and falls through to a generic
+# sym + "=F" suffix rule, producing invalid AU=F/AG=F (confirmed against
+# config/instruments_identity.yaml, which already carries the correct
+# GC=F/SI=F on inst.yfinance_symbol via InstrumentLoader). CL=F was already
+# correct by coincidence (WTI's ticker prefix matches its instrument
+# symbol) and is unaffected. to_api_symbol() itself is left unchanged --
+# call-site fix only, per ADR-047's own Rejected alternative (a commodity
+# override table inside to_api_symbol() would reintroduce the exact
+# dual-source-of-truth shape that plausibly caused this bug in the first
+# place).
+#
+# Not decided here / explicitly out of scope this pass: pre-existing
+# Bronze OHLCV data written under the pre-ADR-045 non-partitioned path is
+# left as-is (quarantine-and-rebuild vs. leave-and-cold-start-forward is
+# Ovi's call per ADR-045's own Consequences, separate from this code fix)
+# -- confirmed via direct Filesystem MCP inspection of the live repo this
+# thread that only 1D data has ever actually persisted (source=yfinance/
+# symbol=AAPL/year=2026/month=08/, 2,512 rows, 2016-08-23 to 2026-08-20),
+# so the new timeframe={tf} partition starts genuinely empty for every
+# symbol on the next run rather than needing an explicit migration. 5m/15m
+# remain permanently unfetched by design (Path C, not Path A) -- grade A
+# under the new scheme (|score|>=4) is reachable at 4/5 contributors
+# agreeing, not requiring unanimous 5/5.
+#
+# PATCH bump (not MINOR): bug fixes to existing broken components across
+# all three ADRs, no Interface Contract (GD §0.4/§17.6) or Silver/Gold
+# schema change -- Bronze partition layout and the MTF score's internal
+# TIMEFRAMES list are both internal implementation details, not promised
+# outputs (the watchlist's column schema is unchanged; only which rows
+# clear the bar changes). 1510 -> 1521 tests (+11: 6 new in
+# test_market_ingester.py for ADR-045/047, 1 regression test + fixture-
+# helper rewrites in test_ohlcv_processor.py for the Silver companion fix,
+# +1 net in test_mtf_alignment.py after the ADR-046 Path C grade-scheme
+# rework), 0 failed, 0 regressions, coverage 88.04% (gate 80%). See
+# CHANGELOG.md v1.17.1 and
+# dev-log/2026-08-22-adr045-046-047-bronze-timeframe-mtf-coverage-au-ag-ticker.md
+# for full detail.
+#
 # FIX ADR-043 + ADR-044 (GMI_Decision_Document_v10.docx, 22 Aug 2026): Finnhub
 # retired in full. Sentiment returned HTTP 403 on every symbol in a live
 # `--job bronze` run (21 Aug 2026) -- a plan-tier gate, not a defect.

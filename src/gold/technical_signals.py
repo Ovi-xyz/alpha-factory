@@ -1,7 +1,8 @@
 """
 technical_signals.py — IDD §3.4 + GD §5.2.2 + Architecture v2.0 §5.2
 Gold Technical Signals: compute semua indicators untuk Layer 1 active_ohlcv
-symbols (~190, liquidity-screened) × 7 timeframes.
+symbols (~190, liquidity-screened) × 5 timeframes (FIX ADR-046 Path C —
+was 7; 5m/15m removed, see TIMEFRAMES below).
 
 Output: data/gold/signals/tech_signals_{TF}.parquet
 
@@ -66,7 +67,14 @@ from src.utils.silver_scope import layer1_globs  # FIX GLD-L2-01
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-TIMEFRAMES        = ["5m", "15m", "1H", "4H", "1D", "1W", "1M"]
+# FIX ADR-046 Path C (GMI_Decision_Document_v11.docx §2, decided by Ovi):
+# 5m/15m removed — never fetched into Bronze under Path C (only 1H was
+# wired up alongside ADR-045's partition fix), so attempting them here
+# only ever produced "no Layer 1 Silver data yet" warnings on every run,
+# forever. Trimming avoids that permanently-wasted iteration and matches
+# mtf_alignment.py's own TIMEFRAMES list exactly (both files must agree —
+# see that module's docstring for the full recalibrated grade table).
+TIMEFRAMES        = ["1H", "4H", "1D", "1W", "1M"]
 GOLD_SIG_PATH      = Path("data/gold/signals")
 SILVER_OHLCV_PATH  = Path("data/silver/market_ohlcv")  # FIX GLD-L2-01: was SILVER_PATH_TMPL string
 

@@ -205,9 +205,9 @@ class TestBuildWatchlistFiltering:
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
         run_date = date(2026, 6, 1)
         _write_mtf(_mtf_path(mtf_dir, run_date), [
-            _mtf_row("AAPL", 7, "A"),     # qualifies
-            _mtf_row("TSLA", 4, "C"),     # |4| < MIN_MTF_SCORE=5 -> excluded
-            _mtf_row("NFLX", -5, "D"),    # grade D excluded regardless of score
+            _mtf_row("AAPL", 5, "A"),     # qualifies
+            _mtf_row("TSLA", 2, "C"),     # |2| < MIN_MTF_SCORE=3 -> excluded
+            _mtf_row("NFLX", -4, "C"),    # grade C excluded regardless of score
         ])
         result = build_watchlist(run_date)
         assert result["symbol"].to_list() == ["AAPL"]
@@ -215,7 +215,7 @@ class TestBuildWatchlistFiltering:
     def test_negative_score_grade_b_qualifies(self, tmp_path, monkeypatch):
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
         run_date = date(2026, 6, 1)
-        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("MSFT", -5, "B")])
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("MSFT", -3, "B")])
         result = build_watchlist(run_date)
         assert result["symbol"].to_list() == ["MSFT"]
 
@@ -262,7 +262,7 @@ class TestBuildWatchlistFiltering:
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
         run_date = date(2026, 6, 1)
         _write_mtf(_mtf_path(mtf_dir, run_date), [
-            _mtf_row("WEAK1", 3, "D"), _mtf_row("WEAK2", -2, "D"),
+            _mtf_row("WEAK1", 2, "C"), _mtf_row("WEAK2", -2, "C"),
         ])
         result = build_watchlist(run_date)
         assert result.is_empty()
@@ -405,7 +405,7 @@ class TestSimplifiedWatchlistDirect:
     def test_filters_and_sorts_by_score(self, tmp_path):
         path = tmp_path / "mtf.parquet"
         pl.DataFrame([
-            _mtf_row("LOW", 5, "B"), _mtf_row("HIGH", 7, "A"), _mtf_row("SKIP", 3, "D"),
+            _mtf_row("LOW", 5, "B"), _mtf_row("HIGH", 7, "A"), _mtf_row("SKIP", 3, "C"),
         ]).write_parquet(path)
         result = _simplified_watchlist(path, date(2026, 6, 1))
         assert result["symbol"].to_list() == ["HIGH", "LOW"]

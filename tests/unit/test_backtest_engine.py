@@ -18,7 +18,7 @@ class TestBacktestConfig:
         assert cfg.initial_capital   == 100_000.0
         assert cfg.commission_pct    == 0.001
         assert cfg.max_position_pct  == 0.10
-        assert cfg.min_mtf_score     == 5
+        assert cfg.min_mtf_score     == 3
         assert cfg.min_signal_quality == "B"
 
     def test_custom_config(self):

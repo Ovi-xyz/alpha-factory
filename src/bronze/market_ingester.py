@@ -48,6 +48,20 @@ DEFAULT_TIMEFRAMES = ["1D", "1W", "1M"]
 # Bronze hanya fetch raw data dari source. 4H bukan raw source data — synthetic.
 INTRADAY_TIMEFRAMES = ["5m", "15m", "1H"]
 
+# FIX ADR-046 Path C (GMI_Decision_Document_v11.docx §2, decided by Ovi):
+# 1H wired up for Layer 1 ONLY — not 5m/15m (those remain permanently
+# unfetched, Path C is the deliberate middle ground between full intraday
+# restoration and abandoning the 7-timeframe design). 1H both contributes
+# a real MTF trend value directly and unblocks the existing 1H->4H Silver
+# synthesis (ohlcv_aggregator.py), raising real contributors from 3 to 5.
+# Scoped to Layer 1 via job_registry.py's _bronze_ohlcv() only — Layer 2
+# context (_bronze_ohlcv_context()) keeps DEFAULT_TIMEFRAMES unchanged, per
+# run_context()'s own docstring: no Layer 2 consumer needs intraday context
+# data in this cycle. Requires ADR-045 (this same file) to have landed
+# first — an unpartitioned Bronze bucket would starve 1H via the identical
+# same-day idempotency collision ADR-045 exists to close for 1D/1W/1M.
+LAYER1_TIMEFRAMES = DEFAULT_TIMEFRAMES + ["1H"]
+
 # ADD (hardcode-avoidance pass, v1.11.2): named constant — sebelumnya literal
 # `0.6` diduplikasi persis di dua lokasi (Layer 1 loop + Layer 2/context loop),
 # masing-masing dengan komentar terpisah yang menjelaskan alasan yang sama
@@ -148,10 +162,30 @@ class MarketOHLCVIngester(BronzeIngester):
         fetch_tf    = tf
         # FIX B-F01: gunakan primary_src dari helper — source tidak pernah terdefinisi
         primary_src = self._primary_source_for(inst)
-        api_symbol  = to_api_symbol(inst.raw_symbol, inst.market, primary_src)
+        # FIX ADR-047 (GMI_Decision_Document_v11.docx §2): commodity market
+        # routes through inst.yfinance_symbol directly, mirroring
+        # _run_context_symbol()'s already-established Layer 2 pattern.
+        # to_api_symbol()'s commodity branch has no override table and falls
+        # through to a generic sym + "=F" suffix rule, producing invalid
+        # AU=F/AG=F — instruments_identity.yaml already carries the correct
+        # GC=F/SI=F on inst.yfinance_symbol via InstrumentLoader. CL=F was
+        # already correct by coincidence and is unaffected by this change.
+        # to_api_symbol() itself is left unchanged (call-site fix only) and
+        # remains the resolution path for every other Layer 1 market.
+        if inst.market == "commodity":
+            api_symbol = inst.yfinance_symbol
+        else:
+            api_symbol = to_api_symbol(inst.raw_symbol, inst.market, primary_src)
 
+        # FIX ADR-045 (GMI_Decision_Document_v11.docx §2): timeframe folded
+        # into the Bronze scan/write path. Previously bronze_path was
+        # symbol+market+source-scoped only, with no timeframe dimension —
+        # IncFetchProtocol._scan_last_date()'s glob would see 1D's freshly-
+        # written file (DEFAULT_TIMEFRAMES processes 1D first) and report a
+        # near-today last_date for 1W/1M, returning a trivial ~7-day fetch
+        # window instead of the correct multi-year cold-start backfill.
         start_date = self.inc.resolve_start_date(
-            bronze_path=self.BRONZE_OHLCV_PATH / inst.market,
+            bronze_path=self.BRONZE_OHLCV_PATH / inst.market / f"timeframe={tf}",
             symbol=inst.symbol,
             source=primary_src,  # FIX B-F01: primary_src bukan source
             run_date=run_date,
@@ -196,10 +230,15 @@ class MarketOHLCVIngester(BronzeIngester):
         # Add _tz_hint Bronze extension (G3 FIX)
         tz_hint = {"_tz_hint": inst.timezone}
 
+        # FIX ADR-045: timeframe folded into asset_class — must match the
+        # bronze_path passed to resolve_start_date() above exactly, or the
+        # write-side idempotency check (BronzeIngester.write(), FIX GD-F08)
+        # and the read-side scan (IncFetchProtocol._scan_last_date()) would
+        # disagree on where a given (symbol, tf) pair's data lives.
         self.write(
             df=df,
             source=actual_source,  # FIX B-F01/B-F02: actual source dari ChainedAdapter
-            asset_class=f"market/ohlcv/{inst.market}",
+            asset_class=f"market/ohlcv/{inst.market}/timeframe={tf}",
             symbol=inst.symbol,
             extra_metadata=tz_hint,
         )
@@ -373,8 +412,19 @@ class MarketOHLCVIngester(BronzeIngester):
         primary_src = self._primary_source_for(inst)   # 'yfinance' untuk semua Layer 2
         api_symbol  = inst.yfinance_symbol              # LANGSUNG — bukan to_api_symbol()
 
+        # FIX ADR-045 (consequential — GMI_Decision_Document_v11.docx §2):
+        # Layer 2 context ingestion iterates the SAME self.timeframes list
+        # per symbol (run_context() loops 1D/1W/1M) via the SAME shared
+        # IncFetchProtocol/BronzeIngester.write() base classes as Layer 1 —
+        # the identical symbol+market+source-scoped-only path (no tf
+        # dimension) starves 1W/1M for Layer 2 anchors exactly as it did
+        # for Layer 1 before this fix. Not explicitly named in ADR-045's
+        # own Consequences (written against _run_symbol() only), but the
+        # same root cause applies verbatim here; left unfixed it would mean
+        # Layer 2 context anchors (VIX, DXY, global indices, ETFs) inherit
+        # the identical bug ADR-045 exists to close for Layer 1.
         start_date = self.inc.resolve_start_date(
-            bronze_path=self.BRONZE_OHLCV_PATH / inst.market,   # 'context' bucket
+            bronze_path=self.BRONZE_OHLCV_PATH / inst.market / f"timeframe={tf}",   # 'context' bucket
             symbol=inst.symbol,
             source=primary_src,
             run_date=run_date,
@@ -413,7 +463,7 @@ class MarketOHLCVIngester(BronzeIngester):
         self.write(
             df=df,
             source=actual_source,
-            asset_class=f"market/ohlcv/{inst.market}",   # -> market/ohlcv/context
+            asset_class=f"market/ohlcv/{inst.market}/timeframe={tf}",   # -> market/ohlcv/context/timeframe={tf}
             symbol=inst.symbol,
             extra_metadata=tz_hint,
         )

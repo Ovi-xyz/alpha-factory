@@ -75,7 +75,7 @@ class PipelineConfig:
     null_tolerance_pct:        float = 0.001   # 0.1% max null rate
 
     # ── Gold settings ─────────────────────────────────────────────────────────
-    min_mtf_score_screener: int   = 5         # Screener: |score| >= 5
+    min_mtf_score_screener: int   = 3         # FIX ADR-046 Path C: Screener: |score| >= 3 (was 5)
     screener_top_n:          int   = 20        # Max watchlist size
     max_per_cluster:         int   = 2         # Correlation concentration guard
     correlation_lookback:    int   = 65        # 60D + buffer

@@ -1768,7 +1768,202 @@ elsewhere. Coverage: 81.46% aggregate (gate: 80%).
 
 ---
 
-*Last updated: v1.15.2 — `GMI_Decision_Document_v9.docx` (14 Aug 2026):
+## RISK-20 (NEW): MTF score was structurally unreachable — watchlist mathematically incapable of returning a single row — RESOLVED (ADR-046 Path C)
+
+**Status:** ✅ **FIXED (22 Aug 2026).** Discovered via live-code trace in
+`GMI_Decision_Document_v11.docx` §1.3–1.5 (no live data run needed — the
+formula's own thresholds prove the ceiling unreachable), resolved this
+session per Ovi's explicit choice of Path C.
+
+**GD Reference:** GD §6.3 (MTF score −7..+7, grades A/B/C/D),
+Supplementary Design v1.1 (`bronze_ohlcv_daily` fetch scope).
+
+### What the risk was
+
+`mtf_alignment.py` summed `TIMEFRAMES = ["5m","15m","1H","4H","1D","1W","1M"]`
+into `mtf_score`, filling any timeframe with no matching
+`tech_signals_{TF}.parquet` to a literal `0` rather than excluding it from
+the sum. `market_ingester.py`'s `INTRADAY_TIMEFRAMES = ["5m","15m","1H"]`
+was defined but wired into no job — only `DEFAULT_TIMEFRAMES=[1D,1W,1M]`
+was ever fetched. Because `ohlcv_aggregator.py` synthesizes 4H from Silver
+1H only, and 1H was never fetched either, 4H was empty too. Four of the
+seven `TIMEFRAMES` entries — 5m, 15m, 1H, 4H — contributed 0 to every
+symbol's score, every day, leaving only 1D/1W/1M able to contribute a
+real ±1 each: maximum achievable `|mtf_score|` was 3. `screener.py`
+required `ABS(mtf_score) >= 5 AND signal_quality IN ('A','B')` — under
+the grade table (A: ≥6, B: ==5, C: ==4, D: ≤3), a ceiling of 3 falls
+entirely inside grade D. The screener's `mtf` CTE returned zero rows
+**unconditionally** — not a probabilistic or market-condition-dependent
+outcome, a structural certainty traced end to end against the live
+formula and live threshold constants.
+
+### Why this was invisible
+
+Every individual piece degraded gracefully and logged only a WARNING
+("treating as neutral") — no exception ever propagated, no job ever
+failed, `run_job()`'s sentinel was written every day as if the pipeline
+had succeeded. `build_watchlist()` returning an empty DataFrame and
+`run()` logging "No candidates found" is indistinguishable, from a
+status check that only looks at sentinel presence, from a day with
+genuinely no qualifying symbols. This is the same failure shape as
+RISK-17 (EIA silent zero-row writes) and RISK-19 (silent registry drops)
+— four independently-reasonable degradation decisions compounding into a
+structurally guaranteed empty output, with no single line of code that
+looks wrong in isolation.
+
+### Fix (Path C — Ovi's explicit choice among three options presented)
+
+1H wired up alone (not 5m/15m) via a new `LAYER1_TIMEFRAMES =
+DEFAULT_TIMEFRAMES + ["1H"]` constant, applied only to
+`job_registry.py::_bronze_ohlcv()` (Layer 2 context deliberately
+untouched — no consumer needs intraday context data this cycle). This
+required ADR-045 (Bronze OHLCV timeframe partition, this same session) to
+land first, or 1H would starve via the identical same-day idempotency
+collision ADR-045 exists to close for 1D/1W/1M. Real contributors raised
+from 3 to 5 (1H, 4H, 1D, 1W, 1M) — 1H both scores directly and unblocks
+4H's existing synthesis. `TIMEFRAMES` in `technical_signals.py` and
+`mtf_alignment.py` trimmed to exactly these 5 (5m/15m removed entirely,
+not left as permanent 0-padding). Score range and grades recalibrated per
+Ovi's explicit instruction: −5..+5, **A ≥ 4, B == 3, C ≤ 2** (grade D
+removed — C is the new catch-all). `screener.py`'s `MIN_MTF_SCORE`: 5 → 3,
+preserving the original design relationship to the grade B boundary.
+Downstream consumers of the old scheme (`backtest/engine.py`'s
+`min_mtf_score` default and its `quality == "D"` exit/sentinel logic,
+`pipeline_config.py`'s `min_mtf_score_screener` default) updated to match.
+
+### What this does NOT resolve
+
+5m/15m remain permanently unfetched by design (Path C, not Path A) —
+grade A (`|score|>=4`) is reachable at 4-of-5 contributors agreeing, not
+5-of-5 unanimous, which is a real (accepted) change in what "strong
+alignment" means versus the original 7-timeframe design intent.
+
+### Verification
+
+`test_mtf_alignment.py`'s `TestMTFScoreLogic` and
+`TestComputeMtfAlignmentScoring` rewritten end to end for the new range —
+every threshold asserted is one this project's own formula actually
+produces post-fix, not a value carried over from the old scheme.
+`test_screener.py`, `test_backtest_engine.py`, `test_pipeline_config.py`,
+`test_full_system.py` updated to match. 1510 → 1521 passed (session
+total, combined with RISK-21 and ADR-045/047 below), 0 regressions.
+Coverage 88.04% (gate 80%).
+
+---
+
+## RISK-21 (NEW): Silver's Bronze-read glob was timeframe-blind — every declared timeframe would have silently read the identical rows — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED (22 Aug 2026).** Found empirically while verifying
+ADR-045 (Bronze OHLCV timeframe partition) would actually fix its
+reported symptom — not named in ADR-045's own text, which was written
+against the Bronze write/scan side only.
+
+**GD Reference:** GD §17.2 (Layer Independence — Silver reads Bronze via
+a defined interface), Supplementary Design v1.1 G1
+(`IncFetchProtocol`/timeframe scoping pattern this bug's fix mirrors).
+
+### What the risk was
+
+`ohlcv_processor.py`'s Bronze-read glob (both `run()` PASS 1 and
+`run_context()`) constructed
+`BRONZE_OHLCV_PATH / market / "**" / f"symbol={symbol}" / "**" / "*.parquet"`
+— no timeframe segment anywhere in the pattern. Reproduced empirically
+against a real production Bronze file (copied from the live repo via the
+Filesystem MCP connector, not synthesized): a real `AAPL` Bronze parquet
+(2,512 daily-cadence rows, 2016-08-23 to 2026-08-20 — the only Bronze
+OHLCV data that had ever successfully persisted, per RISK-20/ADR-045's
+same-day idempotency finding) matched this glob **identically** for
+`tf='5m','15m','1H','1D','1W','1M'` — every one of PASS 1's six declared
+timeframes. Silver had never actually been run against this repo's Bronze
+data (`data/silver/` did not exist), so no real output had been
+corrupted yet — but the very first `silver_ohlcv` run would have written
+the same 2,512 rows to `AAPL_5m_silver.parquet`,
+`AAPL_15m_silver.parquet`, `AAPL_1H_silver.parquet`, etc., all mislabeled
+with a `timeframe` column that did not match their actual cadence.
+
+Left unfixed, ADR-045's own Bronze-side partition fix would have made
+this **worse, not moot**: once Bronze genuinely separates 1D/1W/1M/1H
+into distinct partitions, this glob's recursive `**` would union all of
+them back together into one blended multi-cadence series per Silver TF
+file, instead of scoping to the one Bronze partition that actually
+matches the timeframe being processed.
+
+This finding also revised RISK-20's own severity retroactively: even the
+pre-fix "3 working timeframes" (1D/1W/1M) were never 3 independent votes
+— had Silver ever actually run, all three would have read the identical
+Bronze blob (since only 1D ever successfully wrote), so `mtf_score`'s
+only non-zero values would ever have been −3/0/+3, never a value
+reflecting genuine weekly/monthly divergence from daily.
+
+### Why this was invisible
+
+Silver had simply never been run against real Bronze data in this repo —
+a gap in *operational history*, not a gap in test coverage (the existing
+unit tests all wrote a single shared Bronze fixture per test and asserted
+every TF picked it up, which is passing-but-wrong: that assertion is
+exactly what a timeframe-blind glob would make true, and the tests never
+distinguished "correctly scoped" from "accidentally uniform"). No error,
+no exception, no warning — a glob that matches everything looks
+identical to a glob that matches the right thing, right up until two
+genuinely different timeframes' worth of Bronze data exist to tell them
+apart.
+
+### Fix
+
+`timeframe={tf}` segment added to both glob-construction sites in
+`ohlcv_processor.py`, matching Bronze's new ADR-045 partition structure
+exactly (`market/timeframe={tf}/source={src}/symbol={sym}/...`).
+
+### Verification
+
+Empirical reproduction performed *before* writing the fix, not after
+(matching this project's own empirical-first discipline): the real
+`AAPL` Bronze file was copied into an isolated sandbox and the exact
+pre-fix glob pattern run against it for all 6 `_RUN_BRONZE_TFS` entries,
+confirming identical matches across every one. New regression test
+`test_run_does_not_blend_timeframes_across_bronze_partitions`: two
+differently-sized Bronze fixtures written at `timeframe=1D` (40 rows) and
+`timeframe=1W` (5 rows) for the same symbol must produce two
+differently-sized Silver outputs — before the fix this would have been
+one glob matching both, after the fix each timeframe reads only its own
+partition. Existing fixture helpers (`_write_bronze_fixture`,
+`_write_bronze_context_fixture`) reworked to require an explicit
+`timeframe` parameter, closing the "single shared fixture satisfies every
+TF" gap the old tests never caught. 1510 → 1521 passed (session total,
+combined with RISK-20 and ADR-045/047 above), 0 regressions. Coverage
+88.04% (gate 80%).
+
+---
+
+*Last updated: v1.17.1 — `GMI_Decision_Document_v11.docx` (22 Aug 2026):
+all three items (ADR-045, ADR-046, ADR-047) reconciled into a single
+version bump per Ovi's explicit instruction, since none had been mirrored
+to the live repo before that instruction arrived. ADR-045: Bronze OHLCV
+write/scan path gains a `timeframe={tf}` partition — 1D's same-day
+idempotency write was silently starving 1W/1M (and would have starved 1H)
+on every run, not just cold start (RISK-20). Consequential: identical fix
+applied to `_run_context_symbol()` (Layer 2), and a far more severe,
+genuinely new finding — Silver's own Bronze-read glob was timeframe-blind
+and would have blended every declared timeframe's Bronze data together on
+the very first `silver_ohlcv` run (RISK-21) — found and fixed in the same
+pass, approved by Ovi mid-session given the universe-wide blast radius.
+ADR-046 Path C (Ovi's explicit choice, with exact recalibrated grade
+thresholds supplied directly): MTF score was mathematically incapable of
+ever populating the watchlist (RISK-20) — 1H wired into Bronze alone (not
+5m/15m), real contributors raised 3→5, score range recalibrated to −5..+5
+with grade D removed (A≥4, B==3, C≤2 catch-all), `MIN_MTF_SCORE` 5→3, all
+downstream consumers of the old scheme updated to match. ADR-047: AU/AG
+commodity tickers routed through `inst.yfinance_symbol` directly
+(`GC=F`/`SI=F`) instead of `to_api_symbol()`'s generic suffix rule, which
+produced invalid `AU=F`/`AG=F`; `CL=F` unaffected (already correct by
+coincidence). PATCH bump: bug fixes to existing broken components across
+all three ADRs, no Interface Contract or Silver/Gold schema change. 1510
+→ 1521 passed (+11), 0 failed, 0 regressions, coverage 88.04% (gate 80%).
+Pre-existing non-partitioned Bronze OHLCV data left as-is by design
+(confirmed only 1D data had ever actually persisted) — quarantine-vs-
+leave decision remains open, Ovi's call, per ADR-045's own Consequences.
+August 2026.
+Prior entry: v1.15.2 — `GMI_Decision_Document_v9.docx` (14 Aug 2026):
 first live run of all 8 preflight scripts authored the same thread
 surfaced 5 findings across EIA/BEA/FRED, all fixed here. ADR-038: EIA
 APIv1 confirmed fully dead (discontinued Nov 2022) — migrated to APIv2's

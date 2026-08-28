@@ -659,11 +659,26 @@ def run(run_date: date) -> None:
                 continue
             try:
                 # FIX MI-1 (CRITICAL, preserved): wildcard across source=*/ —
-                # Bronze Hive layout is {market}/source={src}/symbol={sym}/year/month/.
-                # A hardcoded source=yfinance/ path silently skips tvdatafeed,
-                # yfinance_jk, polygon, and ForexDayCache-sourced data.
+                # Bronze Hive layout is {market}/timeframe={tf}/source={src}/
+                # symbol={sym}/year/month/. A hardcoded source=yfinance/ path
+                # silently skips tvdatafeed, yfinance_jk, polygon, and
+                # ForexDayCache-sourced data.
+                #
+                # FIX ADR-045 companion (GMI_Decision_Document_v11.docx §2):
+                # timeframe={tf} segment added. Empirically confirmed before
+                # this fix: without a tf-scoped segment here, this glob is
+                # timeframe-blind — for symbol=AAPL with one real Bronze file
+                # (1D cadence, 2512 rows), the pre-fix pattern matched
+                # identically for tf='5m','15m','1H','1D','1W','1M' alike,
+                # so every one of PASS 1's 6 declared timeframes would read
+                # and write the SAME underlying rows under a different
+                # timeframe label. Bronze's own ADR-045 fix (timeframe
+                # folded into its write/scan path) makes real per-tf Bronze
+                # data possible for the first time — without this matching
+                # Silver-side scope, those genuinely distinct timeframes
+                # would be silently unioned back together here instead.
                 pattern = str(
-                    BRONZE_OHLCV_PATH / inst.market
+                    BRONZE_OHLCV_PATH / inst.market / f"timeframe={tf}"
                     / "**"
                     / f"symbol={inst.symbol}"
                     / "**"
@@ -797,8 +812,12 @@ def run_context(run_date: date) -> None:
             try:
                 # Sama seperti PASS 1 Layer 1 — wildcard source=*/ glob
                 # (FIX MI-1 pattern), bronze_path = market/ohlcv/context/
+                # timeframe={tf}/. FIX ADR-045 companion: timeframe={tf}
+                # segment added — identical rationale as PASS 1 Layer 1
+                # above (see that block's comment for the empirical
+                # reproduction of the pre-fix timeframe-blind glob bug).
                 pattern = str(
-                    BRONZE_OHLCV_PATH / inst.market
+                    BRONZE_OHLCV_PATH / inst.market / f"timeframe={tf}"
                     / "**"
                     / f"symbol={inst.symbol}"
                     / "**"

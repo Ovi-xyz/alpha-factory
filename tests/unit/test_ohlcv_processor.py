@@ -382,7 +382,7 @@ class TestRunEntryPoint:
                 return [i.symbol for i in instruments if market is None or i.market == market]
         return _FakeLoader()
 
-    def _write_bronze_fixture(self, tmp_path, symbol, market, source="yfinance"):
+    def _write_bronze_fixture(self, tmp_path, symbol, market, timeframe, source="yfinance"):
         from src.silver.ohlcv_processor import BRONZE_OHLCV_PATH
         base = date(2024, 1, 1)
         df = pl.DataFrame({
@@ -393,15 +393,26 @@ class TestRunEntryPoint:
             "close":     [102.0 + i * 0.5 for i in range(40)],
             "volume":    [1_000_000 + i * 10_000 for i in range(40)],
         })
+        # FIX ADR-045 companion (GMI_Decision_Document_v11.docx §2): Bronze
+        # is now timeframe-partitioned (market/timeframe={tf}/source={src}/
+        # symbol={sym}/...) — fixtures must be written per-timeframe to
+        # exercise the real production path, not a single shared blob.
         out_dir = (
-            tmp_path / BRONZE_OHLCV_PATH / market / f"source={source}"
-            / f"symbol={symbol}" / "year=2024" / "month=01"
+            tmp_path / BRONZE_OHLCV_PATH / market / f"timeframe={timeframe}"
+            / f"source={source}" / f"symbol={symbol}" / "year=2024" / "month=01"
         )
         out_dir.mkdir(parents=True, exist_ok=True)
         df.write_parquet(out_dir / f"{symbol}_raw_fixture.parquet")
 
     def test_run_produces_silver_for_all_bronze_timeframes(self, tmp_path, monkeypatch):
-        """PASS 1: every Bronze raw TF must produce a Silver file when Bronze data exists."""
+        """PASS 1: every Bronze raw TF must produce a Silver file when Bronze data exists.
+
+        FIX ADR-045 companion: each TF now needs its OWN timeframe-scoped
+        Bronze fixture — this is the corrected version of what used to be a
+        single shared fixture (see git history), which encoded the exact
+        pre-fix bug this test now guards against: a single Bronze blob no
+        longer silently satisfies all 6 declared timeframes at once.
+        """
         import src.silver.ohlcv_processor as ohlcv_mod
 
         monkeypatch.chdir(tmp_path)
@@ -410,7 +421,8 @@ class TestRunEntryPoint:
             "src.config.instrument_loader.get_loader",
             lambda: self._fake_loader([inst]),
         )
-        self._write_bronze_fixture(tmp_path, "AAPL", "us_stocks")
+        for tf in ohlcv_mod._RUN_BRONZE_TFS:
+            self._write_bronze_fixture(tmp_path, "AAPL", "us_stocks", tf)
 
         ohlcv_mod.run(date(2025, 6, 1))
 
@@ -418,6 +430,54 @@ class TestRunEntryPoint:
         for tf in ohlcv_mod._RUN_BRONZE_TFS:
             out_path = silver_dir / f"AAPL_{tf}_silver.parquet"
             assert out_path.exists(), f"Missing Silver output for TF={tf}"
+
+    def test_run_does_not_blend_timeframes_across_bronze_partitions(self, tmp_path, monkeypatch):
+        """Regression guard for the timeframe-blind glob bug discovered
+        during ADR-045 implementation: empirically confirmed against a
+        real production Bronze file that, pre-fix, this glob matched
+        identically for every declared _RUN_BRONZE_TFS entry regardless of
+        which timeframe was actually being processed — every Silver TF
+        file for a symbol would silently contain the SAME underlying rows.
+        Two Bronze fixtures with DIFFERENT row counts (hence different date
+        ranges) at 1D vs 1W must produce two Silver files with DIFFERENT
+        row counts — proving PASS 1 does not union them.
+        """
+        import src.silver.ohlcv_processor as ohlcv_mod
+
+        monkeypatch.chdir(tmp_path)
+        inst = self._fake_instrument("AAPL", "us_stocks")
+        monkeypatch.setattr(
+            "src.config.instrument_loader.get_loader",
+            lambda: self._fake_loader([inst]),
+        )
+        self._write_bronze_fixture(tmp_path, "AAPL", "us_stocks", "1D")
+        # A deliberately SMALLER, distinct fixture for 1W — if the glob were
+        # still timeframe-blind, PASS 1 would read the UNION of both (or
+        # whichever glob resolves first) for both TFs, and the two Silver
+        # outputs would end up with identical row counts.
+        from src.silver.ohlcv_processor import BRONZE_OHLCV_PATH
+        base = date(2024, 6, 1)
+        small_df = pl.DataFrame({
+            "timestamp": [base + timedelta(days=i) for i in range(5)],
+            "open":      [200.0] * 5, "high": [201.0] * 5,
+            "low":       [199.0] * 5, "close": [200.5] * 5,
+            "volume":    [500_000] * 5,
+        })
+        out_dir = (
+            tmp_path / BRONZE_OHLCV_PATH / "us_stocks" / "timeframe=1W"
+            / "source=yfinance" / "symbol=AAPL" / "year=2024" / "month=06"
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        small_df.write_parquet(out_dir / "AAPL_raw_fixture.parquet")
+
+        ohlcv_mod.run(date(2025, 6, 1))
+
+        silver_dir = tmp_path / ohlcv_mod.SILVER_OHLCV_PATH / "us_stocks" / "symbol=AAPL"
+        rows_1d = len(pl.read_parquet(silver_dir / "AAPL_1D_silver.parquet"))
+        rows_1w = len(pl.read_parquet(silver_dir / "AAPL_1W_silver.parquet"))
+        assert rows_1d == 40
+        assert rows_1w == 5
+        assert rows_1d != rows_1w
 
     def test_run_pass2_synthesizes_4h_from_silver_1h(self, tmp_path, monkeypatch):
         """PASS 2: Silver 1H written by PASS 1 must drive a Silver 4H synthesis."""
@@ -429,7 +489,7 @@ class TestRunEntryPoint:
             "src.config.instrument_loader.get_loader",
             lambda: self._fake_loader([inst]),
         )
-        self._write_bronze_fixture(tmp_path, "AAPL", "us_stocks")
+        self._write_bronze_fixture(tmp_path, "AAPL", "us_stocks", "1H")
 
         ohlcv_mod.run(date(2025, 6, 1))
 
@@ -467,7 +527,7 @@ class TestRunEntryPoint:
             "src.config.instrument_loader.get_loader",
             lambda: self._fake_loader([inst]),
         )
-        self._write_bronze_fixture(tmp_path, "AAPL", "us_stocks")
+        self._write_bronze_fixture(tmp_path, "AAPL", "us_stocks", "1D")
 
         run_date = date(2025, 6, 1)
         ohlcv_mod.run(run_date)   # first run: processes everything
@@ -512,7 +572,7 @@ class TestRunContextEntryPoint:
                 return instruments
         return _FakeLoader()
 
-    def _write_bronze_context_fixture(self, tmp_path, symbol, source="yfinance"):
+    def _write_bronze_context_fixture(self, tmp_path, symbol, timeframe, source="yfinance"):
         from src.silver.ohlcv_processor import BRONZE_OHLCV_PATH
         base = date(2024, 1, 1)
         df = pl.DataFrame({
@@ -524,8 +584,8 @@ class TestRunContextEntryPoint:
             "volume":    [1_000_000 + i * 10_000 for i in range(40)],
         })
         out_dir = (
-            tmp_path / BRONZE_OHLCV_PATH / "context" / f"source={source}"
-            / f"symbol={symbol}" / "year=2024" / "month=01"
+            tmp_path / BRONZE_OHLCV_PATH / "context" / f"timeframe={timeframe}"
+            / f"source={source}" / f"symbol={symbol}" / "year=2024" / "month=01"
         )
         out_dir.mkdir(parents=True, exist_ok=True)
         df.write_parquet(out_dir / f"{symbol}_raw_fixture.parquet")
@@ -540,7 +600,8 @@ class TestRunContextEntryPoint:
             "src.config.instrument_loader.get_loader",
             lambda: self._fake_loader([inst]),
         )
-        self._write_bronze_context_fixture(tmp_path, "VIX")
+        for tf in ohlcv_mod._RUN_CONTEXT_TFS:
+            self._write_bronze_context_fixture(tmp_path, "VIX", tf)
 
         ohlcv_mod.run_context(date(2025, 6, 1))
 
@@ -561,7 +622,7 @@ class TestRunContextEntryPoint:
             "src.config.instrument_loader.get_loader",
             lambda: self._fake_loader([inst]),
         )
-        self._write_bronze_context_fixture(tmp_path, "N225")
+        self._write_bronze_context_fixture(tmp_path, "N225", "1D")
 
         ohlcv_mod.run_context(date(2025, 6, 1))
 
@@ -583,7 +644,7 @@ class TestRunContextEntryPoint:
             "src.config.instrument_loader.get_loader",
             lambda: self._fake_loader([inst]),
         )
-        self._write_bronze_context_fixture(tmp_path, "VIX")
+        self._write_bronze_context_fixture(tmp_path, "VIX", "1D")
 
         ohlcv_mod.run_context(date(2025, 6, 1))
 
@@ -613,7 +674,7 @@ class TestRunContextEntryPoint:
             "src.config.instrument_loader.get_loader",
             lambda: self._fake_loader([inst]),
         )
-        self._write_bronze_context_fixture(tmp_path, "VIX")
+        self._write_bronze_context_fixture(tmp_path, "VIX", "1D")
 
         run_date = date(2025, 6, 1)
         ohlcv_mod.run_context(run_date)
@@ -638,7 +699,7 @@ class TestRunContextEntryPoint:
             "src.config.instrument_loader.get_loader",
             lambda: self._fake_loader([inst]),
         )
-        self._write_bronze_context_fixture(tmp_path, "VIX")
+        self._write_bronze_context_fixture(tmp_path, "VIX", "1D")
 
         ohlcv_mod.run_context(date(2025, 6, 1))
 

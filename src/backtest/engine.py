@@ -44,7 +44,7 @@ class BacktestConfig:
     initial_capital:    float        = 100_000.0
     commission_pct:     float        = 0.001       # 0.1% per side
     max_position_pct:   float        = 0.10        # Max 10% per position
-    min_mtf_score:      int          = 5
+    min_mtf_score:      int          = 3   # FIX ADR-046 Path C: was 5 (7-TF -7..+7 range)
     min_signal_quality: str          = "B"
     slippage_model:     SlippageModel = field(
         default_factory=lambda: SlippagePreset.BASELINE
@@ -157,7 +157,10 @@ class BacktestEngine:
                     continue
 
                 score   = mtf.get("mtf_score", 0)
-                quality = mtf.get("signal_quality", "D")
+                # FIX ADR-046 Path C: default sentinel "D" -> "C" — grade D
+                # no longer exists in the classification scheme (mtf_alignment.py
+                # now emits only A/B/C; C is the new catch-all "weak" bucket).
+                quality = mtf.get("signal_quality", "C")
 
                 # OHLCV for last bar (for pricing)
                 ohlcv = loader.get_ohlcv(symbol, self.config.timeframe, trade_date, 5)
@@ -172,7 +175,7 @@ class BacktestEngine:
                     should_exit = (
                         (pos.direction == "long"  and score < 0) or
                         (pos.direction == "short" and score > 0) or
-                        quality == "D"
+                        quality == "C"   # FIX ADR-046 Path C: was "D" (grade D removed)
                     )
                     if should_exit:
                         # Estimate slippage on exit

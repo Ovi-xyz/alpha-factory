@@ -2,15 +2,31 @@
 mtf_alignment.py — GD §5.2.3 + §6.3 (Gold MTF Alignment Store)
 Multi-Timeframe alignment score, signal quality grading, entry/stop zones.
 
-MTF Score: sum of trend direction per timeframe (-7 to +7)
-  +1: bullish, -1: bearish, 0: neutral
-  Timeframes: 5m, 15m, 1H, 4H, 1D, 1W, 1M
+FIX ADR-046 Path C (GMI_Decision_Document_v11.docx §2, decided by Ovi):
+MTF score coverage was structurally unreachable before this fix —
+5m/15m/1H were never fetched into Bronze, and since 4H synthesizes from
+Silver 1H only (ohlcv_aggregator.py), 4H was empty too. Only 1D/1W/1M ever
+contributed a real value, capping |mtf_score| at 3 while screener.py
+required >=5 AND signal_quality IN ('A','B') — the watchlist was
+mathematically incapable of returning a single row. Path C (the middle
+path of three considered): wire up Bronze 1H alone (not 5m/15m, see
+ADR-045 for the Bronze partition fix this depends on) — 1H both
+contributes a real trend value directly and unblocks 4H's existing
+synthesis, raising real contributors from 3 to 5 without touching 5m/15m
+at all. The score range and grade boundaries below are recalibrated to
+that 5-contributor reality per Ovi's explicit instruction, rather than
+left at their old 7-timeframe values while quietly serving fewer real
+inputs (the exact failure mode this fix exists to close).
 
-Signal Quality:
-  A: |score| >= 6   (strong alignment)
-  B: |score| == 5   (good alignment)
-  C: |score| == 4   (moderate)
-  D: |score| <= 3   (weak, skip)
+MTF Score: sum of trend direction per timeframe (-5 to +5)
+  +1: bullish, -1: bearish, 0: neutral
+  Timeframes: 1H, 4H, 1D, 1W, 1M — 5m/15m deliberately excluded from the
+  sum (Path C), not merely padded to 0 — see TIMEFRAMES below.
+
+Signal Quality (grade D removed — every symbol now falls into A/B/C):
+  A: |score| >= 4   (strong alignment)
+  B: |score| == 3   (good alignment)
+  C: |score| <= 2   (weak — catch-all, was the "D: skip" bucket pre-fix)
 
 Output: data/gold/mtf/mtf_alignment_{date}.parquet
 """
@@ -43,7 +59,11 @@ GOLD_MTF_PATH     = Path("data/gold/mtf")
 # paths behind one shared constants module is a reasonable follow-up but is
 # a broader, separately-scoped change.
 REGIME_STORE_PATH = Path("data/gold/macro/regime_store.parquet")
-TIMEFRAMES        = ["5m", "15m", "1H", "4H", "1D", "1W", "1M"]
+# FIX ADR-046 Path C: 5m/15m removed — they are never fetched into Bronze
+# under Path C (only 1H was wired up; see ADR-045/046) and would otherwise
+# sit here as permanent always-0 padding forever, which is precisely the
+# "wired but silently zeroed" shape this whole fix exists to close.
+TIMEFRAMES        = ["1H", "4H", "1D", "1W", "1M"]
 
 
 def run(run_date: date) -> None:
@@ -158,12 +178,13 @@ def _compute_mtf_alignment(run_date: date) -> pl.DataFrame:
           .alias("mtf_score")
     ])
 
-    # Signal quality grade (GD §6.3)
+    # Signal quality grade — FIX ADR-046 Path C: recalibrated for the
+    # 5-timeframe -5..+5 range (was -7..+7). Grade D removed: C is now the
+    # catch-all "otherwise" bucket, matching the old D's "weak, skip" role.
     pivot = pivot.with_columns([
-        pl.when(pl.col("mtf_score").abs() >= 6).then(pl.lit("A"))
-          .when(pl.col("mtf_score").abs() == 5).then(pl.lit("B"))
-          .when(pl.col("mtf_score").abs() == 4).then(pl.lit("C"))
-          .otherwise(pl.lit("D"))
+        pl.when(pl.col("mtf_score").abs() >= 4).then(pl.lit("A"))
+          .when(pl.col("mtf_score").abs() == 3).then(pl.lit("B"))
+          .otherwise(pl.lit("C"))
           .alias("signal_quality")
     ])
 
@@ -286,5 +307,6 @@ def get_mtf_summary(run_date: date) -> dict:
         "grade_A": df.filter(pl.col("signal_quality") == "A").shape[0],
         "grade_B": df.filter(pl.col("signal_quality") == "B").shape[0],
         "grade_C": df.filter(pl.col("signal_quality") == "C").shape[0],
-        "grade_D": df.filter(pl.col("signal_quality") == "D").shape[0],
+        # FIX ADR-046 Path C: grade_D removed — grade D no longer exists
+        # in the classification scheme (C is now the catch-all bucket).
     }

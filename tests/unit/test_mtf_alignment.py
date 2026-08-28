@@ -25,58 +25,65 @@ class TestMTFSummaryHelper:
 
 
 class TestMTFScoreLogic:
-    """Test MTF score and quality grading logic in isolation."""
+    """Test MTF score and quality grading logic in isolation.
+
+    FIX ADR-046 Path C (GMI_Decision_Document_v11.docx §2, Ovi's path
+    choice): score range recalibrated from -7..+7 (7 timeframes) to
+    -5..+5 (5 timeframes — 1H wired up via ADR-045/046, 5m/15m
+    deliberately excluded, not padded). Grade D removed entirely; C is
+    now the catch-all bucket. Thresholds: A >= 4, B == 3, C <= 2.
+    """
 
     @staticmethod
     def _grade(score: int) -> str:
-        if abs(score) >= 6:
+        if abs(score) >= 4:
             return "A"
-        if abs(score) == 5:
+        if abs(score) == 3:
             return "B"
-        if abs(score) == 4:
-            return "C"
-        return "D"
+        return "C"
 
-    def test_score_plus_7_is_grade_a(self):
-        assert self._grade(7) == "A"
+    def test_score_plus_5_is_grade_a(self):
+        assert self._grade(5) == "A"
 
-    def test_score_minus_7_is_grade_a(self):
-        assert self._grade(-7) == "A"
+    def test_score_minus_5_is_grade_a(self):
+        assert self._grade(-5) == "A"
 
-    def test_score_5_is_grade_b(self):
-        assert self._grade(5)  == "B"
-        assert self._grade(-5) == "B"
+    def test_score_3_is_grade_b(self):
+        assert self._grade(3)  == "B"
+        assert self._grade(-3) == "B"
 
-    def test_score_4_is_grade_c(self):
-        assert self._grade(4)  == "C"
-        assert self._grade(-4) == "C"
+    def test_score_2_is_grade_c(self):
+        assert self._grade(2)  == "C"
+        assert self._grade(-2) == "C"
 
-    def test_score_3_is_grade_d(self):
-        assert self._grade(3)  == "D"
-        assert self._grade(0)  == "D"
-        assert self._grade(-3) == "D"
+    def test_score_0_is_grade_c(self):
+        assert self._grade(0) == "C"
 
-    def test_score_range_is_minus7_to_plus7(self):
-        """Valid MTF scores are -7 to +7 (7 timeframes, each ±1 or 0)."""
-        for score in range(-7, 8):
+    def test_score_range_is_minus5_to_plus5(self):
+        """Valid MTF scores are -5 to +5 (5 timeframes, each ±1 or 0)."""
+        for score in range(-5, 6):
             grade = self._grade(score)
-            assert grade in {"A", "B", "C", "D"}, \
+            assert grade in {"A", "B", "C"}, \
                 f"Score {score} produced invalid grade {grade}"
 
     def test_grade_a_threshold(self):
-        """Grade A requires |score| >= 6."""
-        assert self._grade(6)  == "A"
-        assert self._grade(-6) == "A"
-        assert self._grade(5)  != "A"
+        """Grade A requires |score| >= 4."""
+        assert self._grade(4)  == "A"
+        assert self._grade(-4) == "A"
+        assert self._grade(3)  != "A"
+
+    def test_no_score_produces_grade_d(self):
+        """Grade D is removed entirely — no score value should ever map to it."""
+        for score in range(-5, 6):
+            assert self._grade(score) != "D"
 
     def test_polars_grade_expression(self):
         """Verify grade assignment via Polars expression."""
-        df = pl.DataFrame({"mtf_score": list(range(-7, 8))})
+        df = pl.DataFrame({"mtf_score": list(range(-5, 6))})
         df = df.with_columns([
-            pl.when(pl.col("mtf_score").abs() >= 6).then(pl.lit("A"))
-              .when(pl.col("mtf_score").abs() == 5).then(pl.lit("B"))
-              .when(pl.col("mtf_score").abs() == 4).then(pl.lit("C"))
-              .otherwise(pl.lit("D"))
+            pl.when(pl.col("mtf_score").abs() >= 4).then(pl.lit("A"))
+              .when(pl.col("mtf_score").abs() == 3).then(pl.lit("B"))
+              .otherwise(pl.lit("C"))
               .alias("signal_quality")
         ])
 
@@ -188,9 +195,13 @@ class TestComputeMtfAlignmentNoData:
 
 
 class TestComputeMtfAlignmentScoring:
-    """mtf_score / signal_quality computed from real per-TF DuckDB queries."""
+    """mtf_score / signal_quality computed from real per-TF DuckDB queries.
 
-    def test_single_tf_bullish_score_1_grade_d(self, tmp_path, monkeypatch):
+    FIX ADR-046 Path C: TIMEFRAMES is now ["1H","4H","1D","1W","1M"] (5m/15m
+    removed, not padded) — fixtures below write only to these 5 TFs.
+    """
+
+    def test_single_tf_bullish_score_1_grade_c(self, tmp_path, monkeypatch):
         sig_dir = tmp_path / "signals"
         monkeypatch.setattr(mtf_mod, "GOLD_SIGNALS_PATH", sig_dir)
         _write_tech_signals(
@@ -200,10 +211,10 @@ class TestComputeMtfAlignmentScoring:
         result = _compute_mtf_alignment(date(2026, 6, 1))
         row = result.filter(pl.col("symbol") == "AAPL").row(0, named=True)
         assert row["mtf_score"] == 1
-        assert row["signal_quality"] == "D"
-        assert row["5m"] == 0   # TFs with no file fill neutral, not null
+        assert row["signal_quality"] == "C"
+        assert row["1H"] == 0   # TFs with no file fill neutral, not null
 
-    def test_all_seven_tf_bullish_score_7_grade_a(self, tmp_path, monkeypatch):
+    def test_all_five_tf_bullish_score_5_grade_a(self, tmp_path, monkeypatch):
         sig_dir = tmp_path / "signals"
         monkeypatch.setattr(mtf_mod, "GOLD_SIGNALS_PATH", sig_dir)
         for tf in mtf_mod.TIMEFRAMES:
@@ -213,13 +224,13 @@ class TestComputeMtfAlignmentScoring:
             )
         result = _compute_mtf_alignment(date(2026, 6, 1))
         row = result.filter(pl.col("symbol") == "AAPL").row(0, named=True)
-        assert row["mtf_score"] == 7
+        assert row["mtf_score"] == 5
         assert row["signal_quality"] == "A"
 
-    def test_five_bullish_two_neutral_score_5_grade_b(self, tmp_path, monkeypatch):
+    def test_three_bullish_two_neutral_score_3_grade_b(self, tmp_path, monkeypatch):
         sig_dir = tmp_path / "signals"
         monkeypatch.setattr(mtf_mod, "GOLD_SIGNALS_PATH", sig_dir)
-        for tf in ["5m", "15m", "1H", "4H", "1D"]:
+        for tf in ["1H", "4H", "1D"]:
             _write_tech_signals(
                 sig_dir / f"tech_signals_{tf}.parquet",
                 [_row("AAPL", close=110.0, ema_9=12.0, ema_21=10.0, ema_50=100.0)],
@@ -232,25 +243,21 @@ class TestComputeMtfAlignmentScoring:
             )
         result = _compute_mtf_alignment(date(2026, 6, 1))
         row = result.filter(pl.col("symbol") == "AAPL").row(0, named=True)
-        assert row["mtf_score"] == 5
+        assert row["mtf_score"] == 3
         assert row["signal_quality"] == "B"
 
-    def test_four_bearish_three_neutral_score_minus4_grade_c(self, tmp_path, monkeypatch):
+    def test_two_bearish_three_absent_score_minus2_grade_c(self, tmp_path, monkeypatch):
         sig_dir = tmp_path / "signals"
         monkeypatch.setattr(mtf_mod, "GOLD_SIGNALS_PATH", sig_dir)
-        for tf in ["5m", "15m", "1H", "4H"]:
+        for tf in ["1H", "4H"]:
             _write_tech_signals(
                 sig_dir / f"tech_signals_{tf}.parquet",
                 [_row("AAPL", close=90.0, ema_9=8.0, ema_21=10.0, ema_50=100.0)],
             )
-        for tf in ["1D", "1W", "1M"]:
-            _write_tech_signals(
-                sig_dir / f"tech_signals_{tf}.parquet",
-                [_row("AAPL", close=100.0, ema_9=8.0, ema_21=10.0, ema_50=100.0)],
-            )
+        # 1D/1W/1M intentionally absent -> padded 0
         result = _compute_mtf_alignment(date(2026, 6, 1))
         row = result.filter(pl.col("symbol") == "AAPL").row(0, named=True)
-        assert row["mtf_score"] == -4
+        assert row["mtf_score"] == -2
         assert row["signal_quality"] == "C"
 
     def test_multiple_symbols_scored_independently(self, tmp_path, monkeypatch):
@@ -289,15 +296,15 @@ class TestComputeMtfAlignmentScoring:
         sig_dir = tmp_path / "signals"
         monkeypatch.setattr(mtf_mod, "GOLD_SIGNALS_PATH", sig_dir)
         sig_dir.mkdir(parents=True, exist_ok=True)
-        (sig_dir / "tech_signals_15m.parquet").write_text("not a real parquet file")
+        (sig_dir / "tech_signals_4H.parquet").write_text("not a real parquet file")
         _write_tech_signals(
             sig_dir / "tech_signals_1D.parquet",
             [_row("AAPL", close=110.0, ema_9=12.0, ema_21=10.0, ema_50=100.0)],
         )
         result = _compute_mtf_alignment(date(2026, 6, 1))
         row = result.filter(pl.col("symbol") == "AAPL").row(0, named=True)
-        assert row["mtf_score"] == 1   # 1D contributes +1; 15m skipped -> 0
-        assert row["15m"] == 0
+        assert row["mtf_score"] == 1   # 1D contributes +1; 4H skipped -> 0
+        assert row["4H"] == 0
 
 
 class TestComputeMtfAlignmentEntryStopZones:
@@ -503,11 +510,11 @@ class TestGetMtfSummaryFullPath:
         path = tmp_path / f"mtf_alignment_{run_date.isoformat()}.parquet"
         pl.DataFrame({
             "symbol":         ["A", "B", "C", "D"],
-            "signal_quality": ["A", "A", "B", "D"],
+            "signal_quality": ["A", "A", "B", "C"],
         }).write_parquet(path)
         summary = get_mtf_summary(run_date)
         assert summary == {
-            "total_symbols": 4, "grade_A": 2, "grade_B": 1, "grade_C": 0, "grade_D": 1,
+            "total_symbols": 4, "grade_A": 2, "grade_B": 1, "grade_C": 1,
         }
 
 

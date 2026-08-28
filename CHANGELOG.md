@@ -1,5 +1,149 @@
 # CHANGELOG — Data Platform
 
+## v1.17.1 — Bronze Timeframe Partition, MTF Score Coverage (Path C), AU/AG Ticker (Agustus 2026)
+
+Diarahkan oleh `GMI_Decision_Document_v11.docx` (ADR-045, ADR-046, ADR-047)
+— ketiga item direkonsiliasi ke satu version bump tunggal sesuai instruksi
+Ovi, karena belum ada yang di-mirror ke live repo saat pekerjaan sandbox
+ini berjalan.
+
+**ADR-045 — Bronze OHLCV write/scan path gains a timeframe partition.**
+`market_ingester.py::_run_symbol()` sebelumnya meneruskan
+`bronze_path`/`asset_class` yang hanya di-scope symbol+market+source (tanpa
+dimensi timeframe) ke `IncFetchProtocol.resolve_start_date()` dan
+`BronzeIngester.write()`. Karena `DEFAULT_TIMEFRAMES=[1D,1W,1M]` memproses
+1D lebih dulu, file 1D yang baru ditulis membuat scan sisi-baca melaporkan
+`last_date` mendekati hari ini untuk 1W/1M (fetch window ~7 hari, bukan
+backfill multi-tahun), DAN idempotency check sisi-tulis same-day (FIX
+GD-F08) kemudian menemukan file 1D tersebut dan skip penulisan 1W/1M
+sepenuhnya — dikonfirmasi via baca langsung `base_ingester.py`, cocok
+persis dengan log `"[Bronze] Idempotent skip"` dari laporan bug live-test
+21 Aug 2026. Fix: timeframe dilipat ke kedua path di call site saja
+(`asset_class=f"market/ohlcv/{market}/timeframe={tf}"`) — signature
+`BronzeIngester`/`IncFetchProtocol` tidak berubah, karena keduanya dipakai
+bersama oleh semua domain Bronze non-OHLCV (FRED/BLS/BEA/Treasury/IMF/BIS)
+yang tidak punya konsep timeframe.
+
+**Konsekuensial terhadap ADR-045** (tidak disebut eksplisit di
+Consequences ADR-045 sendiri, ditemukan empiris saat implementasi — fix
+dalam scope, disetujui Ovi mid-session, mengikuti precedent
+consequential-edit-discipline proyek ini):
+
+- `_run_context_symbol()` (Layer 2 / GMI-BRZ-001) berbagi konstruksi
+  `bronze_path`/`asset_class` yang identik dengan `_run_symbol()`, sehingga
+  bug starvation yang sama berlaku — teks ADR-045 sendiri hanya ditulis
+  terhadap `_run_symbol()`. Diperbaiki di pass yang sama; jika tidak,
+  context anchors Layer 2 (VIX, DXY, global indices, ETF) mewarisi bug
+  persis yang coba ditutup ADR-045 untuk Layer 1.
+- **Jauh lebih parah, temuan baru murni**: glob baca-Bronze
+  `ohlcv_processor.py` (baik `run()` PASS 1 maupun `run_context()`) TIDAK
+  PERNAH di-scope timeframe — pattern-nya
+  `market/**/symbol={symbol}/**/*.parquet` tanpa segmen tf sama sekali.
+  Direproduksi empiris terhadap file Bronze AAPL produksi asli (2.512 baris
+  cadence harian, satu-satunya data Bronze yang pernah berhasil persist,
+  per starvation bug di atas): pattern pre-fix match IDENTIK untuk
+  tf='5m','15m','1H','1D','1W','1M'. Silver belum pernah benar-benar
+  dijalankan di repo ini (direktori `data/silver/` belum ada pre-fix),
+  jadi belum ada output nyata yang korup — tapi akan terjadi pada run
+  `silver_ohlcv` pertama, independen dari ADR-045: setiap timeframe di
+  `_RUN_BRONZE_TFS` akan diam-diam menulis baris 1D-cadence yang SAMA di
+  bawah label timeframe berbeda. Jika tidak diperbaiki, fix sisi-Bronze
+  ADR-045 justru akan memperburuk keadaan, bukan menjadi moot — begitu
+  Bronze benar-benar memisahkan 1D/1W/1M/1H (ADR-046 Path C), glob
+  rekursif `**` ini akan menyatukan semuanya kembali menjadi satu seri
+  multi-cadence yang tercampur per file Silver TF, alih-alih scope ke satu
+  partisi Bronze yang benar-benar cocok. Diperbaiki di pass yang sama:
+  segmen `timeframe={tf}` ditambahkan ke kedua lokasi glob, cocok persis
+  dengan struktur partisi Bronze yang baru. Test regresi baru:
+  `test_run_does_not_blend_timeframes_across_bronze_partitions` (dua
+  fixture Bronze berukuran berbeda di 1D vs 1W harus menghasilkan dua
+  output Silver berukuran berbeda, bukan union identik).
+- Temuan ini langsung memberi masukan ke kalkulasi ADR-046: bahkan kondisi
+  lama "3 timeframe yang bekerja" (1D/1W/1M) tidak pernah benar-benar 3
+  suara independen pre-fix — bug glob Silver berarti ketiganya akan
+  membaca blob Bronze yang identik, sehingga nilai non-nol `mtf_score`
+  hanya pernah -3/0/+3, tidak pernah mencerminkan divergensi
+  mingguan/bulanan yang genuine dari harian.
+
+**ADR-046 (Path C, pilihan eksplisit Ovi dari tiga opsi yang disajikan
+GMI v11)** — MTF score coverage secara struktural tidak dapat dicapai
+sebelum fix ini: 5m/15m/1H tidak pernah di-fetch ke Bronze, dan karena 4H
+disintesis dari Silver 1H saja (`ohlcv_aggregator.py`), 4H juga kosong.
+Hanya 1D/1W/1M yang pernah berkontribusi nilai nyata (dan per temuan
+konsekuensial di atas, bahkan tidak independen), membatasi `|mtf_score|`
+maksimum di 3 sementara `screener.py` mensyaratkan `>=5` DAN
+`signal_quality IN ('A','B')` — watchlist secara matematis mustahil
+mengembalikan satu baris pun. Path C: 1H di-wire sendirian (bukan 5m/15m)
+via konstanta baru `LAYER1_TIMEFRAMES` (`DEFAULT_TIMEFRAMES + ["1H"]`)
+diterapkan hanya ke `job_registry.py::_bronze_ohlcv()` — Layer 2 context
+(`_bronze_ohlcv_context()`) sengaja tidak disentuh, tetap
+`DEFAULT_TIMEFRAMES` saja, sesuai docstring `run_context()` sendiri (tidak
+ada consumer Layer 2 yang butuh data context intraday siklus ini). 1H
+berkontribusi nilai trend nyata secara langsung DAN membuka sintesis
+Silver 1H→4H yang sudah ada, menaikkan kontributor nyata dari 3 ke 5.
+`FALLBACK_YEARS["1H"]=2` dan mapping interval yfinance `"1H"→"1h"` sudah
+benar sejak awal (tidak perlu diubah — diverifikasi, bukan diasumsikan).
+
+Rentang skor dan batas grade dikalibrasi ulang ke realita 5-kontributor
+sesuai instruksi eksplisit Ovi, bukan dibiarkan di nilai 7-timeframe lama
+sambil diam-diam melayani lebih sedikit input nyata (persis failure mode
+yang coba ditutup ADR-046): `TIMEFRAMES` dipangkas ke
+`["1H","4H","1D","1W","1M"]` di `technical_signals.py` maupun
+`mtf_alignment.py` (5m/15m dihapus sepenuhnya, bukan di-pad ke 0
+permanen — kedua file harus konsisten satu sama lain). Rentang skor baru
+-5..+5. Grade baru (D dihapus — C jadi bucket "weak" catch-all yang dulu
+peran D): **A ≥ 4, B == 3, C ≤ 2**. `screener.py`'s `MIN_MTF_SCORE`: 5 → 3
+(cocok persis dengan batas grade B baru, relasi yang sama seperti 5 lama
+terhadap grade B lama). Consumer hilir skema lama diperbarui:
+`backtest/engine.py`'s `BacktestConfig.min_mtf_score` default (5 → 3) dan
+logic exit/sentinel-default degradasi kualitasnya (`"D"` → `"C"`, bucket
+catch-all baru); `config/pipeline_config.py`'s `min_mtf_score_screener`
+default (5 → 3, meski field ini saat ini tidak punya reader di source code
+— konstanta modul `MIN_MTF_SCORE` milik `screener.py` sendiri yang benar-
+benar terpakai); `mtf_alignment.py`'s `get_mtf_summary()` tidak lagi
+mengembalikan `grade_D`.
+
+**ADR-047** — cabang commodity `market_ingester.py::_run_symbol()`
+sekarang membaca `inst.yfinance_symbol` langsung untuk `market=='commodity'`,
+meniru pola Layer 2 yang sudah mapan di `_run_context_symbol()` — alih-alih
+`to_api_symbol(inst.raw_symbol, inst.market, primary_src)`, yang cabang
+commodity-nya tidak punya override table dan jatuh ke aturan suffix generik
+`sym + "=F"`, menghasilkan `AU=F`/`AG=F` yang invalid (dikonfirmasi
+terhadap `config/instruments_identity.yaml`, yang sudah menyimpan
+`GC=F`/`SI=F` yang benar di `inst.yfinance_symbol` via `InstrumentLoader`).
+`CL=F` sudah benar secara kebetulan (prefix ticker WTI cocok dengan simbol
+instrumennya) dan tidak terpengaruh. `to_api_symbol()` sendiri tidak
+diubah — fix hanya di call site, sesuai Rejected alternative ADR-047
+sendiri (commodity override table di dalam `to_api_symbol()` akan
+memperkenalkan kembali bentuk dual-source-of-truth yang kemungkinan
+menyebabkan bug ini sejak awal).
+
+**Tidak diputuskan di sini / eksplisit di luar scope pass ini**: data
+Bronze OHLCV yang sudah ada dari path pre-ADR-045 (non-partitioned)
+dibiarkan apa adanya (quarantine-and-rebuild vs. biarkan-dan-cold-start-
+forward adalah keputusan Ovi per Consequences ADR-045 sendiri, terpisah
+dari code fix ini) — dikonfirmasi via inspeksi langsung Filesystem MCP
+bahwa hanya data 1D yang pernah benar-benar persist (`source=yfinance/
+symbol=AAPL/year=2026/month=08/`, 2.512 baris, 2016-08-23 s.d.
+2026-08-20), sehingga partisi `timeframe={tf}` baru mulai genuinely kosong
+untuk setiap simbol pada run berikutnya tanpa perlu migrasi eksplisit.
+5m/15m tetap permanen tidak di-fetch by design (Path C, bukan Path A) —
+grade A di bawah skema baru (`|score|>=4`) tetap tercapai pada 4/5
+kontributor sepakat, tidak perlu 5/5 unanimous.
+
+PATCH bump (bukan MINOR): bug fix ke komponen yang sudah rusak di ketiga
+ADR, tidak ada perubahan Interface Contract (GD §0.4/§17.6) atau schema
+Silver/Gold — layout partisi Bronze dan daftar internal `TIMEFRAMES` milik
+MTF score keduanya adalah detail implementasi internal, bukan output yang
+dijanjikan (schema kolom watchlist tidak berubah; hanya baris mana yang
+lolos filter yang berubah). **1510 → 1521 test** (+11: 6 baru di
+`test_market_ingester.py` untuk ADR-045/047, 1 test regresi + rewrite
+fixture helper di `test_ohlcv_processor.py` untuk fix konsekuensial
+Silver, +1 net di `test_mtf_alignment.py` setelah rework skema grade
+ADR-046 Path C), **0 failed, 0 regresi**, coverage 88.04% (gate 80%). Lihat
+`dev-log/2026-08-22-adr045-046-047-bronze-timeframe-mtf-coverage-au-ag-ticker.md`
+untuk detail lengkap.
+
 ## v1.17.0 — Finnhub Full Retirement: Sentiment + Earnings/Quotes (Agustus 2026)
 
 Diarahkan oleh `GMI_Decision_Document_v10.docx` (ADR-043, ADR-044) —

@@ -227,19 +227,23 @@ class TestFullSystemPipeline:
 
     # Layer 6: MTF Score Logic
     def test_l6_mtf_grade_complete_coverage(self):
-        """All 15 possible |score| values (0-7) produce valid grades."""
+        """All 11 possible |score| values (0-5) produce valid grades.
+
+        FIX ADR-046 Path C (GMI_Decision_Document_v11.docx §2): score range
+        recalibrated from -7..+7 (7 timeframes) to -5..+5 (5 timeframes —
+        1H wired up, 5m/15m deliberately excluded, not padded). Grade D
+        removed; C is now the catch-all bucket.
+        """
         grades = set()
-        for score in range(-7, 8):
-            if abs(score) >= 6:
+        for score in range(-5, 6):
+            if abs(score) >= 4:
                 g = "A"
-            elif abs(score) == 5:
+            elif abs(score) == 3:
                 g = "B"
-            elif abs(score) == 4:
-                g = "C"
             else:
-                g = "D"
+                g = "C"
             grades.add(g)
-        assert grades == {"A", "B", "C", "D"}
+        assert grades == {"A", "B", "C"}
 
     def test_l6_regime_compatible_logic(self):
         """RISK_ON: positive scores compatible; RISK_OFF: negative."""

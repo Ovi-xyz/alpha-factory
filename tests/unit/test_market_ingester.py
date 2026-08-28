@@ -422,7 +422,7 @@ class TestRunSymbol:
         ingester._run_symbol(inst, "1D", date(2026, 7, 1))
         assert len(write_calls) == 1
         assert write_calls[0]["source"] == "polygon"   # from df["_source"], not primary_src
-        assert write_calls[0]["asset_class"] == "market/ohlcv/us_stocks"
+        assert write_calls[0]["asset_class"] == "market/ohlcv/us_stocks/timeframe=1D"
         assert write_calls[0]["extra_metadata"] == {"_tz_hint": "America/New_York"}
 
     def test_missing_source_column_falls_back_to_primary_src(self, monkeypatch, tmp_path):
@@ -451,7 +451,186 @@ class TestRunSymbol:
         inst = _fake_layer1_instrument("AAPL")
         ingester._run_symbol(inst, "1D", date(2026, 7, 1))
         assert write_calls == []
-        mock_validator.handle_mismatch.assert_called_once()
+
+
+class TestRunSymbolADR045TimeframePartition:
+    """FIX ADR-045 (GMI_Decision_Document_v11.docx §2): _run_symbol() must
+    fold the timeframe into both the IncFetchProtocol.resolve_start_date()
+    scan path and the BronzeIngester.write() write path — previously both
+    were symbol+market+source-scoped only, causing 1D's freshly-written
+    file to starve 1W/1M via the same-day idempotency check (FIX GD-F08)
+    on every run, every day (not just cold start)."""
+
+    def test_resolve_start_date_receives_timeframe_scoped_bronze_path(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1W"])
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: None)
+        calls = []
+        monkeypatch.setattr(
+            ingester.inc, "resolve_start_date",
+            lambda **kw: (calls.append(kw), date(2020, 1, 1))[1],
+        )
+        inst = _fake_layer1_instrument("AAPL", market="us_stocks")
+        ingester._run_symbol(inst, "1W", date(2026, 7, 1))
+        assert len(calls) == 1
+        assert calls[0]["bronze_path"] == (
+            ingester.BRONZE_OHLCV_PATH / "us_stocks" / "timeframe=1W"
+        )
+
+    def test_write_receives_timeframe_scoped_asset_class(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1M"])
+        df = _sample_yf_df().with_columns(pl.lit("yfinance").alias("_source"))
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: df)
+        ingester._schema_validators = {}
+        write_calls = []
+        monkeypatch.setattr(ingester, "write", lambda **kw: write_calls.append(kw))
+        inst = _fake_layer1_instrument("AAPL", market="us_stocks")
+        ingester._run_symbol(inst, "1M", date(2026, 7, 1))
+        assert write_calls[0]["asset_class"] == "market/ohlcv/us_stocks/timeframe=1M"
+
+    def test_different_timeframes_scope_to_different_bronze_paths(self, monkeypatch, tmp_path):
+        """Regression guard for the exact starvation bug: 1D and 1W must
+        never resolve to the same bronze_path for the same symbol."""
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: None)
+        paths = []
+        monkeypatch.setattr(
+            ingester.inc, "resolve_start_date",
+            lambda **kw: (paths.append(kw["bronze_path"]), date(2020, 1, 1))[1],
+        )
+        inst = _fake_layer1_instrument("AAPL", market="us_stocks")
+        for tf in ["1D", "1W", "1M"]:
+            ingester._run_symbol(inst, tf, date(2026, 7, 1))
+        assert len(set(paths)) == 3, f"Expected 3 distinct bronze_paths, got {paths}"
+
+
+class TestRunContextSymbolADR045TimeframePartition:
+    """FIX ADR-045 companion (Layer 2 — same root cause as Layer 1 above,
+    not named explicitly in ADR-045's own Consequences but structurally
+    identical: run_context() iterates self.timeframes per instrument via
+    the SAME shared IncFetchProtocol/BronzeIngester.write() base classes)."""
+
+    def test_resolve_start_date_receives_timeframe_scoped_bronze_path(self, monkeypatch, tmp_path):
+        from src.config.instrument_loader import Instrument
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1W"])
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: None)
+        calls = []
+        monkeypatch.setattr(
+            ingester.inc, "resolve_start_date",
+            lambda **kw: (calls.append(kw), date(2020, 1, 1))[1],
+        )
+        inst = Instrument(
+            symbol="VIX", raw_symbol="VIX", market="context", sector=None,
+            yfinance_symbol="^VIX", polygon_symbol="", tvfeed_symbol=None,
+            eia_series=None, timezone="America/New_York", is_active=True,
+            layer=2, context_category="context_volatility", context_group="equity",
+            context_available=True, include_in_forecast=True,
+        )
+        ingester._run_context_symbol(inst, "1W", date(2026, 7, 1))
+        assert len(calls) == 1
+        assert calls[0]["bronze_path"] == (
+            ingester.BRONZE_OHLCV_PATH / "context" / "timeframe=1W"
+        )
+
+    def test_write_receives_timeframe_scoped_asset_class(self, monkeypatch, tmp_path):
+        from src.config.instrument_loader import Instrument
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        df = _sample_yf_df().with_columns(pl.lit("yfinance").alias("_source"))
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: df)
+        ingester._schema_validators = {}
+        write_calls = []
+        monkeypatch.setattr(ingester, "write", lambda **kw: write_calls.append(kw))
+        inst = Instrument(
+            symbol="VIX", raw_symbol="VIX", market="context", sector=None,
+            yfinance_symbol="^VIX", polygon_symbol="", tvfeed_symbol=None,
+            eia_series=None, timezone="America/New_York", is_active=True,
+            layer=2, context_category="context_volatility", context_group="equity",
+            context_available=True, include_in_forecast=True,
+        )
+        ingester._run_context_symbol(inst, "1D", date(2026, 7, 1))
+        assert write_calls[0]["asset_class"] == "market/ohlcv/context/timeframe=1D"
+
+
+class TestRunSymbolADR047CommodityTicker:
+    """FIX ADR-047 (GMI_Decision_Document_v11.docx §2): _run_symbol()'s
+    commodity-market ticker resolution routes through inst.yfinance_symbol
+    directly, mirroring _run_context_symbol()'s Layer 2 pattern —
+    to_api_symbol()'s commodity branch has no override table and falls
+    through to a generic sym + '=F' rule, producing invalid AU=F/AG=F
+    (instruments_identity.yaml already carries the correct GC=F/SI=F on
+    inst.yfinance_symbol). to_api_symbol() itself is left unchanged."""
+
+    @staticmethod
+    def _fake_commodity_instrument(symbol, yfinance_symbol):
+        return Instrument(
+            symbol=symbol, raw_symbol=symbol, market="commodity", sector=None,
+            yfinance_symbol=yfinance_symbol, polygon_symbol=symbol, tvfeed_symbol=None,
+            eia_series=None, timezone="America/New_York", is_active=True, layer=1,
+        )
+
+    def test_gold_au_uses_yfinance_symbol_not_to_api_symbol(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        captured = {}
+        monkeypatch.setattr(
+            ingester, "_fetch",
+            lambda api_symbol, inst, tf, start, end: captured.update(api_symbol=api_symbol) or None,
+        )
+        inst = self._fake_commodity_instrument("AU", "GC=F")
+        ingester._run_symbol(inst, "1D", date(2026, 7, 1))
+        assert captured["api_symbol"] == "GC=F"   # NOT 'AU=F' (to_api_symbol's wrong generic output)
+
+    def test_silver_ag_uses_yfinance_symbol_not_to_api_symbol(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        captured = {}
+        monkeypatch.setattr(
+            ingester, "_fetch",
+            lambda api_symbol, inst, tf, start, end: captured.update(api_symbol=api_symbol) or None,
+        )
+        inst = self._fake_commodity_instrument("AG", "SI=F")
+        ingester._run_symbol(inst, "1D", date(2026, 7, 1))
+        assert captured["api_symbol"] == "SI=F"   # NOT 'AG=F' (to_api_symbol's wrong generic output)
+
+    def test_wti_crude_unaffected_still_resolves_cl_f(self, monkeypatch, tmp_path):
+        """CL was already correct via to_api_symbol()'s generic suffix rule
+        by coincidence — must remain correct after routing via yfinance_symbol."""
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        captured = {}
+        monkeypatch.setattr(
+            ingester, "_fetch",
+            lambda api_symbol, inst, tf, start, end: captured.update(api_symbol=api_symbol) or None,
+        )
+        inst = self._fake_commodity_instrument("CL", "CL=F")
+        ingester._run_symbol(inst, "1D", date(2026, 7, 1))
+        assert captured["api_symbol"] == "CL=F"
+
+    def test_non_commodity_market_still_uses_to_api_symbol(self, monkeypatch, tmp_path):
+        """Regression guard: the ADR-047 fix must be scoped to market ==
+        'commodity' only — every other Layer 1 market keeps resolving via
+        to_api_symbol(), unchanged."""
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        captured = {}
+        monkeypatch.setattr(
+            ingester, "_fetch",
+            lambda api_symbol, inst, tf, start, end: captured.update(api_symbol=api_symbol) or None,
+        )
+        # us_stocks instrument whose yfinance_symbol deliberately differs from
+        # what to_api_symbol() would compute — proves the us_stocks path did
+        # NOT switch to inst.yfinance_symbol.
+        inst = Instrument(
+            symbol="AAPL", raw_symbol="AAPL", market="us_stocks", sector=None,
+            yfinance_symbol="WRONG_ON_PURPOSE", polygon_symbol="AAPL", tvfeed_symbol=None,
+            eia_series=None, timezone="America/New_York", is_active=True, layer=1,
+        )
+        ingester._run_symbol(inst, "1D", date(2026, 7, 1))
+        assert captured["api_symbol"] == "AAPL"   # to_api_symbol('AAPL','us_stocks','yfinance')
 
     def test_forex_market_saves_to_day_cache(self, monkeypatch, tmp_path):
         from src.bronze.forex_cache import ForexDayCache

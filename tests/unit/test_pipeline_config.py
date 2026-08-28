@@ -17,7 +17,7 @@ class TestPipelineConfig:
         assert cfg.min_symbol_coverage_pct == 95.0
         assert cfg.bronze_compression      == "snappy"
         assert cfg.silver_compression      == "zstd"
-        assert cfg.min_mtf_score_screener  == 5
+        assert cfg.min_mtf_score_screener  == 3
         assert cfg.screener_top_n          == 20
         assert cfg.backtest_commission_pct == 0.001
 

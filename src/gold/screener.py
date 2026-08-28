@@ -48,7 +48,13 @@ GOLD_SCREENER_PATH  = Path("data/gold/screener")
 SILVER_ACTIVE_SYMBOLS_ROOT = Path("data/silver/active_symbols")
 
 # Screening filters (hard thresholds for watchlist inclusion)
-MIN_MTF_SCORE      = 5       # |score| >= 5 → grade A or B only
+# FIX ADR-046 Path C (GMI_Decision_Document_v11.docx §2, Ovi's path choice):
+# recalibrated from 5 to 3 to match mtf_alignment.py's new 5-timeframe score
+# range (-5..+5, grade B boundary == 3) after Bronze 1H was wired up and the
+# 5m/15m timeframes were dropped from the sum entirely (Path C: "middle
+# path", not Path A). See mtf_alignment.py's module docstring for the full
+# recalibrated grade table.
+MIN_MTF_SCORE      = 3       # |score| >= 3 → grade A or B only
 MIN_DOLLAR_VOLUME  = 1_000_000   # USD 1M/day
 MIN_SECTOR_WEIGHT  = 0.5     # Exclude sectors in RISK_OFF penalty
 TOP_N_WATCHLIST    = 20

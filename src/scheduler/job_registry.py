@@ -71,8 +71,12 @@ def _passes_schedule(job: dict, run_date: date) -> bool:
 # ── Lazy Job Function Loaders ─────────────────────────────────────────────────
 
 def _bronze_ohlcv(run_date: date) -> None:
-    from src.bronze.market_ingester import MarketOHLCVIngester
-    MarketOHLCVIngester().run(run_date)
+    # FIX ADR-046 Path C (GMI_Decision_Document_v11.docx §2): LAYER1_TIMEFRAMES
+    # (DEFAULT_TIMEFRAMES + "1H") replaces the bare default — Layer 1 now
+    # fetches 1D/1W/1M/1H. Layer 2 (_bronze_ohlcv_context below) is
+    # deliberately untouched, still DEFAULT_TIMEFRAMES only.
+    from src.bronze.market_ingester import LAYER1_TIMEFRAMES, MarketOHLCVIngester
+    MarketOHLCVIngester(timeframes=LAYER1_TIMEFRAMES).run(run_date)
 
 
 def _bronze_ohlcv_context(run_date: date) -> None:
@@ -267,12 +271,13 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
     # ── BRONZE LAYER ──────────────────────────────────────────────────────────
 
     "bronze_ohlcv_daily": {
-        "description": "Ingest yfinance + Polygon — 643 symbols OHLCV daily bars",
+        "description": "Ingest yfinance + Polygon — 639 symbols OHLCV 1D/1W/1M/1H bars",  # FIX ADR-046 Path C: +1H
         "fn":          _bronze_ohlcv,
         "depends_on":  [],
         "layer":       "bronze",
-        # v1.5: -10m vs v1.4 — tidak ada aggregate_ohlcv() call untuk 4H
-        "est_minutes": 35,
+        # FIX ADR-046 Path C: +1H fetch adds ~639 symbols x 0.6s throttle
+        # ~= 6.4 min to the v1.5 estimate (35m -> ~42m).
+        "est_minutes": 42,
     },
 
     "bronze_ohlcv_context_daily": {
@@ -451,7 +456,7 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
     },
 
     "gold_mtf": {
-        "description": "MTF alignment — score -7..+7, signal quality A/B/C/D",
+        "description": "MTF alignment — score -5..+5, signal quality A/B/C",  # FIX ADR-046 Path C
         "fn":          _gold_mtf,
         "depends_on":  ["gold_signals"],
         "layer":       "gold",
