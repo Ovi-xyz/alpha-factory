@@ -664,6 +664,117 @@ class TestRunSymbolADR047CommodityTicker:
         assert len(write_calls) == 1   # write still proceeds despite cache failure
 
 
+class TestContextSymbolADR048DataSourceOverride:
+    """FIX ADR-048 (USD/CNH Source Adjustment Addendum v1.0, 29 Aug 2026):
+    Layer 2 context instruments carrying a data_source override (currently:
+    CNH -> alphavantage_fx) bypass the default yfinance-only Layer 2 fetch
+    path entirely — routed through AlphaVantageForexAdapter, with the
+    API-ready pair built from the registry's explicit from_symbol/to_symbol
+    fields, not inst.yfinance_symbol (which is confirmed broken for CNH and
+    retained only for audit/historical reference)."""
+
+    @staticmethod
+    def _fake_cnh_instrument() -> Instrument:
+        return Instrument(
+            symbol="CNH", raw_symbol="CNH", market="context", sector=None,
+            yfinance_symbol="USDCNH=X",   # retained for audit — must NOT be used
+            polygon_symbol="", tvfeed_symbol=None, eia_series=None,
+            timezone="UTC", is_active=True, layer=2,
+            context_category="context_dollar_basket", context_group="dollar_basket",
+            context_available=True, include_in_forecast=True,
+            meta={"data_source": "alphavantage_fx", "from_symbol": "USD", "to_symbol": "CNH"},
+        )
+
+    def test_api_symbol_built_from_from_to_symbol_not_yfinance_symbol(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        inst = self._fake_cnh_instrument()
+        ingester = MarketOHLCVIngester()
+        captured = {}
+
+        def fake_fetch(api_symbol, inst_arg, tf, start, end):
+            captured["api_symbol"] = api_symbol
+            return None
+
+        monkeypatch.setattr(ingester, "_fetch", fake_fetch)
+        ingester._run_context_symbol(inst, "1D", date(2026, 8, 29))
+
+        assert captured["api_symbol"] == "USD_CNH"   # NOT 'USDCNH=X'
+
+    def test_primary_source_for_returns_alphavantage(self):
+        inst = self._fake_cnh_instrument()
+        assert MarketOHLCVIngester._primary_source_for(inst) == "alphavantage"
+
+    def test_fetch_routes_to_alphavantage_only_chain(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        inst = self._fake_cnh_instrument()
+        ingester = MarketOHLCVIngester()
+        with patch(
+            "src.bronze.alphavantage_adapter.AlphaVantageForexAdapter.fetch",
+            return_value=_sample_yf_df(),
+        ) as mock_fetch:
+            result = ingester._fetch("USD_CNH", inst, "1D", date(2026, 6, 1), date(2026, 8, 29))
+        assert result is not None
+        assert result["_source"][0] == "alphavantage"
+        mock_fetch.assert_called_once()
+
+    def test_fetch_never_calls_yfinance_for_cnh(self, monkeypatch, tmp_path):
+        """Regression guard for the ADR's own decision text: 'yfinance
+        tidak digunakan untuk instrumen ini dalam kapasitas apapun'."""
+        monkeypatch.chdir(tmp_path)
+        inst = self._fake_cnh_instrument()
+        ingester = MarketOHLCVIngester()
+        with patch(
+            "src.bronze.alphavantage_adapter.AlphaVantageForexAdapter.fetch",
+            return_value=_sample_yf_df(),
+        ):
+            with patch("src.bronze.yfinance_adapter.YFinanceAdapter.fetch") as mock_yf:
+                ingester._fetch("USD_CNH", inst, "1D", date(2026, 6, 1), date(2026, 8, 29))
+        mock_yf.assert_not_called()
+
+    def test_read_write_source_segment_consistent(self, monkeypatch, tmp_path):
+        """Bronze read-side scan (resolve_start_date(source=primary_src))
+        and write-side partition (write(source=actual_source)) must agree
+        on 'alphavantage' — a mismatch here would reproduce ADR-045's
+        read/write partition-label bug one layer up (source instead of
+        timeframe)."""
+        monkeypatch.chdir(tmp_path)
+        inst = self._fake_cnh_instrument()
+        ingester = MarketOHLCVIngester()
+        df = _sample_yf_df().with_columns(pl.lit("alphavantage").alias("_source"))
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **k: df)
+
+        resolve_calls = []
+        original_resolve = ingester.inc.resolve_start_date
+
+        def spy_resolve(**kwargs):
+            resolve_calls.append(kwargs["source"])
+            return original_resolve(**kwargs)
+
+        monkeypatch.setattr(ingester.inc, "resolve_start_date", spy_resolve)
+        write_calls = []
+        monkeypatch.setattr(ingester, "write", lambda **kw: write_calls.append(kw))
+
+        ingester._run_context_symbol(inst, "1D", date(2026, 8, 29))
+
+        assert resolve_calls == ["alphavantage"]
+        assert write_calls[0]["source"] == "alphavantage"
+
+    def test_other_context_instruments_unaffected(self, monkeypatch, tmp_path):
+        """Regression guard: the override must be scoped to instruments
+        that actually declare data_source in meta — every other Layer 2
+        context instrument (no meta override) keeps the existing
+        yfinance-only dispatch, unchanged."""
+        monkeypatch.chdir(tmp_path)
+        inst = _fake_context_instrument(symbol="VIX", yfinance_symbol="^VIX")
+        ingester = MarketOHLCVIngester()
+        assert ingester._primary_source_for(inst) == "yfinance"
+        with patch("src.bronze.yfinance_adapter.YFinanceAdapter.fetch", return_value=_sample_yf_df()) as mock_yf:
+            result = ingester._fetch("^VIX", inst, "1D", date(2026, 6, 1), date(2026, 7, 1))
+        assert result is not None
+        assert result["_source"][0] == "yfinance"
+        mock_yf.assert_called_once()
+
+
 class TestFetchChainConstruction:
     """_fetch() — lines 219-249: per-market ChainedAdapter composition."""
 

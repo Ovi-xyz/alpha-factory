@@ -1,5 +1,113 @@
 # CHANGELOG — Data Platform
 
+## v1.17.2 — USD/CNH Source Adjustment: yfinance → AlphaVantage FX_DAILY (Agustus 2026)
+
+Diarahkan oleh `alpha_factory_usdcnh_source_adjustment_v1_0.docx` (ADR-048,
+29 Agustus 2026) — status dokumen "DECIDED — Implementation PENDING" saat
+sesi ini dimulai; item blocking-nya (mekanisme registry instrumen live,
+karena `instruments.yaml` tunggal sudah tidak ada di repo sejak Decision B
+Step 2) diselesaikan dengan membaca live repo langsung sebelum baris kode
+pertama ditulis, sesuai instruksi eksplisit dokumen tersebut.
+
+**ADR-048 — USD/CNH context anchor: source direassign dari yfinance ke
+AlphaVantage FX_DAILY secara eksklusif.** `USDCNH=X` di yfinance
+dikonfirmasi rusak (hanya 1 baris, live/preflight test). Dua kandidat
+pengganti diinvestigasi dan ditolak sebelum dokumen keputusan ini ditulis:
+`CNH=F` (futures OI tipis, basis roll kuartalan, data Yahoo tidak
+tersedia) dan alias `CNH=X` (sparsity sama dengan `USDCNH=X`). `CNY=X`
+(onshore) bersih secara live tapi ditolak sebagai pengganti karena secara
+ekonomi berbeda — rate PBOC yang di-manage, decouple dari CNH offshore
+sebesar ratusan pip persis pada episode regime-stress yang
+`score_em_risk` dirancang untuk mendeteksi. AlphaVantage
+`FX_DAILY(USD,CNH)` diverifikasi empiris: 3.079 baris harian bersih,
+2014-11-07 → 2026-08-27 (~11.8 tahun), mencakup dua episode stress CNH
+historis (devaluasi 2015, "break 7" Agustus 2019).
+
+- `config/instruments_identity.yaml`: entry CNH di `context.dollar_basket`
+  mendapat `data_source: alphavantage_fx`, `from_symbol: USD`,
+  `to_symbol: CNH`. `yfinance_symbol: USDCNH=X` DIPERTAHANKAN — bukan
+  dikosongkan — sebagai referensi audit/historis; tidak ada validator atau
+  konsumen yang memperlakukan field kosong sebagai sesuatu selain
+  "deferred, belum ada source" (yang bukan kondisi CNH), dan mengosongkannya
+  akan mematahkan assertion `test_instrument_loader.py` yang masih benar
+  tanpa manfaat fungsional apa pun.
+
+- `config/instruments_taxonomy.yaml`: field `notes` pada entry CNH
+  diperluas — klaim lama "ticker confirmed live" untuk `USDCNH=X`
+  dikoreksi, trail investigasi (CNH=F, CNH=X, CNY=X ditolak) dan
+  keputusan final didokumentasikan.
+
+- `config/schemas/instruments/identity.schema.yaml`: 3 property baru
+  (`data_source`, `from_symbol`, `to_symbol`) ditambahkan ke
+  `$defs.instrument.properties` — wajib karena `additionalProperties:
+  false` pada definisi tersebut; tanpa perubahan ini `validate_split()`
+  akan menolak file identity yang sudah benar secara struktural maupun
+  semantik.
+
+- **Tidak ada perubahan** di `src/config/instrument_loader.py`. Tiga
+  field baru mengalir otomatis ke `Instrument.meta` via catch-all yang
+  sudah ada di `_build_context_instrument()` (field apa pun di luar
+  `_CONTEXT_CONSUMED_KEYS` sudah ditangkap ke `meta` sejak awal) — nol
+  perubahan dataclass, nol blast radius ke consumer Layer 2 lain.
+
+- `src/bronze/market_ingester.py`: satu override check
+  (`inst.meta.get('data_source') == 'alphavantage_fx'`) diterapkan
+  konsisten di tiga lokasi yang harus saling setuju — ketidaksesuaian di
+  antara ketiganya akan mereproduksi bug read/write partition-label
+  ADR-045 satu level di atas (segmen source, bukan timeframe):
+  - `_fetch()`: routing ke `ChainedAdapter([AlphaVantageForexAdapter()])`
+    alih-alih dispatch per-market (default market='context' adalah
+    yfinance-only).
+  - `_primary_source_for()`: return `'alphavantage'` alih-alih default
+    `'yfinance'` — inilah yang dipakai `resolve_start_date(source=
+    primary_src, ...)` untuk path scan sisi-baca Bronze.
+  - `_run_context_symbol()`: `api_symbol` dibangun dari
+    `f"{meta['from_symbol']}_{meta['to_symbol']}"` (`'USD_CNH'`), bukan
+    `inst.yfinance_symbol` — `inst.symbol` CNH sendiri ('CNH', kode mata
+    uang bare) bukan pair yang bisa di-parse tanpa field eksplisit ini.
+
+- `config/schemas/alphavantage_fx.yaml` (BARU): open/high/low/close saja,
+  tanpa volume — karakteristik struktural endpoint AlphaVantage FX, bukan
+  data gap, karena satu-satunya konsumen CNH (CrossAssetEngine) beroperasi
+  murni pada close-derived returns (lihat addendum §4). Diwire ke
+  `_load_schema_validators()`.
+
+- `src/bronze/alphavantage_adapter.py`: `outputsize` sekarang disesuaikan
+  dengan rentang tanggal yang diminta (`>100 hari` → `'full'`, selain itu
+  `'compact'`) — sebelumnya selalu `'full'`. Disebutkan eksplisit di
+  Consequences addendum sebagai follow-up wajib, agar run harian CNH (3
+  panggilan/hari: 1D/1W/1M) berhenti mengunduh ulang seluruh histori
+  ~11,8 tahun setiap hari setelah Bronze berhasil catch-up sekali.
+
+- **KNOWN_RISKS.md RISK-22 (baru, ACCEPTED bukan RESOLVED):**
+  `DailyBudgetLimiter` 25/hari AlphaVantage mendapat consumer permanen
+  kedua di luar DXY — scoped exception terhadap kebijakan Supplementary
+  Design G4 ("AV dihapus dari chain default"), bukan pembukaan kembali
+  kebijakan tersebut. Didokumentasikan eksplisit sesuai instruksi
+  addendum agar consumer permanen ketiga di masa depan adalah keputusan
+  sadar, bukan pengulangan diam-diam "tambah satu lagi saja" yang lambat
+  laun menjenuhkan kembali budget bersama.
+
+PATCH bump (bukan MINOR): perbaikan source-assignment untuk satu
+instrumen Layer 2 yang sudah ada, bukan perubahan Interface Contract atau
+universe (`EXPECTED_TOTAL` tetap 699, tidak ada instrumen baru — CNH
+sudah ada sejak ADR-013).
+
+Total: **1 ADR diimplementasikan (ADR-048)** | **8 file dimodifikasi + 1
+file baru** (`config/schemas/alphavantage_fx.yaml`) | **1533 passed / 0
+failed / 0 error** (1521 → 1533, +12: 6 test routing di
+`test_market_ingester.py`, 4 test boundary `outputsize` di
+`test_alphavantage_adapter.py`, 2 test schema di `test_schema_validator.py`;
+1 test identity CNH yang sudah ada diperluas in-place, tidak dihitung
+baru). Coverage 88.06% (gate 80%) — kedua file yang dimodifikasi
+(`market_ingester.py`, `alphavantage_adapter.py`) 100% coverage.
+
+Diverifikasi di sandbox terisolasi (git clone bersih dari GitHub) sebelum
+di-mirror ke live repo — baseline 1521 passed dikonfirmasi ulang sebelum
+perubahan apa pun, `validate_instruments.py` PASSED (699 simbol) setelah
+perubahan, tidak ada f-string SQL baru, ast.parse bersih di semua file
+yang diubah.
+
 ## v1.17.1 — Bronze Timeframe Partition, MTF Score Coverage (Path C), AU/AG Ticker (Agustus 2026)
 
 Diarahkan oleh `GMI_Decision_Document_v11.docx` (ADR-045, ADR-046, ADR-047)

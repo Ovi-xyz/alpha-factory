@@ -17,6 +17,14 @@ Source chain per asset class:
     Commodity:  yfinance → EIA (CL fundamental only)
     Index:      yfinance
 
+    Layer 2 context anchors (market='context') default to yfinance-only,
+    EXCEPT instruments carrying an explicit data_source override in their
+    registry meta (ADR-048, USD/CNH Source Adjustment Addendum v1.0, 29 Aug
+    2026): CNH (context.dollar_basket) routes exclusively through
+    AlphaVantage FX_DAILY — yfinance's USDCNH=X is confirmed broken (1 row
+    live) and is not used for this instrument in any capacity, not even as
+    fallback. See _primary_source_for() / _fetch() / _run_context_symbol().
+
 Menggunakan:
     IncFetchProtocol  — resolve start_date (G1)
     SchemaValidator   — validate schema sebelum write (GD §3.7)
@@ -91,6 +99,11 @@ class MarketOHLCVIngester(BronzeIngester):
         validator_map = {
             "yfinance_ohlcv.yaml":  ["yfinance"],
             "polygon_ohlcv.yaml":   ["polygon"],
+            # ADD ADR-048 (USD/CNH Source Adjustment Addendum v1.0): validates
+            # CNH's Bronze rows (actual_source == 'alphavantage' from
+            # ChainedAdapter's _source column) — open/high/low/close only,
+            # no volume. See config/schemas/alphavantage_fx.yaml.
+            "alphavantage_fx.yaml": ["alphavantage"],
         }
         for schema_file, sources in validator_map.items():
             schema_path = schemas_dir / schema_file
@@ -263,6 +276,20 @@ class MarketOHLCVIngester(BronzeIngester):
         from src.bronze.polygon_adapter import PolygonAdapter
         from src.bronze.alphavantage_adapter import AlphaVantageForexAdapter
 
+        # FIX ADR-048 (USD/CNH Source Adjustment Addendum v1.0, 29 Aug 2026):
+        # an explicit per-instrument data_source override takes precedence
+        # over the market-based dispatch below. Currently the only consumer
+        # is CNH (context.dollar_basket) — yfinance is not used for this
+        # instrument in any capacity (not primary, not fallback);
+        # AlphaVantage FX_DAILY is its sole source (empirically verified
+        # ~11.8 years of clean daily data, see addendum §3.2). Checked here
+        # rather than folded into a market-specific elif so a future second
+        # override on a different market would not need a new branch per
+        # market — one override check, any market.
+        if inst.meta.get("data_source") == "alphavantage_fx":
+            chain = ChainedAdapter([AlphaVantageForexAdapter()])
+            return chain.fetch(api_symbol, tf, start, end)
+
         # Build market-specific adapter chain (GD §3.3.2 Source Priority Matrix)
         # FIX ADR-029 (GMI_Decision_Document_v7.docx, 30 Jul 2026): tvdatafeed
         # retired entirely -- yfinance .JK is now IDX30's SOLE source, not a
@@ -296,7 +323,22 @@ class MarketOHLCVIngester(BronzeIngester):
         FIX ADR-029 (GMI_Decision_Document_v7.docx, 30 Jul 2026): idx case
         changed 'tvdatafeed' -> 'yfinance'. tvdatafeed retired entirely --
         yfinance .JK is IDX30's sole source now, not a fallback.
+
+        FIX ADR-048 (USD/CNH Source Adjustment Addendum v1.0, 29 Aug 2026):
+        an instrument-level data_source override (currently: CNH ->
+        alphavantage_fx) is reported here too, not just in _fetch()'s
+        adapter-chain selection -- so the Bronze read-side scan
+        (IncFetchProtocol via resolve_start_date(source=primary_src, ...))
+        and the write-side Hive partition (write(source=actual_source, ...),
+        actual_source read from ChainedAdapter's _source column) agree on
+        the same source={...} path segment. Leaving this at the generic
+        'yfinance' default here while _fetch() silently routes the actual
+        fetch to AlphaVantage would reproduce, one layer up (source segment
+        instead of timeframe segment), the exact class of read/write
+        partition-label mismatch ADR-045 exists to close.
         """
+        if inst.meta.get("data_source") == "alphavantage_fx":
+            return "alphavantage"
         if inst.market == "idx":
             return "yfinance"
         if inst.market == "forex":
@@ -409,8 +451,22 @@ class MarketOHLCVIngester(BronzeIngester):
         karena market='context' tidak match idx/forex/us_stocks.
         """
         fetch_tf    = tf
-        primary_src = self._primary_source_for(inst)   # 'yfinance' untuk semua Layer 2
-        api_symbol  = inst.yfinance_symbol              # LANGSUNG — bukan to_api_symbol()
+        primary_src = self._primary_source_for(inst)
+        # FIX ADR-048 (USD/CNH Source Adjustment Addendum v1.0, 29 Aug 2026):
+        # instruments with an explicit data_source override (currently:
+        # CNH -> alphavantage_fx) build their API-ready symbol from the
+        # registry's explicit from_symbol/to_symbol pair, NOT
+        # inst.yfinance_symbol. CNH's yfinance_symbol ('USDCNH=X') is
+        # retained in the registry for audit/historical reference only
+        # (confirmed broken live — returns 1 row) and must never reach a
+        # fetch call. inst.symbol alone ('CNH', a bare currency code for
+        # dollar_basket entries) is not a parseable pair by itself — hence
+        # the explicit from_symbol/to_symbol fields rather than deriving a
+        # pair generically from inst.symbol.
+        if inst.meta.get("data_source") == "alphavantage_fx":
+            api_symbol = f"{inst.meta['from_symbol']}_{inst.meta['to_symbol']}"
+        else:
+            api_symbol = inst.yfinance_symbol   # LANGSUNG — bukan to_api_symbol()
 
         # FIX ADR-045 (consequential — GMI_Decision_Document_v11.docx §2):
         # Layer 2 context ingestion iterates the SAME self.timeframes list

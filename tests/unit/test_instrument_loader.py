@@ -437,11 +437,21 @@ class TestGMIDecisionDocumentsV1V2:
     def test_cnh_uses_offshore_ticker_not_onshore(self):
         """ADR-013: CNH (offshore), not CNY (onshore, PBOC-managed) — avoids
         double-counting PBOC policy stance via context_rates_em_cb AND a
-        managed FX rate simultaneously."""
+        managed FX rate simultaneously.
+
+        UPD ADR-048 (USD/CNH Source Adjustment Addendum v1.0, 29 Aug 2026):
+        yfinance_symbol ('USDCNH=X') is confirmed broken live (returns 1
+        row) and is retained on the Instrument purely for audit/historical
+        reference — it is asserted below because it is still the true
+        stored value, NOT because market_ingester.py reads it for this
+        instrument (it does not; see meta['data_source'] assertions)."""
         cnh = self.loader.get_context("CNH")
         assert cnh.symbol == "CNH"
         assert cnh.yfinance_symbol == "USDCNH=X"
         assert cnh.include_in_forecast is True
+        assert cnh.meta["data_source"] == "alphavantage_fx"
+        assert cnh.meta["from_symbol"] == "USD"
+        assert cnh.meta["to_symbol"] == "CNH"
 
     def test_hkd_pegged_currency_reliability_flag(self):
         """ADR-015: HKD included (not excluded) with reliability_flag=true —

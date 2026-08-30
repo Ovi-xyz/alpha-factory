@@ -251,3 +251,68 @@ class TestFetchHttpFlow:
         with patch("requests.get", side_effect=ConnectionError("network down")):
             result = adapter.fetch("EUR/USD", "1D", date(2025, 1, 2), date(2025, 1, 31))
         assert result is None
+
+
+class TestOutputsizeSelection:
+    """FIX ADR-048 (USD/CNH Source Adjustment Addendum v1.0 §5 Consequences,
+    29 Aug 2026): outputsize sized to the requested date-range span — 'full'
+    for a genuine cold-start backfill (IncFetchProtocol's multi-year
+    fallback_years path), 'compact' for a routine incremental run
+    (last_date - DEFAULT_LOOKBACK_DAYS=7). Previously always 'full',
+    regardless of range — correct but wastefully re-downloading the entire
+    multi-decade history on every daily call once Bronze had caught up."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_budget(self):
+        from src.utils.rate_limiter import SourceLimiters
+        SourceLimiters.alphavantage._reset_date = None
+        yield
+        SourceLimiters.alphavantage._reset_date = None
+
+    @staticmethod
+    def _resp():
+        from unittest.mock import MagicMock
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"Time Series FX (Daily)": {}}
+        return resp
+
+    def test_short_range_uses_compact(self, monkeypatch):
+        """A routine incremental window (~7-14 days) must request 'compact'."""
+        from unittest.mock import patch
+        monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "test_key")
+        adapter = AlphaVantageForexAdapter()
+        with patch("requests.get", return_value=self._resp()) as mock_get:
+            adapter.fetch("USD_CNH", "1D", date(2026, 8, 22), date(2026, 8, 29))
+        _, kwargs = mock_get.call_args
+        assert kwargs["params"]["outputsize"] == "compact"
+
+    def test_long_range_uses_full(self, monkeypatch):
+        """A cold-start backfill window (multi-year) must request 'full'."""
+        from unittest.mock import patch
+        monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "test_key")
+        adapter = AlphaVantageForexAdapter()
+        with patch("requests.get", return_value=self._resp()) as mock_get:
+            adapter.fetch("USD_CNH", "1D", date(2014, 11, 7), date(2026, 8, 29))
+        _, kwargs = mock_get.call_args
+        assert kwargs["params"]["outputsize"] == "full"
+
+    def test_exactly_100_days_uses_compact(self, monkeypatch):
+        """Boundary: (end - start).days == 100 is NOT > 100 — compact."""
+        from unittest.mock import patch
+        monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "test_key")
+        adapter = AlphaVantageForexAdapter()
+        with patch("requests.get", return_value=self._resp()) as mock_get:
+            adapter.fetch("USD_CNH", "1D", date(2026, 1, 1), date(2026, 4, 11))  # 100 days
+        _, kwargs = mock_get.call_args
+        assert kwargs["params"]["outputsize"] == "compact"
+
+    def test_101_days_uses_full(self, monkeypatch):
+        """Boundary: (end - start).days == 101 IS > 100 — full."""
+        from unittest.mock import patch
+        monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "test_key")
+        adapter = AlphaVantageForexAdapter()
+        with patch("requests.get", return_value=self._resp()) as mock_get:
+            adapter.fetch("USD_CNH", "1D", date(2026, 1, 1), date(2026, 4, 12))  # 101 days
+        _, kwargs = mock_get.call_args
+        assert kwargs["params"]["outputsize"] == "full"

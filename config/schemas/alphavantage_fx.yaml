@@ -1,0 +1,32 @@
+# config/schemas/alphavantage_fx.yaml — Bronze Schema Registry (GD §3.7)
+# ADD ADR-048 (USD/CNH Source Adjustment Addendum v1.0, 29 Aug 2026).
+#
+# AlphaVantage FX_DAILY/FX_WEEKLY/FX_MONTHLY provide open/high/low/close
+# ONLY — no volume column (AlphaVantageForexAdapter always sets volume to
+# None, FIX AV-3). This is a structural characteristic of the endpoint,
+# not a data gap: the first (and currently only) consumer, CNH, is a
+# Layer 2-only context anchor (context.dollar_basket) consumed exclusively
+# by CrossAssetEngine, whose four modules (Correlation/LeadLag/Forecast/
+# GlobalIndexRegime) all operate on close-derived returns — see USD/CNH
+# Source Adjustment Addendum v1.0 §4. ActiveSymbolsResolver, the
+# pipeline's sole volume consumer (dollar_volume_20d liquidity gate),
+# never applies to Layer 2 anchors. No nullable-volume declaration or
+# synthetic zero-fill is needed here — this schema declares exactly what
+# AlphaVantage FX endpoints provide.
+version: "2026-08"
+source: alphavantage
+on_mismatch: quarantine
+
+expected_columns:
+  - name: open
+    type: float64
+    nullable: false
+  - name: high
+    type: float64
+    nullable: false
+  - name: low
+    type: float64
+    nullable: false
+  - name: close
+    type: float64
+    nullable: false

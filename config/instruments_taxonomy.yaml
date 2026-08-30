@@ -743,8 +743,19 @@ context:
       context_group: dollar_basket
       context_available: true
       include_in_forecast: true
-      notes: 'ADR-013: offshore renminbi (not onshore CNY) — avoids PBOC policy-rate/managed-FX double-counting
-        with context_rates_em_cb. Ticker confirmed live (USDCNH=X and CNH=X both exist on Yahoo Finance).'
+      notes: >-
+        ADR-013: offshore renminbi (not onshore CNY) — avoids PBOC
+        policy-rate/managed-FX double-counting with context_rates_em_cb.
+        ADR-048 (USD/CNH Source Adjustment Addendum v1.0, 29 Aug 2026):
+        the "ticker confirmed live" claim above was wrong for USDCNH=X —
+        live/preflight testing found it returns only 1 row. CNH=F (futures,
+        thin OI, quarterly roll basis) and the CNH=X alias (same sparsity)
+        were investigated and rejected too. CNY=X (onshore) is clean but
+        economically distinct — a managed PBOC rate that decouples from
+        offshore CNH by hundreds of pips exactly during the regime-stress
+        episodes score_em_risk exists to detect. Source reassigned
+        exclusively to AlphaVantage FX_DAILY(USD,CNH) — see data_source/
+        from_symbol/to_symbol in instruments_identity.yaml.
     - symbol: KRW
       layer: 2
       context_category: context_dollar_basket

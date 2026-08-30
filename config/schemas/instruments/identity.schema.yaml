@@ -79,6 +79,15 @@ properties:
       timezone:           { type: ["string", "null"] }
       base_currency:      { type: ["string", "null"] }
       proxy_instrument:   { type: ["string", "null"] }
+      # ADD ADR-048 (USD/CNH Source Adjustment Addendum v1.0, 29 Aug 2026):
+      # explicit sourcing override for Layer 2 instruments that must bypass
+      # the default yfinance-only Layer 2 fetch path. First (and currently
+      # only) consumer: CNH -> alphavantage_fx. additionalProperties:false
+      # below means these MUST be declared here before use, same
+      # requirement this schema already enforces for every other field.
+      data_source:        { type: ["string", "null"] }
+      from_symbol:        { type: ["string", "null"] }
+      to_symbol:          { type: ["string", "null"] }
     additionalProperties: false
 
   context_subcategory:

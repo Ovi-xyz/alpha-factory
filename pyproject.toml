@@ -1,6 +1,77 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.17.1"
+version = "1.17.2"
+# FIX ADR-048 (USD/CNH Source Adjustment Addendum v1.0, 29 Aug 2026): the
+# Layer 2 USD/CNH context anchor (context.dollar_basket) is re-sourced from
+# yfinance (USDCNH=X, confirmed broken live -- returns 1 row) to
+# AlphaVantage FX_DAILY(USD,CNH) exclusively -- not primary, not fallback
+# for yfinance. Two rejected substitute candidates preceded this decision:
+# CNH=F (thin-OI quarterly-roll futures, no live Yahoo data) and CNH=X
+# (same sparsity as USDCNH=X); CNY=X (onshore) was clean but economically
+# distinct -- a managed PBOC rate that decouples from offshore CNH by
+# hundreds of pips exactly during the regime-stress episodes score_em_risk
+# exists to detect, so was rejected as a substitute despite being live-clean.
+# AlphaVantage FX_DAILY(USD,CNH) verified empirically: 3,079 clean daily
+# rows, 2014-11-07 -> 2026-08-27 (~11.8 years), covering both historical
+# CNH stress episodes (2015 devaluation, Aug 2019 "break 7"). PATCH bump:
+# a source-reassignment bug fix for one existing Layer 2 instrument, not a
+# universe or Interface Contract change (EXPECTED_TOTAL stays 699).
+#
+# Registry: instruments_identity.yaml's CNH entry gains a data_source:
+# alphavantage_fx / from_symbol: USD / to_symbol: CNH override (identity.
+# schema.yaml updated to allow the 3 new instrument-level fields --
+# additionalProperties:false requires this or validate_split() would
+# reject the real file). yfinance_symbol ('USDCNH=X') is deliberately
+# RETAINED on the entry for audit/historical reference -- not blanked --
+# since nothing in validate_instruments.py or InstrumentLoader treats an
+# empty yfinance_symbol as anything other than "deferred, no source yet"
+# (which CNH is not), and blanking it would have needed touching an
+# existing, still-accurate assertion in test_instrument_loader.py for no
+# functional benefit. The new fields are NOT consumed by a dataclass field
+# change -- InstrumentLoader._build_context_instrument()'s existing
+# catch-all already folds any unrecognized identity/taxonomy key into
+# Instrument.meta, so data_source/from_symbol/to_symbol simply appear
+# there with zero changes to instrument_loader.py.
+#
+# Bronze: market_ingester.py gains one override check, read from
+# inst.meta.get('data_source'), placed ahead of (not folded into) the
+# existing per-market dispatch in three places that must all agree with
+# each other -- a mismatch between any two would reproduce ADR-045's read/
+# write partition-label bug one layer up (source segment instead of
+# timeframe segment):
+#   (a) _fetch(): routes to ChainedAdapter([AlphaVantageForexAdapter()])
+#       instead of the market-based branch (context market's default is
+#       yfinance-only).
+#   (b) _primary_source_for(): returns 'alphavantage' instead of the
+#       context-market default 'yfinance' -- this is what
+#       resolve_start_date(source=primary_src, ...) uses for the Bronze
+#       read-side scan path.
+#   (c) _run_context_symbol(): builds api_symbol from
+#       f"{meta['from_symbol']}_{meta['to_symbol']}" ('USD_CNH') instead of
+#       inst.yfinance_symbol -- CNH's bare inst.symbol ('CNH') is not a
+#       parseable pair on its own, unlike a Layer 1 forex pair.
+# New config/schemas/alphavantage_fx.yaml (open/high/low/close only, no
+# volume -- AlphaVantage FX endpoints structurally lack a volume column,
+# and CNH's sole consumer, CrossAssetEngine, operates on close-derived
+# returns exclusively) is wired into _load_schema_validators().
+#
+# alphavantage_adapter.py: outputsize now sized to the requested date-range
+# span (>100 days -> 'full', else 'compact') instead of always 'full' --
+# named explicitly in the addendum's own Consequences section as a
+# required follow-up so routine daily CNH runs (3 calls/day: 1D/1W/1M,
+# well inside the 25/day DailyBudgetLimiter) stop re-downloading the
+# entire ~11.8-year history on every call once Bronze has caught up once.
+# This is a second, permanent, non-DXY consumer of the shared 25/day
+# AlphaVantage budget -- documented as an accepted, scoped exception to
+# Supplementary Design G4's "AV removed from default chain" policy in
+# KNOWN_RISKS.md RISK-22, not a reopening of that policy.
+#
+# 1521 -> 1533 passed (+12: 6 market_ingester routing tests, 4 adapter
+# outputsize boundary tests, 2 schema tests; 1 existing CNH identity test
+# extended in place, not counted as new), coverage 88.06% unchanged gate,
+# both modified files (market_ingester.py, alphavantage_adapter.py) at
+# 100% coverage. August 2026.
+#
 # FIX ADR-045 + ADR-046 + ADR-047 (GMI_Decision_Document_v11.docx, 22 Aug
 # 2026): all three items from GMI v11 reconciled into one version bump.
 # Bronze OHLCV write/scan path gains a timeframe partition (ADR-045); MTF

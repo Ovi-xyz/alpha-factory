@@ -753,6 +753,16 @@ context:
     - symbol: CNH
       yfinance_symbol: USDCNH=X
       timezone: UTC
+      # ADD ADR-048 (USD/CNH Source Adjustment Addendum v1.0, 29 Aug 2026):
+      # yfinance_symbol above is retained for audit/historical reference
+      # ONLY -- confirmed broken live (USDCNH=X returns 1 row). CNH=F and
+      # CNH=X alias both investigated and rejected too (see addendum
+      # Section 2). data_source below is the authoritative override read
+      # by market_ingester.py -- yfinance is not used for this instrument
+      # in any capacity (not primary, not fallback).
+      data_source: alphavantage_fx
+      from_symbol: USD
+      to_symbol: CNH
     - symbol: KRW
       yfinance_symbol: USDKRW=X
       timezone: UTC

@@ -1935,7 +1935,128 @@ combined with RISK-20 and ADR-045/047 above), 0 regressions. Coverage
 
 ---
 
-*Last updated: v1.17.1 — `GMI_Decision_Document_v11.docx` (22 Aug 2026):
+## RISK-22 (NEW): AlphaVantage's 25-req/day budget gains a second, permanent, non-DXY consumer — ACCEPTED (scoped exception, not a reopened policy)
+
+**Status:** ✅ **ACCEPTED — documented exception (29 Aug 2026).** Introduced
+by `USD/CNH Source Adjustment Addendum v1.0` (ADR-048) — recorded here per
+that addendum's own explicit instruction ("Dicatat di KNOWN_RISKS.md
+sebagai accepted exception ... agar tidak diam-diam menjadi preseden" —
+documented as an accepted exception so it does not silently become a
+precedent).
+
+**GD Reference:** GD §11.2 (`DailyBudgetLimiter`), Supplementary Design
+v1.1 G4 ("AV dihapus dari chain default" — AlphaVantage removed from the
+default Forex `ChainedAdapter`, DXY-only fallback carve-out preserved).
+
+### What the risk is
+
+Supplementary Design v1.1 G4 established a narrow, single carve-out:
+AlphaVantage stays in the codebase and in the Forex `ChainedAdapter`
+purely as a last-resort fallback for DXY, consuming at most a handful of
+the shared 25-req/day `DailyBudgetLimiter` budget on days yfinance + the
+24h `ForexDayCache` both fail. ADR-048 adds a second, structurally
+different consumer: the Layer 2 USD/CNH context anchor now uses
+AlphaVantage FX_DAILY as its **sole, permanent primary source** — not a
+fallback. This is a **reliable, daily** draw on the shared budget (3
+calls/day: 1D/1W/1M via `run_context()`'s `DEFAULT_TIMEFRAMES`), not an
+occasional one.
+
+### Blast radius
+
+- 3/25 calls/day reserved for CNH under normal operation, leaving 22/25
+  for DXY's occasional fallback use and any future AV consumer —
+  comfortable headroom today, but the budget is a *shared, unpartitioned*
+  pool (`SourceLimiters.alphavantage`, `src/utils/rate_limiter.py`). A
+  third permanent consumer added later without re-reading this entry
+  could silently starve CNH, DXY-fallback, or both on a day both draw
+  simultaneously.
+- `outputsize` is sized to the requested date-range span (`>100 days` →
+  `full`, else `compact` — `alphavantage_adapter.py`, FIX ADR-048)
+  specifically to keep CNH's routine daily draw to 3 lightweight calls
+  rather than 3 full-history downloads; this bounds the *load* per call,
+  not the *count* against the shared budget.
+- If the AlphaVantage budget is ever exhausted before CNH's 3 daily calls
+  run (e.g. a future consumer added without re-reading this entry, or
+  repeated DXY-fallback firing on a bad yfinance day), CNH's Bronze write
+  for that timeframe simply does not happen that day (`_fetch()` returns
+  `None`, logged at `debug` level, `_run_context_symbol()` returns early)
+  — a silent coverage gap for that one Layer 2 anchor, not a crash. This
+  degrades any CrossAssetEngine module reading CNH for that date (all
+  four currently operate on close-derived returns per the addendum's §4)
+  but does not affect any other instrument.
+
+### Mitigation in place
+
+1. This entry itself — the addendum's explicit instruction was to
+   document this as a *scoped, accepted* exception precisely so a future
+   third permanent AV consumer is a deliberate decision weighed against
+   this context, not a silent repeat of the same "just add one more"
+   reasoning that would eventually re-saturate the shared budget it was
+   designed to protect.
+2. `outputsize` compact/full sizing (FIX ADR-048) keeps CNH's per-call
+   cost low regardless of call *count*.
+3. `DailyBudgetLimiter.record_call()` already warns at ≤3 remaining
+   (`src/utils/rate_limiter.py`) — a shared, pre-existing signal, not new
+   to this risk, but the relevant one to watch now that a second
+   permanent consumer exists.
+
+### Operator playbook if the AlphaVantage budget is found exhausted
+
+1. Check `data/health/pipeline_runs.db` / the daily health report for
+   which job(s) hit the `[AV] Daily budget exhausted` log line
+   (`alphavantage_adapter.py`).
+2. Confirm CNH's 3 daily calls (1D/1W/1M) landed before assuming a
+   capacity problem — a burst of DXY-fallback calls on an unrelated bad
+   yfinance day is the more likely one-off cause, not structural
+   under-provisioning.
+3. If genuinely and repeatedly tight, the fix is a deliberate design
+   decision (raise the AlphaVantage tier, move CNH to a source-specific
+   limiter, or reduce DXY's fallback eagerness) — not a silent
+   workaround. Update this entry if the resolution changes the
+   shared-budget model.
+
+---
+
+*Last updated: v1.17.2 — `USD/CNH Source Adjustment Addendum v1.0`
+(ADR-048, 29 Aug 2026): the Layer 2 USD/CNH context anchor
+(`context.dollar_basket`) is re-sourced from yfinance (`USDCNH=X`,
+confirmed broken live — returns 1 row) to AlphaVantage
+`FX_DAILY(USD,CNH)` exclusively — not primary, not fallback for
+yfinance. Two rejected substitute candidates preceded this decision:
+`CNH=F` (thin-OI quarterly-roll futures, no live Yahoo data) and `CNH=X`
+(same sparsity as `USDCNH=X`); `CNY=X` (onshore) was clean but
+economically distinct — a managed PBOC rate that decouples from offshore
+CNH by hundreds of pips exactly during the regime-stress episodes
+`score_em_risk` exists to detect — so was rejected as a substitute
+despite being live-clean. AlphaVantage `FX_DAILY(USD,CNH)` verified
+empirically: 3,079 clean daily rows, 2014-11-07 → 2026-08-27 (~11.8
+years), covering both historical CNH stress episodes (2015 devaluation,
+Aug 2019 "break 7"). `instruments_identity.yaml`'s CNH entry gains a
+`data_source: alphavantage_fx` / `from_symbol: USD` / `to_symbol: CNH`
+override (`identity.schema.yaml` updated to allow the 3 new
+instrument-level fields); `yfinance_symbol` retained for audit/
+historical reference only. `market_ingester.py` gains one override
+check (`inst.meta.get('data_source')`) applied consistently across
+`_fetch()`, `_primary_source_for()`, and `_run_context_symbol()` — a
+mismatch between any two would reproduce ADR-045's read/write
+partition-label bug one layer up (source segment instead of timeframe
+segment). New `config/schemas/alphavantage_fx.yaml` (open/high/low/close
+only, no volume — a structural characteristic of the endpoint, not a gap,
+since CNH's sole consumer CrossAssetEngine operates on close-derived
+returns exclusively). `alphavantage_adapter.py`'s `outputsize` now sized
+to the requested date-range span (`>100 days` → `full`, else `compact`)
+instead of always `full` — named explicitly in the addendum's own
+Consequences section, so routine daily CNH runs stop re-downloading the
+entire ~11.8-year history on every call once Bronze has caught up once.
+Second, permanent, non-DXY consumer of the shared 25/day AlphaVantage
+budget — documented as RISK-22 (accepted, scoped exception to
+Supplementary Design G4's policy, not a reopening of it). PATCH bump:
+source-reassignment bug fix for one existing Layer 2 instrument, no
+Interface Contract or universe change (`EXPECTED_TOTAL` stays 699). 1521
+→ 1533 passed (+12: 6 routing tests, 4 adapter outputsize boundary tests,
+2 schema tests), 0 failed, 0 regressions, coverage 88.06% (gate 80%),
+both modified files at 100% coverage. August 2026.
+Prior entry: v1.17.1 — `GMI_Decision_Document_v11.docx` (22 Aug 2026):
 all three items (ADR-045, ADR-046, ADR-047) reconciled into a single
 version bump per Ovi's explicit instruction, since none had been mirrored
 to the live repo before that instruction arrived. ADR-045: Bronze OHLCV

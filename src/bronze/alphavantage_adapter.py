@@ -1,14 +1,24 @@
 """
 alphavantage_adapter.py — Bronze AlphaVantage SourceAdapter (GD §3.3.2)
-Supplemental source for Forex and Commodity (DXY).
+Supplemental source for Forex and Commodity (DXY); PRIMARY (sole) source
+for the Layer 2 USD/CNH context anchor (ADR-048, USD/CNH Source
+Adjustment Addendum v1.0, 29 Aug 2026 — see market_ingester.py's
+data_source-override routing in _fetch()/_primary_source_for()/
+_run_context_symbol()).
 
 Rate limit: **25 req/DAY** (most restrictive source) — DailyBudgetLimiter.
 API key: ALPHAVANTAGE_API_KEY from .env.
-Role: FX supplemental only. NOT used for US stocks.
+Role: FX supplemental only for Layer 1 forex + DXY fallback. NOT used for
+US stocks. ADR-048 adds a second, distinct role: PRIMARY (not fallback)
+source for CNH — a scoped exception to Supplementary Design G4's "AV
+removed from default chain" policy, not a reopening of it (see
+KNOWN_RISKS.md RISK-22).
 
 Source Priority (GD §11.1):
     Forex: yfinance → ForexDayCache → AlphaVantage (DXY only if needed)
     Commodity: yfinance only (AV not used per GD §5.1)
+    Layer 2 context CNH: AlphaVantage FX_DAILY exclusively (ADR-048) —
+        yfinance is not consulted for this instrument in any capacity.
 
 AlphaVantage endpoints used:
     FX_DAILY:    Daily forex OHLCV
@@ -58,7 +68,11 @@ class AlphaVantageForexAdapter(SourceAdapter):
     Uses DailyBudgetLimiter (25 req/day).
 
     symbol: raw forex pair format 'EUR/USD' or 'EURUSD' or normalized 'EUR_USD'.
-    Used as last-resort fallback after yfinance and ForexDayCache both fail.
+    Used as last-resort fallback after yfinance and ForexDayCache both fail
+    for ordinary Layer 1 forex pairs and DXY. ADR-048 exception: for the
+    Layer 2 CNH context anchor, this is the PRIMARY (sole) source — invoked
+    directly via a single-adapter ChainedAdapter in market_ingester.py's
+    _fetch(), never behind yfinance for that one instrument.
     """
 
     def __init__(self) -> None:
@@ -96,12 +110,27 @@ class AlphaVantageForexAdapter(SourceAdapter):
             logger.debug(f"[AV] TF={tf} not supported for AV FX")
             return None
 
+        # FIX ADR-048 (USD/CNH Source Adjustment Addendum v1.0 §5
+        # Consequences, 29 Aug 2026): outputsize sized to the requested
+        # window instead of always 'full'. A genuine cold-start backfill
+        # (IncFetchProtocol.resolve_start_date()'s fallback_years path —
+        # thousands of days) needs 'full' to seed Bronze history; a routine
+        # incremental run (last_date - DEFAULT_LOOKBACK_DAYS=7, G1,
+        # unchanged) needs only 'compact' (AV's latest ~100 data points).
+        # 100 days is a deliberately conservative cutoff — comfortably above
+        # the ~7-14 day window any real incremental call produces, and far
+        # below the multi-year span any real cold-start fallback produces —
+        # so routine daily CNH runs (and any other AV forex consumer) stop
+        # re-downloading the entire multi-decade history on every call once
+        # Bronze has caught up once.
+        outputsize = "full" if (end - start).days > 100 else "compact"
+
         params: dict = {
             "function":   function,
             "from_symbol": from_sym,
             "to_symbol":   to_sym,
             "apikey":      self._api_key,
-            "outputsize":  "full",
+            "outputsize":  outputsize,
             "datatype":    "json",
         }
         if function == "FX_INTRADAY":

@@ -124,6 +124,37 @@ class TestSchemaValidator:
                 valid_df, ["Error"], "AAPL", on_mismatch="fail"
             )
 
+    def test_alphavantage_fx_schema_accepts_ohlc_only_no_volume(self):
+        """FIX ADR-048 (USD/CNH Source Adjustment Addendum v1.0, 29 Aug
+        2026): config/schemas/alphavantage_fx.yaml declares open/high/low/
+        close only — a DataFrame with a 'volume' column present but set to
+        None (AlphaVantageForexAdapter's actual output shape, FIX AV-3)
+        must still validate cleanly, since 'volume' is intentionally absent
+        from expected_columns and therefore never checked."""
+        validator = SchemaValidator("config/schemas/alphavantage_fx.yaml")
+        df = pl.DataFrame({
+            "timestamp": ["2026-08-27"],
+            "open":  [6.7185], "high": [6.72], "low": [6.71], "close": [6.718],
+            "volume": [None],
+        })
+        ok, errors = validator.validate(df, "USD_CNH")
+        assert ok is True
+        assert errors == []
+
+    def test_alphavantage_fx_schema_rejects_missing_ohlc_column(self):
+        """GD §3.7's core purpose applied to the new schema: a missing OHLC
+        column must still be caught, exactly like every other Bronze
+        source's registry entry."""
+        validator = SchemaValidator("config/schemas/alphavantage_fx.yaml")
+        df = pl.DataFrame({
+            "timestamp": ["2026-08-27"],
+            "open": [6.7185], "high": [6.72], "low": [6.71],
+            # close missing
+        })
+        ok, errors = validator.validate(df, "USD_CNH")
+        assert ok is False
+        assert any("close" in e for e in errors)
+
     def test_unknown_strategy_defaults_to_quarantine(self, validator, tmp_path, monkeypatch):
         """Coverage tranche (17 Aug 2026) — unrecognized on_mismatch string
         falls through the else branch, logs an error, and defaults to quarantine."""
