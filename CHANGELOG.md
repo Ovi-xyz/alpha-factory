@@ -1,5 +1,71 @@
 # CHANGELOG — Data Platform
 
+## v1.17.3 — Perbaikan Preflight AlphaVantage: CNH-aware + Tier 2 Bug Fix (Agustus 2026)
+
+Diarahkan oleh instruksi Ovi (30 Agustus 2026): "We need to fix
+alphavantage preflight module as well. The preflight modules always run
+first before doing live test." Scope terbatas pada
+`scripts/preflight/check_alphavantage_fx.py` — di luar `src/`, sehingga
+tidak ada persyaratan test coverage untuk perubahan ini (arahan eksplisit
+Ovi); verifikasi dilakukan secara informal (mocked network, dijalankan
+interaktif) tanpa menambah file test permanen.
+
+**Dua perbaikan:**
+
+1. **Tier 1 (static, 0 biaya) — CNH pair-parse check baru.** Sebelumnya
+   Tier 1 hanya memverifikasi `_parse_pair('DXY')` mengembalikan sentinel
+   skip `('', '')`. Ditambahkan check kedua: `_parse_pair('USD_CNH')`
+   harus mengembalikan `('USD', 'CNH')` — persis string symbol yang
+   dibangun `market_ingester.py`'s `_run_context_symbol()` untuk CNH di
+   bawah ADR-048. CNH tidak punya fallback source; regresi di parsing ini
+   akan menghentikan Bronze write CNH secara diam-diam.
+
+2. **Tier 2 (live-fetch) — bug nyata diperbaiki: hand-rolled logic
+   diganti dengan adapter asli.** Tier 2 sebelumnya menduplikasi logika
+   pembentukan request `AlphaVantageForexAdapter` secara manual, bukan
+   memanggil adapter yang sebenarnya. Ini bukan sekadar gaya kode — begitu
+   ADR-048 menambahkan penyesuaian `outputsize` compact/full ke adapter
+   asli, logika duplikat script preflight ini diam-diam tidak lagi
+   sinkron (tetap selalu meminta `'full'` tanpa syarat). Preflight check
+   yang menguji salinan tangan alih-alih jalur kode asli mengalahkan
+   seluruh tujuan "preflight memvalidasi apa yang akan segera live."
+   Diperbaiki dengan me-route Tier 2 langsung melalui
+   `AlphaVantageForexAdapter.fetch()` — class yang sama, method yang
+   sama, jalur kode yang sama yang benar-benar dipanggil
+   `market_ingester.py` di produksi.
+
+**Tier 3 baru (`--check-cnh`, opt-in, 1/25 budget harian):** dedicated
+USD/CNH depth check melalui adapter asli dengan window >100 hari —
+sengaja melewati threshold `outputsize='full'` adapter, mereproduksi
+temuan empiris USD/CNH Source Adjustment Addendum v1.0 §3.2 (3.079 baris,
+2014-11-07 → 2026-08-27, ~11,8 tahun) sebagai gate permanen yang bisa
+dijalankan ulang, bukan temuan satu-kali dari sesi chat. CNH tidak punya
+fallback source (ADR-048) — inilah check yang akan menangkap degradasi
+diam-diam di sisi AlphaVantage (bentuk kegagalan yang sama persis dengan
+yang dialami `USDCNH=X` di yfinance — 1 baris — alasan utama ADR-048 ada)
+sebelum mencapai produksi, bukan sesudahnya. Row-count floor
+(`_TIER3_MIN_EXPECTED_ROWS = 1000`) adalah floor konservatif, jauh di
+bawah baseline empiris addendum (3.079), memberi headroom besar terhadap
+variasi normal sambil tetap menangkap regresi near-total-failure.
+
+- **KNOWN_RISKS.md RISK-22:** ditambahkan mitigation item ke-4 —
+  ketersediaan Tier 3 sebagai gate untuk mendeteksi degradasi AlphaVantage
+  sisi-CNH sebelum mencapai produksi.
+
+Verifikasi informal (mocked network, dijalankan interaktif): kedua Tier 1
+check lolos secara genuine tanpa mocking apa pun (logika zero-network
+asli); Tier 2 dikonfirmasi meminta `outputsize='compact'` untuk window
+30 hari; Tier 3 dikonfirmasi meminta `outputsize='full'` untuk window
+>100 hari dan PASS secara benar pada 3.079 baris unique-date serta FAIL
+pada 1 baris (persis bentuk regresi yang ingin ditangkap tier ini) dan
+pada simulasi connection error.
+
+PATCH bump: bug fix + fitur baru pada tooling operasional di luar `src/`,
+tidak ada perubahan Interface Contract, Silver, atau Gold. Total: **1
+file dimodifikasi** (`scripts/preflight/check_alphavantage_fx.py`) | **0
+test ditambahkan/dihapus** (di luar scope coverage per arahan Ovi) |
+**1533 passed / 0 failed / 0 error** (tidak berubah dari v1.17.2).
+
 ## v1.17.2 — USD/CNH Source Adjustment: yfinance → AlphaVantage FX_DAILY (Agustus 2026)
 
 Diarahkan oleh `alpha_factory_usdcnh_source_adjustment_v1_0.docx` (ADR-048,

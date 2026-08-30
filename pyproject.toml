@@ -1,6 +1,58 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.17.2"
+version = "1.17.3"
+# FIX (Ovi, 30 Aug 2026): scripts/preflight/check_alphavantage_fx.py --
+# CNH-aware, and fixes a genuine bug in the preflight script itself. Two
+# changes, both scoped to scripts/preflight/ (outside src/ -- no unit
+# test coverage requirement applies here per Ovi's explicit direction;
+# this script's only "test" is being run for real on network-enabled
+# hardware, which is the point of a preflight gate).
+#
+# (1) Tier 1 gained a second zero-cost static check: _parse_pair('USD_CNH')
+# must resolve to ('USD', 'CNH') -- the exact symbol string
+# market_ingester.py's _run_context_symbol() builds for CNH under
+# ADR-048. Distinct from the pre-existing DXY skip-sentinel check (which
+# asserts the OPPOSITE outcome -- ('', '') -- for a different pair).
+#
+# (2) Tier 2's live-fetch was quietly hand-rolling its own copy of
+# AlphaVantageForexAdapter's request-building logic instead of calling
+# the real adapter -- a genuine, pre-existing bug in this script, not a
+# style nit: the moment ADR-048 (previous entry, this file) added
+# outputsize compact/full sizing to the real adapter, this script's
+# duplicate logic silently fell out of sync (it still always requested
+# 'full', unconditionally, regardless of range). A preflight check that
+# exercises a hand-copied stand-in instead of the real code path defeats
+# the entire point of "preflight validates what is about to go live."
+# Fixed by routing Tier 2 through AlphaVantageForexAdapter.fetch()
+# directly -- same class, same method, same code path market_ingester.py
+# actually calls in production.
+#
+# NEW Tier 3 (--check-cnh, opt-in, 1/25 daily budget): dedicated USD/CNH
+# depth check via the real adapter over a >100-day window -- deliberately
+# crosses the outputsize='full' threshold, reproducing the USD/CNH Source
+# Adjustment Addendum v1.0 Section 3.2 empirical finding (3,079 rows,
+# 2014-11-07 -> 2026-08-27, ~11.8 years) as a permanent, re-runnable gate
+# rather than a one-time chat-session finding. CNH has no fallback
+# source (ADR-048) -- this is the check that would catch a future silent
+# AlphaVantage-side degradation (the same failure shape yfinance's
+# USDCNH=X had -- 1 row -- which is the entire reason ADR-048 exists)
+# before it reaches production, not after. Row-count floor
+# (_TIER3_MIN_EXPECTED_ROWS = 1000) is a conservative floor well below
+# the addendum's own 3,079-row baseline, generous headroom against normal
+# variation while still catching a near-total-failure regression.
+#
+# Verified informally (mocked network, run interactively -- not
+# committed as a test file per the no-coverage-requirement note above):
+# both Tier 1 checks pass genuinely with zero mocking (real
+# zero-network logic); Tier 2 confirmed to request outputsize='compact'
+# for its 30-day window; Tier 3 confirmed to request outputsize='full'
+# for its >100-day window and to correctly PASS at 3,079 unique-date rows
+# and FAIL at 1 row (the exact regression shape this tier exists to
+# catch) and on a simulated connection error. Full test suite re-run
+# after the change: unchanged at 1533 passed, 0 failed (no tests
+# added/removed, consistent with the no-coverage-requirement direction).
+# KNOWN_RISKS.md RISK-22 updated with this new mitigation. August 2026.
+#
 # FIX ADR-048 (USD/CNH Source Adjustment Addendum v1.0, 29 Aug 2026): the
 # Layer 2 USD/CNH context anchor (context.dollar_basket) is re-sourced from
 # yfinance (USDCNH=X, confirmed broken live -- returns 1 row) to

@@ -1999,6 +1999,20 @@ occasional one.
    (`src/utils/rate_limiter.py`) — a shared, pre-existing signal, not new
    to this risk, but the relevant one to watch now that a second
    permanent consumer exists.
+4. **UPD (30 Aug 2026):** `scripts/preflight/check_alphavantage_fx.py`
+   gained `--check-cnh` (Tier 3) — a dedicated USD/CNH depth check via
+   the real `AlphaVantageForexAdapter`, reproducing the addendum's own
+   §3.2 empirical finding (3,079 rows, ~11.8 years) as a permanent,
+   re-runnable gate that costs 1 of the 25 daily requests when run. Not
+   a budget mitigation by itself (it *spends* budget when invoked) but
+   closes a related gap: CNH has no fallback source, so a silent
+   AlphaVantage-side degradation (the same failure shape yfinance's
+   USDCNH=X had) would otherwise only surface as an unexplained Bronze
+   coverage gap in production. Same fix also corrected Tier 2's
+   live-fetch check, which had been silently hand-rolling a stale copy
+   of the adapter's request logic — it never picked up this ADR's own
+   outputsize compact/full change, meaning a preflight PASS on Tier 2
+   was no longer actually validating the real production code path.
 
 ### Operator playbook if the AlphaVantage budget is found exhausted
 
@@ -2017,7 +2031,24 @@ occasional one.
 
 ---
 
-*Last updated: v1.17.2 — `USD/CNH Source Adjustment Addendum v1.0`
+*Last updated: v1.17.3 — Preflight fix (Ovi, 30 Aug 2026):
+`scripts/preflight/check_alphavantage_fx.py` gained a CNH-aware Tier 1
+static check (`_parse_pair('USD_CNH') == ('USD', 'CNH')`, ADR-048) and a
+new opt-in Tier 3 (`--check-cnh`) reproducing the USD/CNH Source
+Adjustment Addendum v1.0 §3.2 empirical depth check (3,079 rows, ~11.8
+years) as a permanent, re-runnable gate — see RISK-22 item 4 above.
+Also fixed a genuine bug in the existing Tier 2 live-fetch check: it had
+been hand-rolling its own copy of `AlphaVantageForexAdapter`'s request
+logic instead of calling the real adapter, so it silently stopped
+reflecting the real code path the moment ADR-048 added outputsize
+compact/full sizing to that adapter — a preflight PASS on the old Tier 2
+was no longer actually validating what was about to go live. Both tiers
+now route through the real adapter directly. Scoped entirely to
+`scripts/preflight/` (outside `src/` — no unit test coverage requirement
+applies, per Ovi's explicit direction); verified informally via mocked
+network calls run interactively, not committed as a test file. Full
+suite unchanged at 1533 passed (no tests added/removed). August 2026.
+Prior entry: v1.17.2 — `USD/CNH Source Adjustment Addendum v1.0`
 (ADR-048, 29 Aug 2026): the Layer 2 USD/CNH context anchor
 (`context.dollar_basket`) is re-sourced from yfinance (`USDCNH=X`,
 confirmed broken live — returns 1 row) to AlphaVantage
