@@ -211,3 +211,136 @@ class TestForexDayCacheAdapterSuccessPath:
             )
         assert result is sentinel_df
         mock_load.assert_called_once_with("EUR_USD", date(2025, 1, 3))
+
+
+class TestDropTrailingNullOhlc:
+    """FIX (chat thread, 31 Aug 2026 live-test finding): market_ingester.py
+    passes end=run_date to Ticker.history(). When the fetch executes before
+    run_date's session has actually occurred (e.g. an early-WIB-morning
+    Bronze run), yfinance can return a trailing placeholder row for that
+    not-yet-traded day with null OHLC — SchemaValidator's not-nullable gate
+    (config/schemas/yfinance_ohlcv.yaml) then quarantines the ENTIRE
+    DataFrame over that one artifact row, discarding legitimate history too.
+    Confirmed live: AAPL and many other us_stocks/context 1D symbols,
+    live-test 2026-08-31 ("Column 'open': not nullable but has 1 nulls").
+    """
+
+    def test_single_trailing_null_row_dropped(self):
+        import polars as pl
+        from src.bronze.yfinance_adapter import _drop_trailing_null_ohlc
+
+        df = pl.DataFrame({
+            "timestamp": [date(2025, 1, 2), date(2025, 1, 3)],
+            "open":  [100.0, None], "high": [102.0, None],
+            "low":   [99.0, None],  "close": [101.0, None],
+            "volume": [1_000_000, None],
+        })
+        result = _drop_trailing_null_ohlc(df)
+        assert len(result) == 1
+        assert result["timestamp"].to_list() == [date(2025, 1, 2)]
+
+    def test_multiple_trailing_null_rows_dropped(self):
+        import polars as pl
+        from src.bronze.yfinance_adapter import _drop_trailing_null_ohlc
+
+        df = pl.DataFrame({
+            "timestamp": [date(2025, 1, i) for i in (2, 3, 4, 5)],
+            "open":  [100.0, 101.0, None, None],
+            "high":  [102.0, 103.0, None, None],
+            "low":   [99.0, 100.0, None, None],
+            "close": [101.0, 102.0, None, None],
+        })
+        result = _drop_trailing_null_ohlc(df)
+        assert len(result) == 2
+        assert result["timestamp"].to_list() == [date(2025, 1, 2), date(2025, 1, 3)]
+
+    def test_no_null_rows_returns_unchanged(self):
+        import polars as pl
+        from src.bronze.yfinance_adapter import _drop_trailing_null_ohlc
+
+        df = pl.DataFrame({
+            "timestamp": [date(2025, 1, 2), date(2025, 1, 3)],
+            "open": [100.0, 101.0], "high": [102.0, 103.0],
+            "low": [99.0, 100.0], "close": [101.0, 102.0],
+        })
+        result = _drop_trailing_null_ohlc(df)
+        assert len(result) == 2
+
+    def test_mid_series_null_row_is_not_dropped(self):
+        """A null row NOT at the tail is a genuine data-quality issue and
+        must still reach SchemaValidator — only trailing artifacts are
+        stripped, never a mid-series gap."""
+        import polars as pl
+        from src.bronze.yfinance_adapter import _drop_trailing_null_ohlc
+
+        df = pl.DataFrame({
+            "timestamp": [date(2025, 1, i) for i in (2, 3, 4)],
+            "open":  [100.0, None, 102.0],
+            "high":  [102.0, None, 104.0],
+            "low":   [99.0, None, 101.0],
+            "close": [101.0, None, 103.0],
+        })
+        result = _drop_trailing_null_ohlc(df)
+        assert len(result) == 3   # unchanged — null row is mid-series, not trailing
+
+    def test_partial_null_row_not_dropped(self):
+        """Only a row where ALL of open/high/low/close are null counts as
+        the trailing artifact — a row with just one null OHLC field is a
+        different (and real) data-quality issue, left for SchemaValidator."""
+        import polars as pl
+        from src.bronze.yfinance_adapter import _drop_trailing_null_ohlc
+
+        df = pl.DataFrame({
+            "timestamp": [date(2025, 1, 2), date(2025, 1, 3)],
+            "open":  [100.0, None],
+            "high":  [102.0, 103.0],
+            "low":   [99.0, 100.0],
+            "close": [101.0, 102.0],
+        })
+        result = _drop_trailing_null_ohlc(df)
+        assert len(result) == 2   # unchanged — not ALL of OHLC are null
+
+    def test_all_rows_null_returns_empty(self):
+        import polars as pl
+        from src.bronze.yfinance_adapter import _drop_trailing_null_ohlc
+
+        df = pl.DataFrame({
+            "timestamp": [date(2025, 1, 2), date(2025, 1, 3)],
+            "open": [None, None], "high": [None, None],
+            "low": [None, None], "close": [None, None],
+        })
+        result = _drop_trailing_null_ohlc(df)
+        assert len(result) == 0
+
+    def test_normalize_df_end_to_end_strips_trailing_placeholder(self):
+        """Full _normalize_df() flow: raw pandas history with a trailing
+        not-yet-traded placeholder row → clean, all-valid Polars output."""
+        import pandas as pd
+        from src.bronze.yfinance_adapter import _normalize_df
+
+        idx = pd.DatetimeIndex(["2025-01-02", "2025-01-03"], name="Date")
+        df = pd.DataFrame({
+            "Open": [100.0, None], "High": [102.0, None],
+            "Low": [99.0, None], "Close": [101.0, None],
+            "Volume": [1_000_000, None],
+        }, index=idx)
+        result = _normalize_df(df)
+        assert result is not None
+        assert len(result) == 1
+        assert result["open"].null_count() == 0
+
+    def test_normalize_df_returns_none_if_everything_is_placeholder(self):
+        """If the ENTIRE fetch is nothing but placeholder rows (e.g. a
+        single-row cold-start request landing before the session opens),
+        _normalize_df() must return None — same contract as an empty
+        DataFrame — rather than an empty-but-non-None result downstream
+        code isn't expecting."""
+        import pandas as pd
+        from src.bronze.yfinance_adapter import _normalize_df
+
+        idx = pd.DatetimeIndex(["2025-01-02"], name="Date")
+        df = pd.DataFrame({
+            "Open": [None], "High": [None],
+            "Low": [None], "Close": [None], "Volume": [None],
+        }, index=idx)
+        assert _normalize_df(df) is None

@@ -837,3 +837,53 @@ class TestPrimarySourceForRemainingBranches:
     def test_forex_returns_yfinance(self):
         inst = _fake_layer1_instrument("EUR_USD", market="forex")
         assert MarketOHLCVIngester._primary_source_for(inst) == "yfinance"
+
+
+class TestRunSymbolFallbackDaysWiring:
+    """FIX (chat thread, 31 Aug 2026): _run_symbol()/_run_context_symbol()
+    must pass FALLBACK_DAYS.get(tf) through to resolve_start_date() as
+    fallback_days — the value that actually fixes the idx/1H 730-day
+    boundary bug lives in inc_fetch.py, but it only takes effect if the
+    call site actually forwards it."""
+
+    def test_run_symbol_passes_fallback_days_720_for_1h(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1H"])
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: None)
+        calls = []
+        monkeypatch.setattr(
+            ingester.inc, "resolve_start_date",
+            lambda **kw: (calls.append(kw), date(2020, 1, 1))[1],
+        )
+        inst = _fake_layer1_instrument("AADI", market="idx")
+        ingester._run_symbol(inst, "1H", date(2026, 8, 31))
+        assert len(calls) == 1
+        assert calls[0]["fallback_days"] == 720
+
+    def test_run_symbol_passes_none_fallback_days_for_1d(self, monkeypatch, tmp_path):
+        """Every other timeframe must be unaffected — fallback_days=None,
+        fallback_years continues to drive resolution exactly as before."""
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1D"])
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: None)
+        calls = []
+        monkeypatch.setattr(
+            ingester.inc, "resolve_start_date",
+            lambda **kw: (calls.append(kw), date(2020, 1, 1))[1],
+        )
+        inst = _fake_layer1_instrument("AAPL", market="us_stocks")
+        ingester._run_symbol(inst, "1D", date(2026, 8, 31))
+        assert calls[0]["fallback_days"] is None
+
+    def test_run_context_symbol_passes_fallback_days_through(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        ingester = MarketOHLCVIngester(timeframes=["1H"])
+        monkeypatch.setattr(ingester, "_fetch", lambda *a, **kw: None)
+        calls = []
+        monkeypatch.setattr(
+            ingester.inc, "resolve_start_date",
+            lambda **kw: (calls.append(kw), date(2020, 1, 1))[1],
+        )
+        inst = _fake_context_instrument("VIX")
+        ingester._run_context_symbol(inst, "1H", date(2026, 8, 31))
+        assert calls[0]["fallback_days"] == 720

@@ -58,6 +58,17 @@ class TestPassesSchedule:
         assert _passes_schedule(job, first_friday) is True
         assert _passes_schedule(job, second_friday) is False
 
+    def test_weekly_macro_sunday_only(self):
+        """FIX (chat thread, 31 Aug 2026): bronze_macro_weekly/bronze_bis_rates
+        gained run_on_weekdays: [6] (Sunday) — Sunday passes, every other
+        day fails. Mirrors the eia_wednesday_only pattern above exactly."""
+        job = {"run_on_weekdays": [6]}  # 6=Sunday
+        sunday    = date(2025, 1, 19)
+        wednesday = date(2025, 1, 15)
+        assert sunday.weekday() == 6
+        assert _passes_schedule(job, sunday) is True
+        assert _passes_schedule(job, wednesday) is False
+
     def test_nfp_tolerance_day(self):
         """NFP with tolerance_days=1: also runs on Saturday after first Friday."""
         job = {"run_on_nth_weekday": {"n": 1, "weekday": 4, "tolerance_days": 1}}

@@ -299,7 +299,25 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "depends_on":  [],
         "layer":       "bronze",
         "est_minutes": 15,
-        # No run_on_weekdays — called explicitly on weekly SOP
+        # FIX (chat thread, 31 Aug 2026 live-test finding): this job's
+        # cadence was previously enforced by SOP discipline only ("called
+        # explicitly on weekly SOP" — no code-level guard), an assumption
+        # that predates GMI-JR-003's `--job bronze` layer-scoped runner.
+        # `layer_sequence()` derives from WEEKLY_SEQUENCE, which lists this
+        # job before bronze_treasury — so `--job bronze` on ANY day ran the
+        # full ~60-series FRED sweep (including all 13 TREASURY_FRED_SERIES
+        # tenors) moments before bronze_treasury's own dedicated fetch of
+        # those same 13 series, which then hit FIX BI-1's same-day
+        # idempotency check and skipped every series ("[Bronze] Macro
+        # idempotent skip", 100% of treasury's series, every `--job bronze`
+        # run regardless of weekday). run_on_weekdays: [6] (Sunday) closes
+        # the gap the same way bronze_eia's [2] (Wednesday) already does —
+        # `--job bronze` on a non-Sunday now correctly skips this job via
+        # _passes_schedule(), leaving bronze_treasury as the sole writer of
+        # the yield-curve tenors on the 6 non-Sunday days, as originally
+        # intended (treasury_ingester.py's own docstring: daily cadence,
+        # independent of the weekly macro batch).
+        "run_on_weekdays": [6],   # 0=Mon .. 6=Sunday
     },
 
     "bronze_bis_rates": {
@@ -312,7 +330,13 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "depends_on":  [],   # GD §17.3.1: Bronze ingesters independent
         "layer":       "bronze",
         "est_minutes": 3,
-        # No run_on_weekdays — called explicitly on weekly SOP (after bronze_macro_weekly)
+        # FIX (chat thread, 31 Aug 2026): same missing-guard gap as
+        # bronze_macro_weekly above (SOP-only cadence enforcement predating
+        # GMI-JR-003's `--job bronze`) — closed in the same pass, same
+        # rationale. Not independently reported this thread, but identical
+        # root cause: no code-level constraint currently stops this weekly
+        # job from firing on a non-Sunday `--job bronze` invocation.
+        "run_on_weekdays": [6],   # 0=Mon .. 6=Sunday
     },
 
     "bronze_treasury": {
@@ -387,6 +411,20 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "description": "Clean macro series — PIT integrity, vintage_date, revisions",
         "fn":          _silver_macro,
         "depends_on":  ["bronze_macro_weekly"],
+        # FIX (chat thread, 31 Aug 2026, consequential to the bronze_macro_weekly
+        # schedule-guard fix above): bronze_macro_weekly now correctly refuses to
+        # run on non-Sunday days (run_on_weekdays: [6]), which means its sentinel
+        # for "today" genuinely won't exist most days — the exact-date dependency
+        # check below would otherwise sys.exit(1) every time `--job silver` (or
+        # `--job all` on a weekly-SOP day boundary) runs on a non-Sunday. This
+        # mirrors the EXACT stale_tolerance pattern FIX NEW-1 already established
+        # for silver_validate/gold_regime's own dependency on the (also weekly)
+        # silver_macro two entries below — that precedent was never extended one
+        # hop further up to silver_macro's own dependency on bronze_macro_weekly,
+        # because bronze_macro_weekly previously had no schedule guard to make the
+        # gap visible. 7 days = one full weekly cycle + 1-day buffer, same
+        # rationale as the existing precedent.
+        "stale_tolerance": {"bronze_macro_weekly": 7},
         "layer":       "silver",
         "est_minutes": 10,
     },
@@ -399,6 +437,11 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         ),
         "fn":          _silver_global_rates,
         "depends_on":  ["bronze_bis_rates"],
+        # FIX (chat thread, 31 Aug 2026): same rationale as silver_macro's
+        # identical addition above — bronze_bis_rates is now also
+        # Sunday-gated (run_on_weekdays: [6]), so this dependency needs the
+        # same staleness window to remain runnable on non-Sunday days.
+        "stale_tolerance": {"bronze_bis_rates": 7},
         "layer":       "silver",
         "est_minutes": 3,
     },

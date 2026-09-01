@@ -190,10 +190,27 @@ class TestLayerCommands:
 
         run_layer("bronze", force=False, run_date=run_date)
 
+        # FIX (chat thread, 31 Aug 2026): bronze_macro_weekly and
+        # bronze_bis_rates are now Sunday-gated (run_on_weekdays: [6]) —
+        # previously they had no schedule guard at all and ran on every
+        # `--job bronze` invocation regardless of weekday, which is what
+        # caused bronze_treasury's every-single-time idempotent-skip bug
+        # (bronze_macro_weekly's full FRED sweep pre-writes bronze_treasury's
+        # own target series moments earlier in the same run). On this
+        # Wednesday they must be correctly SKIPPED, not completed — every
+        # other bronze-layer job (no constraint, or a constraint Wednesday
+        # satisfies) must still complete.
+        weekly_only = {"bronze_macro_weekly", "bronze_bis_rates"}
         for job_name in LAYER_JOB_NAMES["bronze"]:
-            assert sandboxed_guard.is_done(job_name, run_date), (
-                f"{job_name} did not complete during the bronze layer run"
-            )
+            if job_name in weekly_only:
+                assert not sandboxed_guard.is_done(job_name, run_date), (
+                    f"{job_name} should be schedule-gated (Sunday-only) and"
+                    f" skipped on {run_date} ({run_date.strftime('%A')})"
+                )
+            else:
+                assert sandboxed_guard.is_done(job_name, run_date), (
+                    f"{job_name} did not complete during the bronze layer run"
+                )
 
     def test_silver_without_bronze_fails_dependency_check(
         self, stubbed_registry, sandboxed_guard
@@ -210,18 +227,44 @@ class TestLayerCommands:
     ):
         """The staged live-testing workflow this feature was built for:
         run each layer separately, in order, no --force needed once the
-        upstream layer's sentinels exist for the same run_date."""
-        from src.runner import run_layer
+        upstream layer's sentinels exist for the same run_date.
+
+        FIX (chat thread, 31 Aug 2026): bronze_macro_weekly/bronze_bis_rates
+        are now genuinely Sunday-gated; silver_macro/silver_global_rates
+        depend on them via a 7-day stale_tolerance (same pattern FIX NEW-1
+        already established one hop downstream for silver_validate/
+        gold_regime's dependency on silver_macro itself). This test now
+        seeds that weekly sentinel on the preceding Sunday first, mirroring
+        the real SOP (GD §14.4.2) and the existing GATE-N1 precedent in
+        TestJobAllAcrossWeek above — not the previously-accidental behavior
+        where bronze_macro_weekly ran unconditionally on every invocation.
+        """
+        from src.runner import run_job, run_layer
         from src.scheduler.job_registry import LAYER_JOB_NAMES
 
+        sunday   = date(2026, 8, 16)   # preceding Sunday
         run_date = date(2026, 8, 19)   # Wednesday, see test above
+        assert sunday.weekday() == 6
+        assert (run_date - sunday).days == 3
+
+        # Simulate the weekly SOP run once, on the preceding Sunday — the
+        # only place these two sentinels get written all week.
+        run_job("bronze_macro_weekly", force=False, run_date=sunday)
+        run_job("bronze_bis_rates",    force=False, run_date=sunday)
 
         run_layer("bronze", force=False, run_date=run_date)
         run_layer("silver", force=False, run_date=run_date)
         run_layer("gold",   force=False, run_date=run_date)
 
+        # bronze_macro_weekly/bronze_bis_rates are correctly skipped again
+        # on this Wednesday (see test_bronze_layer_completes_standalone) —
+        # their Sunday sentinel is what satisfies the downstream
+        # stale_tolerance checks, not a fresh same-day run.
+        weekly_only = {"bronze_macro_weekly", "bronze_bis_rates"}
         for layer in ("bronze", "silver", "gold"):
             for job_name in LAYER_JOB_NAMES[layer]:
+                if job_name in weekly_only:
+                    continue
                 assert sandboxed_guard.is_done(job_name, run_date), (
                     f"{job_name} ({layer}) did not complete in the staged chain"
                 )

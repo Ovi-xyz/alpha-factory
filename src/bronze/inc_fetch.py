@@ -28,12 +28,38 @@ from loguru import logger
 FALLBACK_YEARS: dict[str, float] = {
     "5m":  0.2,   # ~60 hari — accumulate forward, no historical intraday
     "15m": 0.5,   # ~180 hari — yfinance limit ~730 hari
-    "1H":  2,     # 2 tahun — realistic ceiling untuk 1H di free tier
+    "1H":  2,     # 2 tahun — realistic ceiling untuk 1H di free tier.
+    # FIX (chat thread, 31 Aug 2026 live-test finding): this value is now
+    # SUPERSEDED for actual fetch resolution by FALLBACK_DAYS["1H"] below —
+    # kept here only as a human-readable "~2 years" label / fallback for
+    # any caller that doesn't also pass fallback_days. int(365*2)=730 lands
+    # EXACTLY on yfinance's real "must be within the last 730 days" ceiling
+    # for 1H intraday; live-test evidence (2026-08-31, idx timeframe=1H)
+    # showed 28/29 symbols failing on cold-start with exactly that Yahoo
+    # error — only the first request squeaked through on sub-second request
+    # timing, not because 730 is actually safe. A years*365 value is also
+    # leap-year-sensitive across different run_dates (int(365*2) is 730 or
+    # 731 depending on which Feb 29 falls inside the window) — see
+    # FALLBACK_DAYS for the fixed, run_date-independent replacement.
     # "4H" DIHAPUS v1.5: Bronze tidak lagi menyimpan 4H. Silver mensintesis
     #                     4H dari Silver 1H. Tidak ada Bronze 4H fetch.
     "1D":  10,    # 10 tahun — target utama sesuai GD Section 6.4
     "1W":  15,    # FIX v1.1: 15 tahun buffer (bukan 10) untuk 1W/1M — lebih aman
     "1M":  15,
+}
+
+# FIX (chat thread, 31 Aug 2026 live-test finding): explicit day-count
+# override for timeframes where a precise, run_date-independent boundary
+# matters more than a human-readable "N years" label. Takes precedence
+# over FALLBACK_YEARS at the resolve_start_date() call site (see
+# fallback_days parameter below) — sidesteps both the exact-730-day
+# collision AND the leap-year drift inherent to int(365 * fallback_years).
+# 720 days = 10-day safety margin under yfinance's confirmed 730-day wall
+# for 1H intraday history, verified via live-test log evidence, not the
+# prior "verified, not assumed" claim from ADR-046 Path C's implementation
+# (pyproject.toml v1.17.1), which this finding contradicts.
+FALLBACK_DAYS: dict[str, int] = {
+    "1H": 720,
 }
 
 
@@ -56,13 +82,15 @@ class IncFetchProtocol:
         source: str,
         run_date: date,                 # FIX v1.1: wajib — menggantikan date.today()
         fallback_years: float = 10,
+        fallback_days: Optional[int] = None,   # FIX (chat thread, 31 Aug 2026)
     ) -> date:
         """
         Return start_date yang tepat untuk incremental fetch.
 
         Logic:
           - Jika ada data sebelumnya: last_date - DEFAULT_LOOKBACK_DAYS (7 hari overlap)
-          - Jika belum ada data: run_date - fallback_years * 365
+          - Jika belum ada data: run_date - fallback_days (jika diisi),
+            else run_date - fallback_years * 365
 
         Args:
             bronze_path:    Base path Bronze layer (e.g. Path('data/bronze/market/ohlcv'))
@@ -70,6 +98,16 @@ class IncFetchProtocol:
             source:         Data source string (e.g. 'yfinance') — FIX: digunakan untuk scope
             run_date:       Date saat pipeline dijalankan — untuk reproducibility
             fallback_years: Berapa tahun ke belakang jika belum ada data
+            fallback_days:  FIX (chat thread, 31 Aug 2026 live-test finding):
+                            jika diberikan, dipakai APA ADANYA sebagai jumlah
+                            hari — mengabaikan fallback_years sepenuhnya.
+                            Untuk kasus di mana batas presisi penting (mis.
+                            batas keras provider seperti yfinance 1H's real
+                            "within the last 730 days" ceiling) dan
+                            int(365 * fallback_years) rentan terhadap
+                            leap-year drift antar run_date yang berbeda-beda
+                            (bisa jadi 730 ATAU 731 tergantung run_date) —
+                            lihat FALLBACK_DAYS di module-level.
 
         Returns:
             date object: start date untuk fetch ke API
@@ -85,7 +123,13 @@ class IncFetchProtocol:
             return start
 
         # FIX v1.1: pakai run_date bukan date.today() agar reproducible
-        fallback = run_date - timedelta(days=int(365 * fallback_years))
+        # FIX (chat thread, 31 Aug 2026): fallback_days (jika ada) menang
+        # atas fallback_years — day-count eksplisit, bukan hasil kali 365
+        # yang rentan leap-year drift.
+        if fallback_days is not None:
+            fallback = run_date - timedelta(days=fallback_days)
+        else:
+            fallback = run_date - timedelta(days=int(365 * fallback_years))
         logger.info(
             f"[IncFetch] {symbol}/{source}"
             f" | no prior data | fetch from {fallback}"

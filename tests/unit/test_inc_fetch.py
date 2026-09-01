@@ -91,3 +91,84 @@ class TestIncFetchProtocol:
         """FIX v1.1: 1W/1M fallback buffer = 15 (not 10)."""
         assert FALLBACK_YEARS["1W"] == 15
         assert FALLBACK_YEARS["1M"] == 15
+
+
+class TestFallbackDaysOverride:
+    """FIX (chat thread, 31 Aug 2026 live-test finding): FALLBACK_YEARS["1H"]=2
+    computes to run_date - timedelta(days=730), landing EXACTLY on yfinance's
+    real "must be within the last 730 days" ceiling for 1H intraday history.
+    Live-test evidence (idx timeframe=1H, 2026-08-31): 28/29 symbols failed
+    cold-start with exactly that Yahoo error; only the first request (AADI)
+    squeaked through on sub-second request timing, not because 730 is safe.
+    A years*365 value is also leap-year-sensitive across different run_dates
+    (int(365*2) can be 730 OR 731 depending on which Feb 29 falls inside the
+    window). FALLBACK_DAYS gives resolve_start_date() an exact, run_date-
+    independent day count that takes precedence over fallback_years.
+    """
+
+    def setup_method(self):
+        self.inc = IncFetchProtocol()
+
+    def test_fallback_days_1h_is_720(self):
+        from src.bronze.inc_fetch import FALLBACK_DAYS
+        assert FALLBACK_DAYS["1H"] == 720
+
+    def test_fallback_days_leaves_730_day_wall_margin(self):
+        """720 = 10-day safety margin under the confirmed 730-day ceiling."""
+        from src.bronze.inc_fetch import FALLBACK_DAYS
+        assert FALLBACK_DAYS["1H"] < 730
+        assert 730 - FALLBACK_DAYS["1H"] == 10
+
+    def test_fallback_days_takes_precedence_over_fallback_years(self, tmp_path):
+        """When both are given, fallback_days wins entirely — fallback_years
+        is not consulted at all, not even as a cross-check."""
+        run_date = date(2026, 8, 31)
+        result = self.inc.resolve_start_date(
+            bronze_path=tmp_path / "ohlcv",
+            symbol="AADI", source="yfinance_jk",
+            run_date=run_date,
+            fallback_years=2,      # would give exactly 730 days (the bug)
+            fallback_days=720,     # must win
+        )
+        assert result == run_date - timedelta(days=720)
+        assert result != run_date - timedelta(days=730)
+
+    def test_no_fallback_days_preserves_existing_years_behavior(self, tmp_path):
+        """Default (fallback_days=None) must be byte-for-byte identical to
+        pre-fix behavior for every other timeframe — no regression."""
+        run_date = date(2025, 6, 1)
+        result = self.inc.resolve_start_date(
+            bronze_path=tmp_path / "ohlcv",
+            symbol="AAPL", source="yfinance",
+            run_date=run_date,
+            fallback_years=10,
+        )
+        assert result == run_date - timedelta(days=365 * 10)
+
+    def test_fallback_days_is_run_date_independent_unlike_years_formula(self):
+        """Regression guard for the leap-year drift half of the bug: a fixed
+        day count gives the identical span regardless of which run_date is
+        used, unlike int(365 * fallback_years) which can silently shift by
+        a day depending on whether a Feb 29 falls inside the window."""
+        from src.bronze.inc_fetch import FALLBACK_DAYS
+        d1 = date(2026, 8, 31) - timedelta(days=FALLBACK_DAYS["1H"])
+        d2 = date(2027, 3, 15) - timedelta(days=FALLBACK_DAYS["1H"])
+        assert (date(2026, 8, 31) - d1).days == 720
+        assert (date(2027, 3, 15) - d2).days == 720
+
+    def test_existing_data_path_ignores_fallback_days(self, tmp_path):
+        """fallback_days only applies to the cold-start (no prior data)
+        branch — the lookback-from-last-date path is untouched."""
+        last_date = date(2025, 5, 20)
+        bronze_path = tmp_path / "ohlcv"
+        source_dir = (bronze_path / "source=yfinance_jk" / "symbol=AADI"
+                      / "year=2025" / "month=05")
+        source_dir.mkdir(parents=True)
+        pl.DataFrame({"timestamp": [last_date], "close": [150.0]}).write_parquet(
+            source_dir / "AADI_raw_test.parquet"
+        )
+        result = self.inc.resolve_start_date(
+            bronze_path=bronze_path, symbol="AADI", source="yfinance_jk",
+            run_date=date(2025, 6, 1), fallback_years=2, fallback_days=720,
+        )
+        assert result == last_date - timedelta(days=self.inc.DEFAULT_LOOKBACK_DAYS)

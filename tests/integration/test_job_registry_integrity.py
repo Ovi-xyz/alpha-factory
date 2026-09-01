@@ -526,3 +526,55 @@ class TestLayerJobNames:
 
         result = job_registry_module.layer_sequence("bronze")
         assert result == ["bronze_ohlcv_daily", "bronze_treasury"]
+
+
+class TestWeeklyMacroScheduleGuard:
+    """FIX (chat thread, 31 Aug 2026 live-test finding): bronze_macro_weekly
+    and bronze_bis_rates previously had no schedule constraint at all
+    ("called explicitly on weekly SOP" — SOP discipline only), an assumption
+    that predates GMI-JR-003's `--job bronze` layer-scoped runner. Since
+    layer_sequence("bronze") derives from WEEKLY_SEQUENCE (which lists both
+    jobs ahead of bronze_treasury), `--job bronze` ran bronze_macro_weekly's
+    full ~60-series FRED sweep — including all 13 TREASURY_FRED_SERIES tenors
+    — moments before bronze_treasury's own dedicated fetch of those same 13
+    series, which then hit FIX BI-1's same-day idempotency check and skipped
+    every one of them, on every `--job bronze` invocation regardless of
+    weekday. These tests lock in the fix: both jobs are now Sunday-only.
+    """
+
+    def test_bronze_macro_weekly_is_sunday_only(self):
+        assert JOB_REGISTRY["bronze_macro_weekly"].get("run_on_weekdays") == [6]
+
+    def test_bronze_bis_rates_is_sunday_only(self):
+        assert JOB_REGISTRY["bronze_bis_rates"].get("run_on_weekdays") == [6]
+
+    def test_bronze_macro_weekly_skipped_on_non_sunday(self):
+        wednesday = date(2026, 8, 19)
+        assert wednesday.weekday() == 2
+        assert not _passes_schedule(JOB_REGISTRY["bronze_macro_weekly"], wednesday)
+
+    def test_bronze_bis_rates_skipped_on_non_sunday(self):
+        wednesday = date(2026, 8, 19)
+        assert not _passes_schedule(JOB_REGISTRY["bronze_bis_rates"], wednesday)
+
+    def test_both_weekly_jobs_pass_on_sunday(self):
+        sunday = date(2026, 8, 16)
+        assert sunday.weekday() == 6
+        assert _passes_schedule(JOB_REGISTRY["bronze_macro_weekly"], sunday)
+        assert _passes_schedule(JOB_REGISTRY["bronze_bis_rates"], sunday)
+
+    def test_silver_macro_has_stale_tolerance_for_bronze_macro_weekly(self):
+        """Consequential fix: bronze_macro_weekly's own schedule guard makes
+        its sentinel genuinely absent on 6 of 7 days — silver_macro's
+        dependency check on it needs the same staleness window FIX NEW-1
+        already established one hop downstream (silver_validate/gold_regime
+        depending on the weekly silver_macro), or `--job silver` on a
+        non-Sunday would sys.exit(1) every time."""
+        assert JOB_REGISTRY["silver_macro"].get("stale_tolerance") == {
+            "bronze_macro_weekly": 7
+        }
+
+    def test_silver_global_rates_has_stale_tolerance_for_bronze_bis_rates(self):
+        assert JOB_REGISTRY["silver_global_rates"].get("stale_tolerance") == {
+            "bronze_bis_rates": 7
+        }

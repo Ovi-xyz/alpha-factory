@@ -1,5 +1,94 @@
 # CHANGELOG — Data Platform
 
+## v1.17.4 — Triase Live-Test 2026-08-31: 3 Bug Independen Diperbaiki (Agustus 2026)
+
+Diarahkan oleh laporan Ovi dari live-test 31 Agustus 2026 (log
+`2026-08-31-AAPL-1D.txt` dan `2026-08-31-idx-1H.txt`, plus satu laporan
+operasional): tiga temuan independen, masing-masing ditelusuri sampai
+root cause via pembacaan live repo langsung sebelum baris kode pertama
+ditulis, sesuai disiplin "jangan gegabah" proyek ini.
+
+**1. RISK-23 — `bronze_treasury` idempotent skip di setiap `--job bronze`,
+bukan sekali-sekali.** `bronze_macro_weekly` dan `bronze_bis_rates`
+sebelumnya tidak punya `run_on_weekdays` sama sekali — komentar "called
+explicitly on weekly SOP" mengasumsikan operator manusia hanya
+menjalankannya di hari Minggu. Asumsi ini diam-diam dilanggar oleh
+`--job bronze` (GMI-JR-003, `layer_sequence()` berbasis
+`WEEKLY_SEQUENCE`, yang mendaftar `bronze_macro_weekly` SEBELUM
+`bronze_treasury`): `bronze_macro_weekly` menjalankan sweep penuh ~60
+series FRED — termasuk seluruh 13 tenor `TREASURY_FRED_SERIES` — beberapa
+saat sebelum `bronze_treasury` mencoba menulis 13 series yang SAMA, yang
+kemudian selalu kena FIX BI-1 (same-day idempotency check) dan di-skip
+100%, di setiap invokasi `--job bronze`, hari apa pun. Diperbaiki dengan
+`run_on_weekdays: [6]` (Minggu) pada kedua job, mengikuti pola
+`bronze_eia`'s `[2]` (Rabu) yang sudah ada. Fix konsekuensial pada
+langkah yang sama: `silver_macro` dan `silver_global_rates` masing-masing
+mendapat `stale_tolerance` untuk dependency mingguannya — tanpa ini,
+`--job silver` di hari non-Minggu akan `sys.exit(1)` pada dependency yang
+sebelumnya SELALU punya sentinel same-day (karena tidak pernah benar-
+benar di-gate). Pola ini identik dengan `stale_tolerance` yang sudah ada
+di FIX NEW-1 satu langkah lebih hilir (`silver_validate`/`gold_regime`
+terhadap `silver_macro`).
+
+**2. RISK-24 — Quarantine schema penuh gara-gara 1 baris null trailing.**
+`market_ingester.py` mengirim `end=run_date` ke `Ticker.history()`. Jika
+fetch dijalankan sebelum sesi `run_date` benar-benar terjadi (mis. run
+Bronze dini hari WIB), yfinance bisa mengembalikan baris placeholder
+trailing untuk hari yang belum diperdagangkan dengan OHLC null —
+`nullable: false` di `config/schemas/yfinance_ohlcv.yaml` membuat
+`SchemaValidator` men-quarantine SELURUH DataFrame karena 1 baris ini,
+membuang histori valid juga (dikonfirmasi: AAPL dan banyak simbol
+us_stocks/context lain, live-test 2026-08-31). Diperbaiki dengan
+`_drop_trailing_null_ohlc()` baru di `yfinance_adapter.py`, dipanggil
+dari `_normalize_df()` sebelum DataFrame mencapai `SchemaValidator`.
+Hanya baris TRAILING dengan open/high/low/close SEMUA null yang dibuang
+— baris null di tengah seri atau baris null sebagian tetap diteruskan
+utuh ke validasi (masalah kualitas data genuine, bukan artifact).
+
+**3. RISK-25 — `idx/timeframe=1H` hanya kembali 1 ticker; klaim
+"verified" v1.17.1 terbantahkan.** `FALLBACK_YEARS["1H"]=2` menghitung ke
+TEPAT 730 hari — persis di batas keras Yahoo "must be within the last
+730 days" untuk histori intraday 1H. Bukti live-test: 28 dari 29 simbol
+IDX gagal cold-start dengan error Yahoo yang sama persis; hanya simbol
+pertama (AADI) yang lolos, hampir pasti karena timing sub-detik saat
+request, bukan karena nilainya aman. Ini bertentangan langsung dengan
+entry v1.17.1 di file ini yang mengklaim konstanta yang sama "verified,
+not assumed" saat implementasi ADR-046 Path C. `int(365 * fallback_years)`
+juga rentan leap-year drift antar `run_date` berbeda (bisa 730 ATAU 731
+tergantung run_date). Diperbaiki dengan `FALLBACK_DAYS: dict[str, int] =
+{"1H": 720}` baru di `inc_fetch.py` — day-count eksplisit yang
+run_date-independent (margin 10 hari di bawah batas 730 yang
+terkonfirmasi), bukan hasil kali tahun×365. `resolve_start_date()`
+mendapat parameter opsional `fallback_days` yang menang penuh atas
+`fallback_years` jika diisi; kedua call site di `market_ingester.py`
+diupdate meneruskan `fallback_days=FALLBACK_DAYS.get(tf)`.
+
+**Fix konsekuensial (bukan bug baru, tapi test pre-existing yang
+mengasumsikan perilaku lama):** dua test integrasi di
+`test_runner_weekly_cadence.py`
+(`test_bronze_layer_completes_standalone`,
+`test_bronze_then_silver_then_gold_completes_full_chain`) menganggap
+`bronze_macro_weekly`/`bronze_bis_rates` selesai di hari apa pun —
+diupdate untuk men-seed sentinel Minggu-sebelumnya lebih dulu, mengikuti
+SOP produksi asli dan preseden `TestJobAllAcrossWeek` yang sudah ada di
+file yang sama.
+
+Verifikasi: `ast.parse` bersih di semua file yang diubah, tidak ada
+f-string SQL baru, `scripts/validate_instruments.py` tidak terpengaruh
+(699 simbol, tidak berubah). 25 test baru ditambahkan lintas
+`tests/unit/test_schedule_guard.py`,
+`tests/integration/test_job_registry_integrity.py`,
+`tests/unit/test_yfinance_adapter.py`, `tests/unit/test_inc_fetch.py`,
+dan `tests/unit/test_market_ingester.py`.
+
+PATCH bump: perbaikan bug pada config/ingester yang sudah ada, tidak ada
+kapabilitas baru yang diekspos ke downstream, tidak ada perubahan
+Interface Contract atau schema. Total: **4 file source dimodifikasi**
+(`src/scheduler/job_registry.py`, `src/bronze/yfinance_adapter.py`,
+`src/bronze/inc_fetch.py`, `src/bronze/market_ingester.py`) | **6 file
+test dimodifikasi/ditambahkan** | **1558 passed / 0 failed / 0 error**
+(naik dari 1533, +25 test baru, 0 regresi).
+
 ## v1.17.3 — Perbaikan Preflight AlphaVantage: CNH-aware + Tier 2 Bug Fix (Agustus 2026)
 
 Diarahkan oleh instruksi Ovi (30 Agustus 2026): "We need to fix

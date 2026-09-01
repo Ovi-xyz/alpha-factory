@@ -2031,7 +2031,241 @@ occasional one.
 
 ---
 
-*Last updated: v1.17.3 — Preflight fix (Ovi, 30 Aug 2026):
+
+## RISK-23 (NEW): `bronze_macro_weekly`/`bronze_bis_rates` had no schedule guard — `bronze_treasury` silently no-op'd on every `--job bronze` run, any day of the week — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED (31 Aug 2026).** Reported by Ovi as an operational
+finding from live-test 2026-08-31 ("bronze_treasury returns macro
+idempotent skip"); root cause traced this session via direct read of
+`job_registry.py` and `runner.py`.
+
+**GD Reference:** GD §14.3.2 (PIPELINE_SEQUENCE/WEEKLY_SEQUENCE), GD §3.3.1
+(Treasury daily cadence, independent of the weekly macro batch),
+Supplementary Design v1.1 §6 (`_passes_schedule` framework), FIX BI-1
+(same-day macro idempotency check this bug interacts with).
+
+### What the risk was
+
+`bronze_macro_weekly` and `bronze_bis_rates` had **no `run_on_weekdays`
+constraint at all** in `JOB_REGISTRY` — both entries carried only a
+comment ("called explicitly on weekly SOP") documenting an assumption
+that a human operator would type the job name by hand, only on Sundays.
+GMI-JR-003's `--job bronze` layer-scoped runner (`layer_sequence()`,
+derived from `WEEKLY_SEQUENCE`) silently broke that assumption: it
+includes every bronze-layer job regardless of weekday, and
+`WEEKLY_SEQUENCE` lists `bronze_macro_weekly` **before**
+`bronze_treasury`. `bronze_macro_weekly`'s `FREDIngester().run(run_date)`
+call fetches the full ~60-series registry with no filter — which already
+includes all 13 `TREASURY_FRED_SERIES` tenors (DGS*, T10Y2Y, T10Y3M,
+MORTGAGE30US — the same FRED IDs `treasury_ingester.py` targets). Those
+get written first. Moments later, `bronze_treasury`'s own
+`FREDIngester().run(run_date, series_filter=TREASURY_FRED_SERIES)` finds
+every one of its 13 target series already written this same day and hits
+FIX BI-1's idempotency check — **100% of its series**, every single
+`--job bronze` invocation, regardless of day of week. `bronze_treasury`'s
+entire documented purpose (daily yield-curve freshness on the 6
+non-Sunday days) was defeated whenever it ran via the layer-scoped
+command.
+
+### Why this was invisible
+
+`--job bronze`'s success/failure signal is per-job sentinel completion —
+`bronze_treasury` genuinely wrote its own sentinel and reported SUCCESS
+every time, because FIX BI-1's idempotency skip is a deliberate, correct
+design (preventing duplicate rows on same-day re-runs) doing exactly what
+it was built to do. Nothing raised, nothing failed — the log line
+"[Bronze] Macro idempotent skip" looks identical whether it's correctly
+preventing a genuine duplicate or masking that the "real" write already
+happened somewhere else entirely. Same failure shape as RISK-19/20/21:
+several independently-reasonable pieces (BI-1's idempotency check,
+`bronze_macro_weekly`'s full-sweep design, `layer_sequence()`'s ordering)
+compounding into a silent no-op, with no single line of code that looks
+wrong in isolation.
+
+### Fix
+
+`run_on_weekdays: [6]` (Sunday) added to both `bronze_macro_weekly` and
+`bronze_bis_rates`, matching `bronze_eia`'s existing `[2]` (Wednesday)
+precedent exactly. Consequential fix required in the same pass:
+`silver_macro` (depends on `bronze_macro_weekly`) and
+`silver_global_rates` (depends on `bronze_bis_rates`) each gained a
+`stale_tolerance: {..., 7}` entry — without it, `--job silver` on any
+non-Sunday day would newly `sys.exit(1)` on a dependency that, before
+this fix, always had a same-day sentinel by construction. This mirrors
+the exact `stale_tolerance` pattern FIX NEW-1 already established one hop
+downstream (`silver_validate`/`gold_regime` depending on the weekly
+`silver_macro` itself) — that precedent had never been extended one hop
+further up, because `bronze_macro_weekly` previously had no schedule
+guard to make the gap visible.
+
+### Verification
+
+`tests/integration/test_job_registry_integrity.py::TestWeeklyMacroScheduleGuard`
+(6 new tests) locks in both `run_on_weekdays` values and both
+`stale_tolerance` entries directly against the live registry, plus
+`_passes_schedule()` behavior on Sunday vs. a non-Sunday day.
+`tests/unit/test_schedule_guard.py` gained a matching
+`test_weekly_macro_sunday_only` unit test. Two pre-existing integration
+tests (`test_bronze_layer_completes_standalone`,
+`test_bronze_then_silver_then_gold_completes_full_chain`,
+`tests/integration/test_runner_weekly_cadence.py`) had encoded the old
+(buggy) assumption that `bronze_macro_weekly`/`bronze_bis_rates` complete
+on any day — updated to seed a preceding-Sunday sentinel first (mirroring
+the exact production SOP and the existing `TestJobAllAcrossWeek`
+precedent in the same file) rather than expecting same-day completion.
+1533 → 1558 passed (combined with RISK-24/25 below), 0 regressions.
+
+---
+
+## RISK-24 (NEW): yfinance 1D fetch could return a trailing not-yet-traded placeholder row with null OHLC — SchemaValidator quarantined the ENTIRE batch, valid history included — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED (31 Aug 2026).** Reported by Ovi from live-test
+2026-08-31 log evidence (`2026-08-31-AAPL-1D.txt`): "Column 'open': not
+nullable but has 1 nulls" (also high/low/close), quarantining AAPL and
+"many tickers... us_stocks and context."
+
+**GD Reference:** GD §3.7 (Bronze Schema Registry — mismatch → quarantine,
+not silent-fail), GD §13.1 (Silver null-check/forward-fill design).
+
+### What the risk was
+
+`market_ingester.py` passes `end=run_date` straight through to
+`Ticker.history()`. When the fetch executes before `run_date`'s session
+has actually occurred in absolute (UTC) terms — e.g. an early-WIB-morning
+Bronze run, where `run_date`'s local calendar day has started but its
+NYSE session, hours later in UTC, has not — yfinance can return a
+trailing placeholder row for that not-yet-traded day with null
+open/high/low/close, appended after otherwise-valid history.
+`config/schemas/yfinance_ohlcv.yaml` marks OHLC not-nullable;
+`SchemaValidator` quarantined the **entire** DataFrame over this one
+artifact row, discarding legitimate historical data too — not a
+symbol-specific issue, but structural to any 1D yfinance fetch run in
+that timing window.
+
+### Why this was invisible
+
+The quarantine mechanism worked exactly as designed (GD §3.7: mismatch →
+quarantine, not silent corruption) — the failure mode wasn't a silent
+drop, it was visible and loud (ERROR-level logs, a quarantine file
+written). What made it costly rather than merely noisy is the
+all-or-nothing granularity: one artifact row indistinguishable in the
+schema check from a genuine data-corruption event discarded an entire
+day's worth of otherwise-valid history for every affected symbol, forcing
+a full re-fetch on the next run rather than a one-row correction.
+
+### Fix
+
+`_drop_trailing_null_ohlc()` added to `yfinance_adapter.py`, called from
+`_normalize_df()` before the DataFrame ever reaches `SchemaValidator`.
+Only **trailing** rows where open/high/low/close are **all** null are
+stripped — a null row in the middle of the series, or a row with only
+some OHLC fields null, is a genuine data-quality issue and still reaches
+validation unmodified. `IncFetchProtocol`'s existing 7-day lookback
+overlap means no real data is lost by not chasing same-day bars — the
+next run's overlap window picks up the completed bar cleanly once it
+exists.
+
+### Verification
+
+`tests/unit/test_yfinance_adapter.py::TestDropTrailingNullOhlc` (9 new
+tests): single and multiple trailing null rows dropped; a mid-series null
+row and a partial-null row (not all of OHLC) both left untouched; an
+all-null DataFrame drops to empty; end-to-end `_normalize_df()` coverage
+for both the partial-placeholder and all-placeholder cases (the latter
+must return `None`, matching the existing empty-DataFrame contract).
+1533 → 1558 passed (combined with RISK-23/25), 0 regressions.
+
+---
+
+## RISK-25 (NEW): `FALLBACK_YEARS["1H"]=2` sat exactly on yfinance's real 730-day intraday ceiling — cold-start 1H fetch failed for 28/29 IDX symbols — RESOLVED (fixed); contradicts a "verified, not assumed" claim from ADR-046 Path C
+
+**Status:** ✅ **FIXED (31 Aug 2026).** Reported by Ovi from live-test
+2026-08-31 log evidence (`2026-08-31-idx-1H.txt`): every IDX symbol after
+the first failed with Yahoo's own error, *"1h data not available...
+must be within the last 730 days."*
+
+**GD Reference:** Supplementary Design v1.1 §2.2 (FALLBACK_YEARS per
+timeframe), `GMI_Decision_Document_v11.docx` ADR-046 Path C (1H wiring
+this bug was latent inside from the start).
+
+### What the risk was
+
+`FALLBACK_YEARS["1H"] = 2` → `IncFetchProtocol.resolve_start_date()`
+computes `run_date - timedelta(days=int(365 * 2))` = exactly 730 days —
+landing precisely on yfinance's real, strict "must be within the last 730
+days" ceiling for 1H intraday history. Live-test evidence: 28 of 29
+symbols failed cold-start with exactly this error; only the very first
+request processed (AADI) succeeded, almost certainly on sub-second
+request-timing luck (which side of the exact 730.0-day cutoff its
+request landed on at the instant it fired), not because the value is
+actually safe. Separately, `int(365 * fallback_years)` is leap-year-
+sensitive across different `run_date`s — the same "2 years" formula can
+compute to 730 or 731 days depending on which `run_date` is used and
+whether a Feb 29 falls inside the window, meaning the boundary distance
+wasn't even reliably 730 to begin with.
+
+This directly contradicts `pyproject.toml`'s own v1.17.1 changelog entry
+for ADR-046 Path C, which states `FALLBACK_YEARS['1H']=2` was *"verified,
+not assumed"* correct during that implementation. Whatever verification
+was performed there did not exercise this boundary against yfinance's
+real, live rejection behavior.
+
+### Why this was invisible
+
+The "verified, not assumed" claim was evidently based on a check that
+didn't reproduce the exact request-timing/boundary conditions a live,
+multi-symbol cold-start run exercises — a single spot-check (or a mocked
+test) can pass at this exact boundary in a way a real batch run,
+symbol-by-symbol, does not, because the razor-thin sub-second timing
+margin that let the first symbol through isn't something a single manual
+verification would reliably reproduce either way.
+
+### Fix
+
+New `FALLBACK_DAYS: dict[str, int]` module-level constant in
+`inc_fetch.py`, `{"1H": 720}` — an explicit, run_date-independent day
+count (10-day margin under the confirmed 730-day wall), not a
+years-derived float. `resolve_start_date()` gained an optional
+`fallback_days` parameter that takes precedence over `fallback_years`
+entirely when provided, sidestepping both the exact-730-day collision and
+the leap-year drift inherent to `int(365 * fallback_years)`.
+`FALLBACK_YEARS["1H"] = 2` left in place as a human-readable label only —
+no longer consulted for actual 1H fetch resolution once `FALLBACK_DAYS`
+is wired at the call site. Both `market_ingester.py` call sites
+(`_run_symbol`, `_run_context_symbol`) updated to pass
+`fallback_days=FALLBACK_DAYS.get(tf)`.
+
+### Verification
+
+`tests/unit/test_inc_fetch.py::TestFallbackDaysOverride` (6 new tests):
+`FALLBACK_DAYS["1H"] == 720`; precedence over `fallback_years` when both
+given; existing years-based behavior unchanged when `fallback_days` is
+omitted; run_date-independence (unlike the leap-year-sensitive years
+formula); the existing-data lookback path is unaffected.
+`tests/unit/test_market_ingester.py::TestRunSymbolFallbackDaysWiring` (3
+new tests) confirms both call sites actually forward `fallback_days=720`
+for `tf="1H"` and `None` for every other timeframe — the fix in
+`inc_fetch.py` only takes effect because the call site wires it through.
+1533 → 1558 passed (combined with RISK-23/24 above), 0 regressions.
+
+---
+
+*Last updated: v1.17.4 — Live-test triage (Ovi, 31 Aug 2026): three
+independent bugs from live-test 2026-08-31 fixed in one pass — RISK-23
+(`bronze_macro_weekly`/`bronze_bis_rates` gained a Sunday-only
+`run_on_weekdays` schedule guard, closing a gap where `--job bronze`
+silently no-op'd `bronze_treasury` every run via FIX BI-1's same-day
+idempotency check; `silver_macro`/`silver_global_rates` gained matching
+`stale_tolerance` entries as a consequential fix), RISK-24
+(`_drop_trailing_null_ohlc()` strips a yfinance not-yet-traded
+placeholder row before `SchemaValidator`, instead of the whole batch
+being quarantined over one artifact row), and RISK-25
+(`FALLBACK_DAYS["1H"]=720` replaces the exact-730-day
+`FALLBACK_YEARS["1H"]=2` boundary that failed 28/29 IDX symbols
+cold-start — see RISK-25 for the contradiction with ADR-046 Path C's
+"verified, not assumed" claim). See RISK-23/24/25 above for full
+detail. 1533 → 1558 passed, 0 regressions. August 2026.
+Prior entry: v1.17.3 — Preflight fix (Ovi, 30 Aug 2026):
 `scripts/preflight/check_alphavantage_fx.py` gained a CNH-aware Tier 1
 static check (`_parse_pair('USD_CNH') == ('USD', 'CNH')`, ADR-048) and a
 new opt-in Tier 3 (`--check-cnh`) reproducing the USD/CNH Source

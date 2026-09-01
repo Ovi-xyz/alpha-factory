@@ -47,6 +47,47 @@ _INTERVAL_MAP: dict[str, str] = {
 }
 
 
+def _drop_trailing_null_ohlc(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    FIX (chat thread, 31 Aug 2026 live-test finding): drop trailing rows
+    where open/high/low/close are ALL null.
+
+    market_ingester.py passes end=run_date to Ticker.history(). When the
+    fetch executes before the session for run_date has actually occurred
+    (e.g. an early-WIB-morning Bronze run, where run_date's local calendar
+    day has started but its NYSE/IDX session — hours later in UTC — has
+    not), yfinance can return a trailing placeholder row for that
+    not-yet-traded day with null OHLC, appended after otherwise-valid
+    history. config/schemas/yfinance_ohlcv.yaml marks OHLC not-nullable,
+    so SchemaValidator would quarantine the ENTIRE DataFrame over this one
+    artifact row — discarding legitimate history too, for effectively
+    every 1D yfinance fetch run in that window (confirmed: AAPL and many
+    other us_stocks/context symbols, live test 2026-08-31).
+
+    Only TRAILING rows are dropped, and only while every OHLC column in
+    that row is null — a null row in the middle of the series is a
+    genuine data-quality issue and must still fail validation, not be
+    silently stripped.
+    """
+    ohlc_cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
+    if not ohlc_cols or df.is_empty():
+        return df
+
+    null_mask = None
+    for c in ohlc_cols:
+        m = df[c].is_null()
+        null_mask = m if null_mask is None else (null_mask & m)
+    mask_list = null_mask.to_list()
+
+    end = len(mask_list)
+    for i in range(end - 1, -1, -1):
+        if mask_list[i]:
+            end = i
+        else:
+            break
+    return df.slice(0, end) if end < len(mask_list) else df
+
+
 def _normalize_df(df) -> Optional[pl.DataFrame]:
     """Normalize pandas DataFrame from yfinance to standard Bronze schema."""
     if df is None or df.empty:
@@ -58,7 +99,11 @@ def _normalize_df(df) -> Optional[pl.DataFrame]:
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
     keep = ["timestamp", "open", "high", "low", "close", "volume"]
     keep = [c for c in keep if c in df.columns]
-    return pl.from_pandas(df[keep])
+    result = pl.from_pandas(df[keep])
+    # FIX (chat thread, 31 Aug 2026): strip trailing not-yet-traded
+    # placeholder row before it ever reaches SchemaValidator.
+    result = _drop_trailing_null_ohlc(result)
+    return result if len(result) > 0 else None
 
 
 class YFinanceAdapter(SourceAdapter):

@@ -43,7 +43,7 @@ import polars as pl
 from loguru import logger
 
 from src.bronze.base_ingester import BronzeIngester
-from src.bronze.inc_fetch import FALLBACK_YEARS, IncFetchProtocol
+from src.bronze.inc_fetch import FALLBACK_DAYS, FALLBACK_YEARS, IncFetchProtocol
 from src.bronze.schema_validator import SchemaValidator
 from src.config.instrument_loader import Instrument, get_loader
 from src.utils.progress_checkpoint import ProgressCheckpoint
@@ -203,6 +203,11 @@ class MarketOHLCVIngester(BronzeIngester):
             source=primary_src,  # FIX B-F01: primary_src bukan source
             run_date=run_date,
             fallback_years=FALLBACK_YEARS.get(tf, 10),
+            # FIX (chat thread, 31 Aug 2026): explicit day-count override
+            # for TFs with a precise provider ceiling (currently 1H=720) —
+            # takes precedence over fallback_years when present, None for
+            # every other TF (no behavior change there).
+            fallback_days=FALLBACK_DAYS.get(tf),
         )
 
         df = self._fetch(api_symbol, inst, fetch_tf, start_date, run_date)
@@ -485,6 +490,12 @@ class MarketOHLCVIngester(BronzeIngester):
             source=primary_src,
             run_date=run_date,
             fallback_years=FALLBACK_YEARS.get(tf, 10),
+            # FIX (chat thread, 31 Aug 2026): see _run_symbol()'s identical
+            # comment above — Layer 2 context doesn't currently fetch 1H
+            # (DEFAULT_TIMEFRAMES only), so FALLBACK_DAYS.get(tf) is None
+            # here today, but wiring it keeps both call sites consistent
+            # against future drift if 1H context is ever enabled.
+            fallback_days=FALLBACK_DAYS.get(tf),
         )
 
         df = self._fetch(api_symbol, inst, fetch_tf, start_date, run_date)

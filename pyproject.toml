@@ -1,6 +1,80 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.17.3"
+version = "1.17.4"
+# FIX (chat thread, 31 Aug 2026): three independent bugs from live-test
+# 2026-08-31 fixed in one pass, all reported by Ovi from live-test log
+# evidence (2026-08-31-AAPL-1D.txt, 2026-08-31-idx-1H.txt) plus an
+# operational report for the third.
+#
+# (1) RISK-23 -- bronze_macro_weekly/bronze_bis_rates had no schedule
+# guard ("called explicitly on weekly SOP", SOP discipline only), an
+# assumption GMI-JR-003's `--job bronze` layer-scoped runner silently
+# broke: layer_sequence("bronze") derives from WEEKLY_SEQUENCE, which
+# lists bronze_macro_weekly ahead of bronze_treasury, so `--job bronze`
+# ran bronze_macro_weekly's full ~60-series FRED sweep -- including all
+# 13 TREASURY_FRED_SERIES tenors -- moments before bronze_treasury's own
+# dedicated fetch of those same 13 series, which then hit FIX BI-1's
+# same-day idempotency check and skipped every one, every single
+# `--job bronze` run regardless of weekday ("[Bronze] Macro idempotent
+# skip", Ovi's reported symptom). Fixed with run_on_weekdays: [6]
+# (Sunday) on both jobs, matching bronze_eia's existing [2] (Wednesday)
+# precedent. Consequential fix in the same pass: silver_macro and
+# silver_global_rates each gained a stale_tolerance entry for their
+# respective weekly dependency -- without it, `--job silver` on any
+# non-Sunday day would newly sys.exit(1) on a dependency that, before
+# this fix, always had a same-day sentinel by construction. Mirrors the
+# exact stale_tolerance pattern FIX NEW-1 already established one hop
+# downstream.
+#
+# (2) RISK-24 -- market_ingester.py passes end=run_date to
+# Ticker.history(). When the fetch executes before run_date's session
+# has actually occurred (e.g. an early-WIB-morning Bronze run), yfinance
+# can return a trailing placeholder row for that not-yet-traded day with
+# null OHLC -- config/schemas/yfinance_ohlcv.yaml's not-nullable gate
+# then quarantined the ENTIRE DataFrame over that one artifact row,
+# discarding legitimate history too, for effectively every 1D yfinance
+# fetch run in that window (confirmed: AAPL and many other
+# us_stocks/context symbols). Fixed with
+# yfinance_adapter._drop_trailing_null_ohlc(), called from
+# _normalize_df() before SchemaValidator ever sees the DataFrame. Only
+# TRAILING rows where open/high/low/close are ALL null are stripped -- a
+# mid-series null row or a partial-null row is a genuine data-quality
+# issue and still reaches validation unmodified.
+#
+# (3) RISK-25 -- FALLBACK_YEARS["1H"]=2 computed to exactly 730 days,
+# landing precisely on yfinance's real "must be within the last 730
+# days" ceiling for 1H intraday history. Live-test evidence: 28/29 IDX
+# symbols failed cold-start with exactly that Yahoo error; only the
+# first request (AADI) squeaked through on sub-second request timing,
+# not because the value is safe. This directly contradicts this file's
+# own v1.17.1 entry, which claimed this exact constant was "verified,
+# not assumed" correct during ADR-046 Path C's implementation --
+# whatever verification was performed there did not exercise this
+# boundary against yfinance's real, live rejection behavior. Fixed with
+# a new FALLBACK_DAYS: dict[str, int] = {"1H": 720} in inc_fetch.py -- an
+# explicit, run_date-independent day count (10-day margin under the
+# confirmed 730-day wall), not a years-derived float subject to
+# int(365 * years)'s leap-year drift across different run_dates.
+# resolve_start_date() gained an optional fallback_days parameter that
+# takes precedence over fallback_years entirely when provided; both
+# market_ingester.py call sites updated to pass
+# fallback_days=FALLBACK_DAYS.get(tf).
+#
+# Verified: ast.parse clean across all modified files, no f-string SQL
+# introduced, scripts/validate_instruments.py unaffected (699 symbols,
+# unchanged). 25 new tests added across
+# tests/unit/test_schedule_guard.py,
+# tests/integration/test_job_registry_integrity.py,
+# tests/unit/test_yfinance_adapter.py, tests/unit/test_inc_fetch.py, and
+# tests/unit/test_market_ingester.py; 2 pre-existing integration tests
+# (tests/integration/test_runner_weekly_cadence.py) updated to seed a
+# preceding-Sunday sentinel rather than encode the old
+# every-day-completes assumption. 1533 -> 1558 passed, 0 failed, 0
+# regressions. KNOWN_RISKS.md RISK-23/24/25 added (all RESOLVED). PATCH
+# bump: bug fixes to existing broken config/ingester behavior, no new
+# capability exposed downstream, no Interface Contract or schema change.
+# August 2026.
+#
 # FIX (Ovi, 30 Aug 2026): scripts/preflight/check_alphavantage_fx.py --
 # CNH-aware, and fixes a genuine bug in the preflight script itself. Two
 # changes, both scoped to scripts/preflight/ (outside src/ -- no unit
