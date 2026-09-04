@@ -26,7 +26,6 @@ us_stocks:
   - symbol: AMBA
   - symbol: AMD
   - symbol: ANET
-  - symbol: ANSS
   - symbol: ARM
   - symbol: AVGO
   - symbol: CDNS
@@ -49,7 +48,6 @@ us_stocks:
   - symbol: ICHR
   - symbol: INTC
   - symbol: INTU
-  - symbol: JNPR
   - symbol: KEYS
   - symbol: KLAC
   - symbol: LRCX
@@ -101,7 +99,6 @@ us_stocks:
   - symbol: EXPE
   - symbol: F
   - symbol: GM
-  - symbol: HBI
   - symbol: HD
   - symbol: HLT
   - symbol: HMC
@@ -137,7 +134,6 @@ us_stocks:
   Health Care:
   - symbol: A
   - symbol: ABBV
-  - symbol: ABC
   - symbol: ABT
   - symbol: ACAD
   - symbol: AMGN
@@ -156,10 +152,8 @@ us_stocks:
   - symbol: DHR
   - symbol: DOCS
   - symbol: EW
-  - symbol: EXAS
   - symbol: GILD
   - symbol: HALO
-  - symbol: HOLX
   - symbol: HUM
   - symbol: IDXX
   - symbol: INCY
@@ -199,10 +193,8 @@ us_stocks:
   - symbol: CBOE
   - symbol: CFG
   - symbol: CINF
-  - symbol: CMA
   - symbol: CME
   - symbol: COF
-  - symbol: DFS
   - symbol: FDS
   - symbol: FITB
   - symbol: GL
@@ -224,12 +216,10 @@ us_stocks:
   - symbol: PNC
   - symbol: PRU
   - symbol: PYPL
-  - symbol: RE
   - symbol: RF
   - symbol: RNR
   - symbol: SCHW
   - symbol: SPGI
-  - symbol: SQ
   - symbol: SYF
   - symbol: TFC
   - symbol: TRV
@@ -245,10 +235,8 @@ us_stocks:
   - symbol: CMCSA
   - symbol: DASH
   - symbol: DIS
-  - symbol: EA
   - symbol: FOX
   - symbol: FOXA
-  - symbol: IAC
   - symbol: LUMN
   - symbol: LYFT
   - symbol: LYV
@@ -314,8 +302,6 @@ us_stocks:
   - symbol: RSG
   - symbol: RTX
   - symbol: SAIA
-  - symbol: SAVE
-  - symbol: SPR
   - symbol: TDG
   - symbol: UAL
   - symbol: UNP
@@ -334,7 +320,6 @@ us_stocks:
   - symbol: CLNE
   - symbol: CNX
   - symbol: COP
-  - symbol: CTRA
   - symbol: CVX
   - symbol: DINO
   - symbol: DKL
@@ -346,11 +331,8 @@ us_stocks:
   - symbol: FANG
   - symbol: FCEL
   - symbol: HAL
-  - symbol: HES
   - symbol: KMI
-  - symbol: MMP
   - symbol: MPC
-  - symbol: MRO
   - symbol: MTDR
   - symbol: NOV
   - symbol: OVV
@@ -360,7 +342,6 @@ us_stocks:
   - symbol: PLUG
   - symbol: PR
   - symbol: PSX
-  - symbol: PXD
   - symbol: RRC
   - symbol: SLB
   - symbol: SM
@@ -388,7 +369,6 @@ us_stocks:
   - symbol: GO
   - symbol: HRL
   - symbol: HSY
-  - symbol: K
   - symbol: KHC
   - symbol: KMB
   - symbol: KO
@@ -402,17 +382,14 @@ us_stocks:
   - symbol: PM
   - symbol: SAM
   - symbol: SJM
-  - symbol: SPTN
   - symbol: STZ
   - symbol: SYY
   - symbol: TAP
   - symbol: TSN
-  - symbol: USM
   - symbol: WMT
   Real Estate:
   - symbol: AMH
   - symbol: AMT
-  - symbol: AVB
   - symbol: CBL
   - symbol: CCI
   - symbol: COLD
@@ -421,7 +398,6 @@ us_stocks:
   - symbol: DOC
   - symbol: EGP
   - symbol: EQIX
-  - symbol: EQR
   - symbol: EXR
   - symbol: FR
   - symbol: FRT
@@ -432,7 +408,6 @@ us_stocks:
   - symbol: MAC
   - symbol: NNN
   - symbol: O
-  - symbol: PEAK
   - symbol: PLD
   - symbol: PSA
   - symbol: REG
@@ -462,13 +437,11 @@ us_stocks:
   - symbol: LNT
   - symbol: MSEX
   - symbol: NEE
-  - symbol: NEW
   - symbol: NI
   - symbol: NWE
   - symbol: OGE
   - symbol: PCG
   - symbol: POR
-  - symbol: SJW
   - symbol: SO
   - symbol: SRE
   - symbol: SWX
@@ -505,28 +478,22 @@ us_stocks:
   - symbol: PKG
   - symbol: PPG
   - symbol: RPM
-  - symbol: SEE
   - symbol: SHW
   - symbol: SLGN
   - symbol: SMG
   - symbol: STLD
   - symbol: TS
   - symbol: VMC
-  - symbol: WRK
-  - symbol: X
   High Growth & Popular:
   - symbol: ABCL
   - symbol: ACMR
   - symbol: ACVA
   - symbol: AFRM
   - symbol: AGIO
-  - symbol: ALLK
   - symbol: ALNY
-  - symbol: ALTR
   - symbol: AMPH
   - symbol: APPN
   - symbol: ARWR
-  - symbol: ASTR
   - symbol: BAH
   - symbol: BAND
   - symbol: BEAM
@@ -534,11 +501,9 @@ us_stocks:
   - symbol: BJ
   - symbol: BLNK
   - symbol: CACI
-  - symbol: CFLT
   - symbol: CHPT
   - symbol: CLSK
   - symbol: COIN
-  - symbol: COOP
   - symbol: CRSP
   - symbol: DG
   - symbol: DLTR
@@ -549,7 +514,6 @@ us_stocks:
   - symbol: EVGO
   - symbol: FATE
   - symbol: FIVE
-  - symbol: FOLD
   - symbol: FROG
   - symbol: FSLY
   - symbol: GCMG
@@ -557,7 +521,6 @@ us_stocks:
   - symbol: HOOD
   - symbol: HUBS
   - symbol: HUT
-  - symbol: HYZN
   - symbol: IBRX
   - symbol: IMVT
   - symbol: INDI
@@ -577,7 +540,6 @@ us_stocks:
   - symbol: MSGM
   - symbol: MSTR
   - symbol: NCNO
-  - symbol: NKLA
   - symbol: NTLA
   - symbol: NVAX
   - symbol: OCGN
@@ -592,31 +554,24 @@ us_stocks:
   - symbol: PTGX
   - symbol: RARE
   - symbol: RCKT
-  - symbol: RDFN
   - symbol: RDW
-  - symbol: RIDE
   - symbol: RIOT
   - symbol: RKLB
   - symbol: RVMD
   - symbol: RXRX
   - symbol: SAIC
-  - symbol: SAVA
   - symbol: SDGR
   - symbol: SOFI
   - symbol: SPCE
   - symbol: SRPT
-  - symbol: SUMO
   - symbol: SUPN
   - symbol: TNGX
   - symbol: TWLO
   - symbol: UPST
-  - symbol: VERV
-  - symbol: VLDR
   - symbol: VXRT
   - symbol: WKHS
   - symbol: XNCR
   - symbol: Z
-  - symbol: ZI
 idx_stocks:
   IDX30:
   - symbol: AADI

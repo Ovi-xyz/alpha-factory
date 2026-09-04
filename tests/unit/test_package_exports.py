@@ -46,10 +46,14 @@ class TestPackageExports:
     def test_get_loader_returns_639(self):
         """FIX GMI-IL-001: was test_get_loader_returns_643 — ADR-003 reclassification.
         UPD ADR-036 (GMI_Decision_Document_v8.docx, 10 Aug 2026): USD_IDR
-        reclassified forex -> context.dollar_basket — 640 -> 639."""
+        reclassified forex -> context.dollar_basket — 640 -> 639.
+        FIX GMI-VAL-004 (chat thread, 3 Sep 2026, RISK-28): 639 -> 603
+        (-36 dead Layer 1 tickers). See KNOWN_RISKS.md RISK-28.
+        FIX GMI-VAL-005 (chat thread, 3 Sep 2026, RISK-28 follow-up):
+        603 -> 594 (-9 more). See KNOWN_RISKS.md RISK-28."""
         from src import get_loader
         loader = get_loader()
-        assert loader.count() == 639
+        assert loader.count() == 594
 
     def test_get_config_returns_config(self):
         from src import get_config, PipelineConfig

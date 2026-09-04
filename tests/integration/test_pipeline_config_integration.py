@@ -67,4 +67,10 @@ class TestPipelineConfigIntegration:
         # to Layer 2 context (Layer 1 count() scope is unchanged in meaning).
         # UPD ADR-036 (GMI_Decision_Document_v8.docx, 10 Aug 2026): USD_IDR
         # reclassified forex -> context.dollar_basket — 640 -> 639.
-        assert loader.count() == 639
+        # FIX GMI-VAL-004 (chat thread, 3 Sep 2026, RISK-28): 639 -> 603.
+        # 36 dead Layer 1 tickers removed — see KNOWN_RISKS.md RISK-28.
+        # FIX GMI-VAL-005 (chat thread, 3 Sep 2026, RISK-28 follow-up):
+        # 603 -> 594. 9 more removed — 6 confirmed active (stopgap over
+        # an undiagnosed fetch-pipeline bug), 3 unresolved. See
+        # KNOWN_RISKS.md RISK-28.
+        assert loader.count() == 594

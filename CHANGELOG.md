@@ -1,5 +1,219 @@
 # CHANGELOG — Data Platform
 
+## v1.17.7 — RISK-28 Fully Closed: 9 Simbol Sisa Dihapus atas Instruksi Eksplisit Ovi (September 2026)
+
+Instruksi Ovi langsung, melanjutkan v1.17.6: "Resolve the untouched
+tickers with removal approach." Menghapus dua bucket yang sengaja
+ditinggalkan v1.17.6 (GMI-VAL-004) menunggu investigasi/bukti lebih
+lanjut.
+
+**Bucket 1 — 6 simbol confirmed ACTIVE (ANSS, JNPR, HES, HYZN, RDFN,
+SAVA).** Penghapusan ini adalah **STOPGAP eksplisit** atas bug
+fetch-pipeline yang TIDAK PERNAH terdiagnosis (kenapa ticker yang
+genuinely active dan konfigurasinya benar tetap gagal fetch?) — BUKAN
+klasifikasi delisting. Didokumentasikan tegas seperti ini di
+KNOWN_RISKS.md RISK-28 supaya pembacaan di masa depan "kenapa ANSS tidak
+ada di universe" tidak salah menyimpulkan bahwa perusahaan ini delisted.
+
+**Bucket 2 — 3 simbol UNRESOLVED (SJW, NEW, PEAK).** Ditinggalkan v1.17.6
+karena bukti tidak cukup ke arah manapun setelah AlphaVantage LISTING_STATUS
+maupun web search; dihapus sekarang atas keputusan eksplisit Ovi, karena
+tidak ada bukti yang mendukung mempertahankan ketiganya juga.
+
+**Prosedur sama persis dengan GMI-VAL-004** (v1.17.6): 9 baris `- symbol:
+XXX` dihapus dari KEDUA `config/instruments_identity.yaml` dan
+`config/instruments_taxonomy.yaml` secara lockstep (positional join
+contract, `src/config/yaml_split_merge.py`), urutan per-sektor
+diverifikasi ulang identik SEBELUM DAN SESUDAH penghapusan, lalu
+di-load-test lewat `InstrumentLoader`/`merge_split_trees()` yang
+sesungguhnya (`count()==594`, `by_market("us_stocks")==543`, tidak ada
+simbol yang dihapus masih bisa di-resolve). `scripts/validate_instruments.py`
+`EXPECTED_TOTAL`: 663 → 654 (GMI-VAL-005). 6 assertion test yang sama
+dengan pass sebelumnya (603/552/661 → 594/543/652) diperbarui lagi di
+`test_full_system.py`, `test_pipeline_config_integration.py`,
+`test_instrument_loader.py` (×3), `test_package_exports.py`.
+
+**Sengaja TIDAK dilakukan:** menambahkan instrumen pengganti apapun —
+tetap keputusan terpisah milik Ovi, tidak berubah dari catatan v1.17.6.
+
+Verifikasi: `ast.parse` bersih, full suite 1567 passed (tidak ada test
+baru — 6 assertion count diupdate lagi), `python
+scripts/validate_instruments.py` → "VALIDATION PASSED — 654 symbols
+(Layer 1=594, Layer 2=60), no errors." PATCH bump. Total: **2 file
+config dimodifikasi** (9 baris dihapus masing-masing) | **1 file script
+dimodifikasi** | **5 file test dimodifikasi** (6 assertion diupdate) |
+**1567 passed / 0 failed / 0 error**.
+
+## v1.17.6 — RISK-28 Closed: Ticker Liveness Preflight + Universe Cleanup 36 Simbol (September 2026)
+
+Melanjutkan RISK-28 dari v1.17.5 (`coverage_check` 92.8%, keputusan
+pending Ovi). Instruksi Ovi dua bagian: "First, build an automated
+ticker-liveness preflight. Second, use that automated ticker-liveness
+preflight to verify the 41 to unblock the gate."
+
+**1. NEW `scripts/preflight/check_ticker_liveness.py`.** Mengikuti
+konvensi preflight yang sudah ada persis (`check_yfinance_tickers.py`,
+`check_alphavantage_fx.py`, `check_bis_cbpol_d.py`): live di luar `src/`,
+tidak ada requirement unit-test coverage, docstring mengutip sesi asal.
+Dua tier: **Tier 1** (default) — fetch yfinance 5 hari terakhir per
+simbol Layer 1, sama persis dengan pola `_check_one()` di
+`check_yfinance_tickers.py` tapi di-scope ke Layer 1 (bukan Layer 2
+context). **Tier 2** (`--cross-check-delisting`, opt-in, 2 dari 25 quota
+harian AlphaVantage) — cross-reference setiap Tier-1 FAIL ke
+AlphaVantage LISTING_STATUS (raw HTTP call, pola yang sama dengan
+`check_bis_cbpol_d.py` untuk endpoint baru tanpa adapter class),
+mengklasifikasikan tiap simbol sebagai DELISTED / LIKELY_TRANSIENT /
+UNRESOLVED. Script ini TIDAK PERNAH menulis ke file config apapun — hanya
+mencetak laporan; perubahan `instruments_identity.yaml`/
+`instruments_taxonomy.yaml` tetap keputusan manusia mengingat positional
+join contract (`src/config/yaml_split_merge.py`). Tidak bisa dieksekusi
+live di sandbox chat ini (tidak ada rute jaringan ke finance.yahoo.com
+atau www.alphavantage.co) — hanya di-syntax-validate, sama seperti setiap
+script preflight lain di direktori ini menunggu eksekusi di hardware
+dengan akses jaringan penuh.
+
+**2. Verifikasi 45 simbol yang hilang dari `coverage_check`.** Karena
+Tier 1 tidak bisa dieksekusi live di sesi ini, klasifikasi yang setara
+dijalankan langsung via panggilan tool AlphaVantage LISTING_STATUS
+(bukan lewat jalur HTTP yang diblokir sandbox) plus web search bertarget
+untuk nama yang tidak terselesaikan bersih oleh LISTING_STATUS (kasus
+rename). Hasil: **36 dari 45 dikonfirmasi mati permanen** di bawah
+ticker saat ini — **30 delisted** (M&A cash-out atau bankruptcy: MRO,
+PXD, EA, HBI, EXAS, HOLX, CMA, DFS, SPR, CTRA, MMP, K, SPTN, AVB, EQR,
+SEE, WRK, X, ALLK, ALTR, ASTR, CFLT, COOP, FOLD, NKLA, SUMO, VERV, RIDE,
+VLDR, SAVE) dan **6 rename** dengan perusahaan masih trading di ticker
+baru (SQ→XYZ, ABC→COR, RE→EG, IAC→PPLI, USM→AD, ZI→GTM). **9 sisanya
+TIDAK disentuh**: ANSS/JNPR/HES/HYZN/RDFN/SAVA dikonfirmasi genuinely
+ACTIVE (celah `coverage_check` untuk keenam ini adalah masalah
+fetch-pipeline terpisah, bukan masalah universe — butuh investigasi
+sendiri) dan SJW/NEW/PEAK dibiarkan UNRESOLVED (bukti tidak cukup —
+catatan "delisted" AlphaVantage untuk PEAK ternyata tabrakan ticker
+dengan shell company tak terkait yang sudah lama mati, bukan instrumen
+kita).
+
+**3. Universe cleanup — 36 baris dihapus dari KEDUA file secara
+lockstep.** `config/instruments_identity.yaml` dan
+`config/instruments_taxonomy.yaml` sama-sama kehilangan 36 baris
+`- symbol: XXX` yang identik, mempertahankan positional join contract
+(`src/config/yaml_split_merge.py`) — urutan per-sektor diverifikasi
+ulang identik di kedua file SEBELUM DAN SESUDAH penghapusan, lalu
+di-load-test lewat jalur `InstrumentLoader`/`merge_split_trees()` yang
+sesungguhnya (bukan cuma regex check). `scripts/validate_instruments.py`
+`EXPECTED_TOTAL`: 699 → 663 (GMI-VAL-004). 6 assertion test yang
+hardcode angka lama (639/588/697) diperbarui ke 603/552/661 di
+`test_full_system.py`, `test_pipeline_config_integration.py`,
+`test_instrument_loader.py` (×3), `test_package_exports.py` — perubahan
+yang memang benar dan diharapkan mengikuti perubahan ukuran universe
+yang nyata, bukan regresi yang di-mask.
+
+**Sengaja TIDAK dilakukan pass ini:** menambahkan XYZ/COR/EG/PPLI/AD/GTM
+sebagai instrumen pengganti untuk 6 kasus rename — itu adalah keputusan
+PENAMBAHAN universe, lebih konsekuensial dari penghapusan, dan
+ditinggalkan untuk keputusan Ovi. Verifikasi manual 6 simbol
+LIKELY_TRANSIENT (masalah fetch-pipeline) dan 3 simbol UNRESOLVED juga
+belum dilakukan — didaftarkan sebagai catatan follow-up di entry RISK-28
+yang sama di KNOWN_RISKS.md (bukan RISK number baru — investigasi akar
+yang sama).
+
+Verifikasi: `ast.parse` bersih di semua file yang diubah, full suite
+1567 passed (tidak ada test baru — 6 assertion count yang diupdate,
+bukan test baru), `python scripts/validate_instruments.py` → "VALIDATION
+PASSED — 663 symbols (Layer 1=603, Layer 2=60), no errors." PATCH bump:
+perbaikan data-quality/universe-cleanup yang sudah ada, bukan fitur baru
+atau perubahan Interface Contract. Total: **1 file source baru**
+(`scripts/preflight/check_ticker_liveness.py`) | **2 file config
+dimodifikasi** (36 baris dihapus masing-masing) | **1 file script
+dimodifikasi** (`validate_instruments.py`) | **5 file test dimodifikasi**
+(6 assertion diupdate) | **1567 passed / 0 failed / 0 error**.
+
+## v1.17.5 — silver_validate CRITICAL Gate Failure 2026-09-02: 2 Bug Diperbaiki, 1 Item Terbuka (September 2026)
+
+Diarahkan oleh laporan Ovi: `--job silver` gagal dengan `QualityGateError`
+di live run 2 September 2026 (log `[05:19:29] RUNNING silver_validate.txt`),
+dua CRITICAL check gagal (`price_sanity`, `coverage_check`) dan satu
+WARNING check crash (`outlier_detection`, `STDDEV_SAMP is out of range!`).
+Root cause ketiganya ditelusuri via pembacaan live repo langsung
+(`quality_validator.py`, `ohlcv_processor.py`, `market_ingester.py`,
+`instrument_loader.py`, `silver_scope.py`) plus satu diagnostic query
+DuckDB yang dijalankan Ovi sendiri di live data sebelum implementasi
+dimulai — bukan tebakan dari kode saja.
+
+**1. FIX QV-PS-01 — `price_sanity` CRITICAL memblokir Gold atas noise
+yang SUDAH di-quarantine sendiri.** Check ini menjalankan ulang predikat
+OHLC-ordering yang PERSIS SAMA dengan yang sudah dijalankan
+`OHLCVProcessor._flag_is_clean()` saat Silver-write — dan menghitung
+SEMUA pelanggaran, termasuk baris yang sudah benar di-flag
+`is_clean=False`, sebagai CRITICAL block, terlepas dari status flag-nya.
+Bukti live-test: 2101 baris pelanggaran, 19 dari 20 simbol teratas adalah
+pasangan forex (USD_JPY, EUR_JPY, NZD_USD, GBP_JPY, dst.), sisanya IDX
+(BBRI, ADRO) — nol konsentrasi di us_stocks — konsisten dengan noise OHLC
+retail-feed yang memang dikenal ada di data forex 24 jam/OTC, bukan
+defect pipeline. GD §13.1 sendiri mendefinisikan aksi Price Sanity
+sebagai "Mark is_clean=False", bukan halt — `OHLCVProcessor` sudah
+melakukan itu dengan benar. Diperbaiki dengan menyempit-kan CRITICAL
+check ini ke baris `is_clean=TRUE` saja: sekarang check ini benar-benar
+menguji apakah mekanisme self-flagging bekerja (pelanggaran yang lolos
+tanpa ter-flag), bukan mengulang-hitung noise yang sudah benar
+dikarantina dan sudah dikecualikan dari Gold oleh filter `is_clean` di
+setiap consumer hilir.
+
+**2. FIX QV-OUT-01 + FIX OP-LR-01 — harga negatif CL/WTI (event historis
+nyata, bukan bad data) meracuni deteksi outlier lintas 639 simbol
+sekaligus.** Baris `CL 2020-04-20`/`2020-04-21` (WTI negatif akibat
+krisis kapasitas storage COVID) membuat `ln(close/prev_close)` menjadi
+NaN/Inf. Query `_check_outliers()` — satu window function DuckDB lintas
+SEMUA simbol Layer 1 sekaligus — tidak punya filter `isfinite()`,
+sehingga partition CL yang "beracun" membuat `STDDEV_SAMP` overflow dan
+membatalkan SELURUH query (`STDDEV_SAMP is out of range!`), diam-diam
+melewatkan deteksi outlier untuk 639 simbol sekaligus, bukan cuma CL
+(FIX QV-OUT-01, diperbaiki dengan filter `isfinite(log_return)` di WHERE
+clause). Terpisah, bug yang sama polanya ditemukan di
+`OHLCVProcessor._flag_is_clean()` DAN `_flag_is_clean_4h()`: NaN yang
+sama merambat ke `mean_`/`std_` (dihitung dari kolom PENUH), membuat
+guard `std_ and std_ > 0` diam-diam bernilai False untuk SELURUH histori
+CL — tanpa exception, tanpa log line — sejak April 2020 (FIX OP-LR-01,
+diperbaiki dengan menghitung baseline hanya dari nilai `log_return` yang
+finite; baris non-finite tetap secara alami ter-flag `is_clean=False`
+sendiri karena perbandingan z-score dengan NaN/Inf selalu False, bukan
+null, di Polars).
+
+**Item TIDAK diperbaiki pass ini, didaftarkan sebagai RISK-26 di
+KNOWN_RISKS.md — keputusan ada di Ovi:** `coverage_check` di 92.8%
+(<95%). Root cause dikonfirmasi empiris (BUKAN teori "backfill belum
+selesai pasca-migrasi ADR-045" yang sempat diajukan di tengah sesi) —
+dari 45 simbol Layer 1 yang hilang, 4 diverifikasi satu-per-satu via web
+search: MRO dan PXD delisted permanen (merger all-stock ConocoPhillips/
+ExxonMobil, Nov 2024/Mei 2024), EA delisted 4 Agustus 2026 (take-private
+PIF/Silver Lake/Affinity senilai $55B — hanya 3 minggu sebelum run ini),
+SQ berganti ticker menjadi XYZ (21 Jan 2025, masih trading, BUKAN
+delisting). 41 simbol sisanya secara pola cocok dengan gelombang M&A
+2023–2025 yang sama (konsolidasi sektor energi, nama-nama era
+biotech/SPAC) tapi BELUM diverifikasi satu-per-satu. ini adalah masalah
+universe instrumen yang basi (stale), bukan bug kode — keputusan pending:
+verifikasi manual 41 sisanya vs. preflight check otomatis untuk ticker
+liveness (fix struktural, menangkap delisting masa depan juga) vs.
+kombinasi keduanya.
+
+Verifikasi: `ast.parse` bersih di kedua file yang diubah
+(`src/silver/quality_validator.py`, `src/silver/ohlcv_processor.py`),
+tidak ada f-string SQL baru, tidak ada perubahan ke
+`config/instruments.yaml`/`validate_instruments.py` (699 simbol, tidak
+disentuh — item RISK-26 sengaja tidak dieksekusi tanpa keputusan Ovi). 9
+test regresi baru: `TestPriceSanityIsCleanScoping` (+3),
+`TestOutlierSurvivesNonFiniteLogReturn` (+3, termasuk regression guard
+`test_other_symbols_outliers_still_detected_alongside_poisoned_one` yang
+membuktikan TSLA tidak lagi jadi collateral damage dari CL), dan
+`TestFlagIsCleanOutlierIsolation` (+3, termasuk kasus NaN terpisah dari
+kasus Infinity).
+
+PATCH bump: perbaikan bug pada quality-gate/Silver-processor yang sudah
+ada, tidak ada kapabilitas baru yang diekspos ke downstream, tidak ada
+perubahan Interface Contract atau schema. Total: **2 file source
+dimodifikasi** (`src/silver/quality_validator.py`,
+`src/silver/ohlcv_processor.py`) | **2 file test dimodifikasi** | **1567
+passed / 0 failed / 0 error** (naik dari 1558, +9 test baru, 0 regresi) |
+coverage aggregate 88.22% (gate ≥80%).
+
 ## v1.17.4 — Triase Live-Test 2026-08-31: 3 Bug Independen Diperbaiki (Agustus 2026)
 
 Diarahkan oleh laporan Ovi dari live-test 31 Agustus 2026 (log

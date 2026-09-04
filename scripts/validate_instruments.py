@@ -49,6 +49,31 @@ terpisah (CI Gate G-3).
     VALID_COMMODITY_ROLES / VALID_COMMODITY_SUBCATEGORIES
   - EXPECTED_TOTAL / subcategory count UNCHANGED (699 / 22) — this is a
     field-level taxonomy addition, not a universe-size change
+
+# UPD GMI-VAL-004 — chat thread (Ovi, 3 Sep 2026), KNOWN_RISKS.md RISK-28,
+  scripts/preflight/check_ticker_liveness.py:
+  - EXPECTED_TOTAL: 699 -> 663 (-36 Layer 1 us_stocks). coverage_check sat
+    at 92.8% (<95%) because 36 of 45 flagged symbols were permanently dead
+    tickers: 30 delisted (M&A cash-out or bankruptcy — MRO, PXD, EA, HBI,
+    EXAS, HOLX, CMA, DFS, SPR, CTRA, MMP, K, SPTN, AVB, EQR, SEE, WRK, X,
+    ALLK, ALTR, ASTR, CFLT, COOP, FOLD, NKLA, SUMO, VERV, RIDE, VLDR, SAVE)
+    and 6 renamed to a new ticker with the company still trading (SQ->XYZ,
+    ABC->COR, RE->EG, IAC->PPLI, USM->AD, ZI->GTM) — confirmed via
+    AlphaVantage LISTING_STATUS (real API call, not the FX_DAILY adapter)
+    cross-referenced with targeted web search for names LISTING_STATUS
+    didn't resolve cleanly (renames in particular). The remaining 9 of the
+    original 45 were NOT touched: ANSS/JNPR/HES/HYZN/RDFN/SAVA confirmed
+    genuinely ACTIVE (coverage gap for these is an unrelated fetch-
+    pipeline issue, not a universe problem — separate investigation
+    needed) and SJW/NEW/PEAK left UNRESOLVED (insufficient evidence
+    either way; PEAK's AV "delisted" record turned out to be a same-
+    ticker collision with an unrelated defunct shell company, not our
+    instrument).
+  - No new subcategories, no taxonomy field changes — pure removal of 36
+    dead Layer 1 us_stocks entries from BOTH instruments_identity.yaml
+    and instruments_taxonomy.yaml in lockstep (positional join contract,
+    src/config/yaml_split_merge.py) — order re-verified identical in both
+    files post-removal before this constant was touched.
 """
 
 import sys
@@ -71,7 +96,23 @@ from src.config.yaml_split_merge import merge_split_trees
 #     DM/EM dollar strength across DXY + raw pairs + the future Broad Dollar
 #     derived feature. A future accidental weight addition here would
 #     silently reintroduce that exact risk.
-EXPECTED_TOTAL = 699
+# UPD GMI-VAL-004 (chat thread, 3 Sep 2026, RISK-28): EXPECTED_TOTAL
+#   699 -> 663 (-36 delisted/renamed Layer 1 us_stocks tickers). See
+#   module docstring for the full removed-symbol list and rationale.
+# UPD GMI-VAL-005 (chat thread, 3 Sep 2026, RISK-28 follow-up, Ovi's
+#   explicit instruction: "Resolve the untouched tickers with removal
+#   approach"): EXPECTED_TOTAL: 663 -> 654 (-9 Layer 1 us_stocks).
+#   Removes the two buckets GMI-VAL-004 deliberately left untouched:
+#   ANSS/JNPR/HES/HYZN/RDFN/SAVA (6 -- confirmed genuinely ACTIVE via
+#   AlphaVantage LISTING_STATUS; the coverage_check gap for these was a
+#   separate, never-diagnosed fetch-pipeline issue, NOT evidence the
+#   companies are dead -- this removal is an explicit stopgap Ovi chose
+#   over investigating that pipeline bug, not a delisting classification,
+#   see KNOWN_RISKS.md RISK-28 for the distinction) and SJW/NEW/PEAK (3 --
+#   insufficient evidence either way after AlphaVantage + web search).
+#   Same lockstep-removal + order-parity-reverification + real-loader
+#   load-test procedure as GMI-VAL-004.
+EXPECTED_TOTAL = 654
 
 REQUIRED_FIELDS: dict[str, list[str]] = {
     "us_stocks": ["symbol"],

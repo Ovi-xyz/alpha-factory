@@ -275,9 +275,25 @@ class TestFullSystemPipeline:
         640 -> 639) plus a separate, independently-asserted Layer 2 count
         of 58 active / 2 deferred (FIX ADR-034, 10 Aug 2026) — see
         test_l7_layer2_context_universe_present.
+
+        FIX GMI-VAL-004 (chat thread, 3 Sep 2026, RISK-28): 639 -> 603.
+        36 permanently dead Layer 1 us_stocks tickers removed (30
+        delisted via M&A/bankruptcy, 6 renamed to a new symbol with the
+        company still trading) — confirmed via AlphaVantage
+        LISTING_STATUS + targeted web research, not a code regression.
+        See KNOWN_RISKS.md RISK-28 and scripts/validate_instruments.py
+        module docstring for the full symbol list.
+
+        FIX GMI-VAL-005 (chat thread, 3 Sep 2026, RISK-28 follow-up,
+        Ovi's explicit instruction to remove rather than investigate
+        further): 603 -> 594. Removes the two buckets GMI-VAL-004 left
+        untouched — ANSS/JNPR/HES/HYZN/RDFN/SAVA (confirmed genuinely
+        ACTIVE; this is an explicit stopgap over an undiagnosed
+        fetch-pipeline bug, not a delisting) and SJW/NEW/PEAK
+        (insufficient evidence either way). See KNOWN_RISKS.md RISK-28.
         """
         from src.config.instrument_loader import get_loader
-        assert get_loader().count() == 639
+        assert get_loader().count() == 594
 
     def test_l7_layer2_context_universe_present(self):
         """ADD GMI-IL-001: Layer 2 context anchors — Extension v1.0 §3.1 total

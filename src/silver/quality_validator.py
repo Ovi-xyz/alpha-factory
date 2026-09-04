@@ -235,6 +235,23 @@ class QualityValidator:
         FIX F-QV-01 [P0]: renamed — result stored as 'price_sanity'
         to match CRITICAL_CHECKS entry.
         FIX QV-L2-01: scoped to Layer 1 markets only (see module docstring).
+
+        FIX QV-PS-01 [chat thread, 2 Sep 2026]: this check re-runs the exact
+        same OHLC-ordering test OHLCVProcessor._flag_is_clean() already ran
+        at Silver-write time (same file, same predicate), and previously
+        counted a violation regardless of whether it was already correctly
+        flagged is_clean=False. Live-test (2 Sep 2026) surfaced 2101 such
+        rows, 19/20 top offenders by symbol being forex pairs and the
+        remainder IDX (BBRI, ADRO) — zero concentration in us_stocks —
+        consistent with known retail-feed OHLC noise in 24h/OTC forex data,
+        not a pipeline defect. GD §13.1's own documented action for Price
+        Sanity is "Mark is_clean=False", not halt; OHLCVProcessor already
+        does exactly that. Scoping this CRITICAL check to `is_clean=TRUE`
+        rows turns it into what it should be: a check that the self-flagging
+        mechanism itself is working (any OHLC violation that somehow escaped
+        being flagged), not a re-litigation of noise that's already been
+        correctly quarantined and is already excluded from Gold by every
+        downstream consumer's own is_clean filter.
         """
         try:
             con = duckdb.connect()
@@ -245,17 +262,21 @@ class QualityValidator:
                 """
                 SELECT COUNT(*) AS violations
                 FROM read_parquet($globs, hive_partitioning=true)
-                WHERE high < low
+                WHERE (high < low
                    OR open < low OR open > high
-                   OR close < low OR close > high
-                """,  # FIX SIL-SQL-001
+                   OR close < low OR close > high)
+                  AND is_clean = TRUE
+                """,  # FIX SIL-SQL-001, FIX QV-PS-01
                 {"globs": globs_1d},
             ).fetchone()
 
             if result and result[0] > 0:
                 self._issues.append({
                     "check":  "price_sanity",
-                    "detail": f"{result[0]} rows violate OHLC constraints"
+                    "detail": f"{result[0]} rows violate OHLC constraints "
+                              f"and were NOT caught by OHLCVProcessor's own "
+                              f"self-flagging (is_clean still True) — "
+                              f"FIX QV-PS-01"
                 })
                 return False
         except Exception as e:
@@ -425,7 +446,16 @@ class QualityValidator:
                         AVG(log_return)    OVER (PARTITION BY symbol) AS mean_lr,
                         STDDEV(log_return) OVER (PARTITION BY symbol) AS std_lr
                     FROM read_parquet($globs, hive_partitioning=true)
-                    WHERE log_return IS NOT NULL
+                    WHERE log_return IS NOT NULL AND isfinite(log_return)
+                    -- FIX QV-OUT-01 [chat thread, 2 Sep 2026]: a sign-crossing
+                    -- close (e.g. CL/WTI negative on 2020-04-20/21, a real
+                    -- historical event, not bad data) makes
+                    -- ln(close/prev_close) undefined (NaN/Inf). Without this
+                    -- filter, DuckDB's STDDEV_SAMP window fn overflows on
+                    -- that one symbol's partition and aborts the whole query
+                    -- ("STDDEV_SAMP is out of range!"), silently skipping
+                    -- outlier detection for all 639 Layer 1 symbols at once,
+                    -- not just the offending one.
                 )
                 WHERE std_lr > 0
                   AND ABS((log_return - mean_lr) / std_lr) > $threshold

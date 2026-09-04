@@ -324,11 +324,24 @@ class OHLCVProcessor:
                 clean = clean & pl.col(col).is_not_null()
 
         # Outlier detection: |z-score| > 4 on log_return
+        # FIX OP-LR-01 [chat thread, 2 Sep 2026]: mean_/std_ previously came
+        # from the FULL log_return column. A single sign-crossing close
+        # (e.g. CL/WTI negative on 2020-04-20/21 — a real historical event,
+        # not bad data) makes ln(close/prev_close) NaN/Inf, which propagates
+        # into mean_/std_, which makes `std_ and std_ > 0` silently False —
+        # disabling outlier detection for that symbol's ENTIRE history, with
+        # no exception and no log line. Computing the baseline from only
+        # finite log_return values isolates the damage: the poisoned row(s)
+        # still naturally fail the z-score test once evaluated (NaN/Inf
+        # comparisons are False, not null, in Polars) and get flagged
+        # is_clean=False on their own — the rest of the symbol's history is
+        # no longer collateral damage.
         if "log_return" in df.columns:
             try:
                 lr = pl.col("log_return")
-                mean_ = df["log_return"].mean()
-                std_  = df["log_return"].std()
+                finite_lr = df.filter(pl.col("log_return").is_finite())["log_return"]
+                mean_ = finite_lr.mean()
+                std_  = finite_lr.std()
                 if std_ and std_ > 0:
                     zscore = (lr - mean_) / std_
                     clean = clean & (zscore.abs() <= self.OUTLIER_ZSCORE_THRESHOLD)
@@ -540,11 +553,14 @@ class OHLCVProcessor:
                 clean = clean & pl.col(col).is_not_null()
 
         # Outlier: |z-score| > 4 pada log_return
+        # FIX OP-LR-01 [chat thread, 2 Sep 2026]: see _flag_is_clean() —
+        # same fix, same rationale (baseline from finite log_return only).
         if "log_return" in df.columns:
             try:
                 lr    = pl.col("log_return")
-                mean_ = df["log_return"].mean()
-                std_  = df["log_return"].std()
+                finite_lr = df.filter(pl.col("log_return").is_finite())["log_return"]
+                mean_ = finite_lr.mean()
+                std_  = finite_lr.std()
                 if std_ and std_ > 0:
                     zscore = (lr - mean_) / std_
                     clean  = clean & (zscore.abs() <= self.OUTLIER_ZSCORE_THRESHOLD)

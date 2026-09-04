@@ -24,8 +24,21 @@ class TestInstrumentLoader:
         This is an intentional, documented contract change — not a regression.
         Layer 2 (context_available=True) count is asserted separately in
         TestInstrumentLoaderLayer2.test_all_context_default_count.
+
+        FIX GMI-VAL-004 (chat thread, 3 Sep 2026, RISK-28): 639 -> 603.
+        36 permanently dead Layer 1 us_stocks tickers removed (30 delisted
+        M&A/bankruptcy, 6 renamed with company still trading elsewhere) —
+        confirmed via AlphaVantage LISTING_STATUS + web research, not a
+        regression. See KNOWN_RISKS.md RISK-28.
+
+        FIX GMI-VAL-005 (chat thread, 3 Sep 2026, RISK-28 follow-up,
+        Ovi's explicit instruction to remove rather than investigate
+        further): 603 -> 594. Removes ANSS/JNPR/HES/HYZN/RDFN/SAVA
+        (confirmed genuinely ACTIVE — stopgap over an undiagnosed
+        fetch-pipeline bug, not a delisting) and SJW/NEW/PEAK
+        (insufficient evidence either way).
         """
-        assert self.loader.count() == 639
+        assert self.loader.count() == 594
 
     def test_get_aapl(self):
         inst = self.loader.get("AAPL")
@@ -73,8 +86,15 @@ class TestInstrumentLoader:
         us_stocks/idx/commodity unchanged — see ADR-003.
         UPD ADR-036 (GMI_Decision_Document_v8.docx, 10 Aug 2026): forex
         19->18 (USD_IDR reclassified to context.dollar_basket).
+        FIX GMI-VAL-004 (chat thread, 3 Sep 2026, RISK-28): us_stocks
+        588->552 (-36 dead tickers). idx/forex/commodity unaffected — all
+        36 removed symbols were us_stocks. See KNOWN_RISKS.md RISK-28.
+        FIX GMI-VAL-005 (chat thread, 3 Sep 2026, RISK-28 follow-up):
+        us_stocks 552->543 (-9 more — 6 confirmed active/stopgap, 3
+        unresolved, all us_stocks too). idx/forex/commodity still
+        unaffected.
         """
-        assert len(self.loader.by_market("us_stocks")) == 588
+        assert len(self.loader.by_market("us_stocks")) == 543
         assert len(self.loader.by_market("idx"))       == 30
         assert len(self.loader.by_market("forex"))     == 18
         assert len(self.loader.by_market("commodity")) == 3
@@ -177,8 +197,17 @@ class TestInstrumentLoaderLayer2:
         the 2 now-deferred (TIN, RUBBER), while count_total() intentionally
         counts only what's actually active/ingested. Previously these two
         numbers coincided (699) purely because deferred_count() was 0 at
-        the time — see count_total()'s own docstring for the distinction."""
-        assert self.loader.count_total() == 697
+        the time — see count_total()'s own docstring for the distinction.
+
+        FIX GMI-VAL-004 (chat thread, 3 Sep 2026, RISK-28): Layer 1
+        639 -> 603 (-36 dead tickers), so 697 -> 661. Layer 2 (58) and
+        EXPECTED_TOTAL's own -36 adjustment (699 -> 663) unaffected by
+        this Layer 1 change beyond the same -36 both apply.
+
+        FIX GMI-VAL-005 (chat thread, 3 Sep 2026, RISK-28 follow-up):
+        Layer 1 603 -> 594 (-9 more), so 661 -> 652.
+        """
+        assert self.loader.count_total() == 652
 
     def test_deferred_count_is_2(self):
         """FIX ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):

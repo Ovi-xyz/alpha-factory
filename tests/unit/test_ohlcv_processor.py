@@ -164,6 +164,78 @@ def _make_silver_1h(n_days: int = 5, symbol: str = "AAPL") -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
+class TestFlagIsCleanOutlierIsolation:
+    """
+    FIX OP-LR-01 [chat thread, 2 Sep 2026]: a single sign-crossing close
+    (e.g. CL/WTI negative on 2020-04-20/21 — a real historical event, not
+    bad data) makes ln(close/prev_close) NaN/Inf. Pre-fix, that one row's
+    NaN propagated into mean_/std_ computed from the FULL log_return
+    column, silently disabling outlier detection for the symbol's ENTIRE
+    history (`std_ and std_ > 0` evaluates False for NaN, no exception, no
+    log line). These tests build a small, hand-crafted frame — not a full
+    process_symbol() pipeline — directly exercising _flag_is_clean()'s
+    z-score branch in isolation.
+    """
+
+    @staticmethod
+    def _frame(log_returns: list[float], n: int) -> pl.DataFrame:
+        base = date(2025, 1, 2)
+        return pl.DataFrame({
+            "timestamp":  [base + timedelta(days=i) for i in range(n)],
+            "open":       [100.0] * n, "high": [101.0] * n, "low": [99.0] * n,
+            "close":      [100.0] * n, "volume": [1_000_000] * n,
+            "log_return": log_returns,
+        })
+
+    def test_infinite_log_return_no_longer_poisons_symbol_baseline(self, proc):
+        # 50 quiet rows (~0 return), one genuine finite outlier (idx 10),
+        # one non-finite sign-crossing row (idx 25, the CL/WTI scenario).
+        lr = [0.001 if i % 2 == 0 else -0.001 for i in range(50)]
+        lr[10] = 0.5          # genuine extreme, finite — should be caught
+        lr[25] = float("inf")  # sign-crossing artifact — should be isolated
+        df = self._frame(lr, 50)
+
+        result = proc._flag_is_clean(df)
+
+        assert result["is_clean"][10] == False, (
+            "Pre-fix this stayed True: NaN baseline made the whole "
+            "`std_ and std_ > 0` guard silently skip outlier detection"
+        )
+        assert result["is_clean"][25] == False, (
+            "The non-finite row itself must still end up flagged — "
+            "isolating it must not accidentally exempt it"
+        )
+        # Every other quiet row must remain clean — proves the baseline
+        # wasn't dragged down by only 2/50 rows being flagged.
+        untouched = [i for i in range(50) if i not in (10, 25)]
+        assert all(result["is_clean"][i] for i in untouched)
+
+    def test_nan_log_return_same_isolation(self, proc):
+        """Same guarantee for NaN (e.g. 0/0 division), not just Infinity."""
+        lr = [0.001 if i % 2 == 0 else -0.001 for i in range(50)]
+        lr[30] = float("nan")
+        df = self._frame(lr, 50)
+
+        result = proc._flag_is_clean(df)
+
+        assert result["is_clean"][30] == False
+        untouched = [i for i in range(50) if i != 30]
+        assert all(result["is_clean"][i] for i in untouched)
+
+    def test_no_nonfinite_values_unaffected(self, proc):
+        """Regression guard: normal data with no NaN/Inf must behave
+        identically to before this fix."""
+        lr = [0.001 if i % 2 == 0 else -0.001 for i in range(50)]
+        lr[10] = 0.5  # genuine outlier, finite
+        df = self._frame(lr, 50)
+
+        result = proc._flag_is_clean(df)
+
+        assert result["is_clean"][10] == False
+        untouched = [i for i in range(50) if i != 10]
+        assert all(result["is_clean"][i] for i in untouched)
+
+
 class TestSynthesize4H:
     """
     Tests untuk OHLCVProcessor.synthesize_4h() — v1.5 refactoring.

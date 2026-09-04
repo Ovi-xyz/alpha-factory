@@ -297,6 +297,177 @@ class TestQVL2MaskingBugsFixed:
         assert qv._check_freshness(date(2026, 6, 20)) is True
 
 
+class TestPriceSanityIsCleanScoping:
+    """
+    FIX QV-PS-01 [chat thread, 2 Sep 2026]: price_sanity previously counted
+    ANY OHLC-ordering violation, including rows OHLCVProcessor._flag_is_clean()
+    had already correctly caught and flagged is_clean=False at Silver-write
+    time — duplicating that check and hard-blocking Gold on noise that was
+    already quarantined and already excluded from every downstream consumer.
+    Live-test (2 Sep 2026) found 2101 such rows concentrated in forex/IDX
+    (known noisier retail-feed OHLC), zero in us_stocks. This scopes the
+    CRITICAL gate to `is_clean=TRUE` rows: it should now only fire when
+    self-flagging itself has a gap, not on data that's already correctly
+    handled.
+    """
+
+    @staticmethod
+    def _write(path, symbol, timestamps, **overrides):
+        n = len(timestamps)
+        base = {
+            "symbol": [symbol] * n, "timestamp": timestamps,
+            "open": [100.0] * n, "high": [105.0] * n, "low": [95.0] * n,
+            "close": [102.0] * n, "volume": [1_000_000] * n,
+            "is_clean": [True] * n,
+        }
+        base.update(overrides)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        import polars as pl
+        pl.DataFrame(base).write_parquet(path)
+
+    def test_already_flagged_violation_no_longer_blocks(self, tmp_path, monkeypatch):
+        """A row with high < low but is_clean already False (OHLCVProcessor
+        did its job) must NOT trip the CRITICAL gate."""
+        import src.silver.quality_validator as qv_mod
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+        self._write(
+            tmp_path / "forex" / "symbol=USD_JPY" / "USD_JPY_1D_silver.parquet",
+            "USD_JPY", [date(2026, 6, 20)],
+            high=[10.0], low=[20.0], is_clean=[False],
+        )
+        qv = QualityValidator()
+        assert qv._check_price_sanity(date(2026, 6, 20)) is True, (
+            "Pre-fix this incorrectly returned False — re-detecting a "
+            "violation that was already correctly self-quarantined"
+        )
+
+    def test_unflagged_violation_still_caught(self, tmp_path, monkeypatch):
+        """The genuine invariant this check protects: an OHLC violation
+        that somehow escaped OHLCVProcessor's own flagging (is_clean still
+        True) must still trip the CRITICAL gate. This is the regression
+        guard proving FIX QV-PS-01 narrowed scope, not neutered the check."""
+        import src.silver.quality_validator as qv_mod
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+        self._write(
+            tmp_path / "us_stocks" / "symbol=AAPL" / "AAPL_1D_silver.parquet",
+            "AAPL", [date(2026, 6, 20)],
+            high=[10.0], low=[20.0], is_clean=[True],
+        )
+        qv = QualityValidator()
+        assert qv._check_price_sanity(date(2026, 6, 20)) is False
+
+    def test_mixed_flagged_and_unflagged_only_counts_unflagged(self, tmp_path, monkeypatch):
+        """One already-flagged violation + one genuinely-escaped violation
+        in the same file — must fail (because of the escaped one), and the
+        detail message should reflect only the unflagged count (1, not 2)."""
+        import src.silver.quality_validator as qv_mod
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+        self._write(
+            tmp_path / "forex" / "symbol=EUR_USD" / "EUR_USD_1D_silver.parquet",
+            "EUR_USD", [date(2026, 6, 20), date(2026, 6, 21)],
+            high=[10.0, 10.0], low=[20.0, 20.0],
+            is_clean=[False, True],  # first already caught, second escaped
+        )
+        qv = QualityValidator()
+        assert qv._check_price_sanity(date(2026, 6, 20)) is False
+        detail = qv._issues[-1]["detail"]
+        assert "1 rows" in detail
+
+
+class TestOutlierSurvivesNonFiniteLogReturn:
+    """
+    FIX QV-OUT-01 [chat thread, 2 Sep 2026]: a sign-crossing close (e.g.
+    CL/WTI negative on 2020-04-20/21, a real historical event) makes
+    log_return NaN/Inf for that symbol. Pre-fix, DuckDB's STDDEV_SAMP
+    window function overflowed on that one partition and aborted the
+    ENTIRE cross-symbol query ("STDDEV_SAMP is out of range!"), silently
+    skipping outlier detection for all Layer 1 symbols in the same run —
+    not just the offending one. This must no longer happen, and a genuine
+    outlier in an unrelated, well-behaved symbol must still be detected
+    in the same run.
+    """
+
+    @staticmethod
+    def _write_symbol_1d(base_dir, symbol, market, df):
+        from pathlib import Path
+        out_dir = Path(base_dir) / market / f"symbol={symbol}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{symbol}_1D_silver.parquet"
+        df.write_parquet(out_path)
+        return out_path
+
+    def _make_ohlcv(self, symbol, n=250, outlier_idx=None, nonfinite_idx=None,
+                     nonfinite_value=float("inf"), seed=0):
+        import datetime
+        import numpy as np
+        import polars as pl
+
+        rng  = np.random.default_rng(seed)
+        base = datetime.datetime(2023, 1, 1, tzinfo=datetime.timezone.utc)
+        rows = []
+        for i in range(n):
+            lr = float(rng.normal(0, 0.01))
+            rows.append({
+                "symbol": symbol, "timestamp": base + datetime.timedelta(days=i),
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                "volume": 1_000_000, "log_return": lr, "is_clean": True,
+            })
+        if outlier_idx is not None:
+            rows[outlier_idx]["log_return"] = 12.0
+        if nonfinite_idx is not None:
+            rows[nonfinite_idx]["log_return"] = nonfinite_value
+        return pl.DataFrame(rows)
+
+    def test_query_does_not_raise_with_infinite_partition(self, tmp_path, monkeypatch):
+        import src.silver.quality_validator as qv_mod
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+
+        cl_df = self._make_ohlcv("CL", nonfinite_idx=100, nonfinite_value=float("inf"))
+        self._write_symbol_1d(tmp_path, "CL", "commodity_trading", cl_df)
+
+        validator = qv_mod.QualityValidator()
+        result = validator._check_outliers(date(2025, 1, 1))
+        assert result is True   # non-blocking; must not raise/skip-as-error
+
+    def test_nan_partition_also_survives(self, tmp_path, monkeypatch):
+        import src.silver.quality_validator as qv_mod
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+
+        cl_df = self._make_ohlcv("CL", nonfinite_idx=100, nonfinite_value=float("nan"))
+        self._write_symbol_1d(tmp_path, "CL", "commodity_trading", cl_df)
+
+        validator = qv_mod.QualityValidator()
+        assert validator._check_outliers(date(2025, 1, 1)) is True
+
+    def test_other_symbols_outliers_still_detected_alongside_poisoned_one(
+        self, tmp_path, monkeypatch
+    ):
+        """The core regression: CL's Inf must not take down TSLA's genuine
+        outlier detection in the same run — pre-fix, the whole query
+        aborted, so TSLA's real outlier silently never got flagged."""
+        import polars as pl
+        import src.silver.quality_validator as qv_mod
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+
+        cl_df    = self._make_ohlcv("CL", nonfinite_idx=100, seed=1)
+        tsla_df  = self._make_ohlcv("TSLA", outlier_idx=75, seed=2)
+        cl_path   = self._write_symbol_1d(tmp_path, "CL", "commodity_trading", cl_df)
+        tsla_path = self._write_symbol_1d(tmp_path, "TSLA", "us_stocks", tsla_df)
+
+        validator = qv_mod.QualityValidator()
+        validator._check_outliers(date(2025, 1, 1))
+
+        assert pl.read_parquet(tsla_path).filter(~pl.col("is_clean")).height == 1, (
+            "Pre-fix: the whole query would have raised before ever "
+            "reaching TSLA's partition, leaving it unflagged"
+        )
+        # CL's own file is untouched by outlier writeback for the Inf row
+        # since Inf was filtered out of the detection query entirely —
+        # it's still is_clean=True for outlier purposes here (price_sanity
+        # / null_check are separate checks with their own scope).
+        assert pl.read_parquet(cl_path).height == cl_df.height
+
+
 class TestOutlierWriteback:
     """
     FIX GAP-4 [P1] + GAP-9 [P3] (Production Readiness Assessment v1.7.2):

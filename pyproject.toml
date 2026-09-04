@@ -1,7 +1,126 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.17.4"
-# FIX (chat thread, 31 Aug 2026): three independent bugs from live-test
+version = "1.17.7"
+# FIX (chat thread, 3 Sep 2026): RISK-28 fully closed. Ovi's explicit
+# follow-up instruction: "Resolve the untouched tickers with removal
+# approach." Removes the two buckets v1.17.6 (GMI-VAL-004) deliberately
+# left untouched pending further investigation/evidence:
+#
+# ANSS, JNPR, HES, HYZN, RDFN, SAVA (6) -- confirmed genuinely ACTIVE via
+# AlphaVantage LISTING_STATUS in v1.17.6's investigation. Removing these
+# is an explicit STOPGAP over a fetch-pipeline bug that was never
+# diagnosed (why do genuinely active, correctly-configured tickers fail
+# to fetch?) -- NOT a delisting classification. Documented as such in
+# KNOWN_RISKS.md RISK-28 so a future read of "why isn't ANSS in the
+# universe" doesn't incorrectly conclude it was delisted.
+#
+# SJW, NEW, PEAK (3) -- left UNRESOLVED in v1.17.6 after both
+# AlphaVantage and web search; removed now on Ovi's explicit call given
+# no evidence supports keeping them either.
+#
+# Same lockstep-removal procedure as GMI-VAL-004: 9 lines removed from
+# BOTH config/instruments_identity.yaml and config/instruments_taxonomy.yaml
+# (positional join, src/config/yaml_split_merge.py), per-sector order
+# re-verified identical before/after, real InstrumentLoader/
+# merge_split_trees() load test (count()==594, by_market("us_stocks")==543,
+# no removed symbol resolvable). scripts/validate_instruments.py
+# EXPECTED_TOTAL: 663 -> 654 (GMI-VAL-005). Same 6 test files/assertions
+# as GMI-VAL-004 updated again to the new counts (594/543/652). No new
+# instruments added as replacements -- that decision remains separately
+# open per v1.17.6's own note (universe additions are Ovi's call).
+#
+# FIX (chat thread, 3 Sep 2026): RISK-28 (coverage_check universe
+# staleness) closed. Ovi's two-part instruction: "First, build an
+# automated ticker-liveness preflight. Second, use that automated
+# ticker-liveness preflight to verify the 41 to unblock the gate."
+#
+# (1) NEW scripts/preflight/check_ticker_liveness.py -- Tier 1 (yfinance
+# recency check, same shape as check_yfinance_tickers.py, scoped to
+# Layer 1) + Tier 2 (--cross-check-delisting, AlphaVantage LISTING_STATUS,
+# classifies every Tier-1 FAIL as DELISTED / LIKELY_TRANSIENT /
+# UNRESOLVED). Cannot execute Tier 1 in this sandbox (no route to
+# finance.yahoo.com) -- authored and syntax-validated only, same
+# authoring/execution split as every other script in scripts/preflight/.
+#
+# (2) Applied the equivalent live classification NOW via direct
+# AlphaVantage LISTING_STATUS tool calls (not the sandbox-blocked HTTP
+# path) plus targeted web search for the names LISTING_STATUS didn't
+# resolve cleanly (renames): of the 45 symbols behind the 2 Sep 2026
+# coverage_check gap, 36 confirmed permanently dead under their current
+# ticker -- 30 delisted (M&A cash-out or bankruptcy: MRO, PXD, EA, HBI,
+# EXAS, HOLX, CMA, DFS, SPR, CTRA, MMP, K, SPTN, AVB, EQR, SEE, WRK, X,
+# ALLK, ALTR, ASTR, CFLT, COOP, FOLD, NKLA, SUMO, VERV, RIDE, VLDR, SAVE)
+# and 6 renamed with the company still trading under a new symbol
+# (SQ->XYZ, ABC->COR, RE->EG, IAC->PPLI, USM->AD, ZI->GTM). 9 left
+# untouched: ANSS/JNPR/HES/HYZN/RDFN/SAVA confirmed genuinely ACTIVE (an
+# unrelated fetch-pipeline issue, not a universe problem) and
+# SJW/NEW/PEAK left UNRESOLVED (insufficient evidence -- PEAK's AV
+# "delisted" record was a same-ticker collision with an unrelated
+# defunct shell company, not our instrument).
+#
+# All 36 dead entries removed from BOTH config/instruments_identity.yaml
+# and config/instruments_taxonomy.yaml in lockstep (positional join
+# contract, src/config/yaml_split_merge.py -- order re-verified identical
+# in both files before and after removal, load-tested via the real
+# InstrumentLoader/merge_split_trees() path, not just a regex check).
+# scripts/validate_instruments.py EXPECTED_TOTAL: 699 -> 663 (GMI-VAL-004).
+# 6 test assertions hardcoding the old 639/588/697 counts updated to
+# 603/552/661 across test_full_system.py, test_pipeline_config_
+# integration.py, test_instrument_loader.py (x3), test_package_exports.py
+# -- these were expected, correct updates given a real universe-size
+# change, not regressions masked. Did NOT add XYZ/COR/EG/PPLI/AD/GTM as
+# replacement instruments for the 6 renames -- that is a universe
+# ADDITION decision, more consequential than a removal, left for Ovi.
+# KNOWN_RISKS.md RISK-28 closed as RESOLVED; the 6 LIKELY_TRANSIENT and
+# 3 UNRESOLVED symbols registered as new follow-up notes on the same
+# entry, not separate RISK numbers (same root investigation).
+#
+# FIX (chat thread, 2 Sep 2026): silver_validate CRITICAL quality gate
+# failure from live run 2026-09-02 (log: [05:19:29] RUNNING silver_
+# validate.txt) -- two independent bugs fixed, one open item identified
+# and left for Ovi (see KNOWN_RISKS.md RISK-26, not fixed this pass):
+#
+# (1) FIX QV-PS-01 -- price_sanity CRITICAL check re-detected the exact
+# same OHLC-ordering violation OHLCVProcessor._flag_is_clean() had
+# already caught and flagged is_clean=False at Silver-write time, and
+# blocked Gold on it regardless. Live evidence: 2101 violating rows,
+# 19/20 top offenders by symbol being forex pairs (USD_JPY, EUR_JPY,
+# NZD_USD...), remainder IDX (BBRI, ADRO) -- zero in us_stocks --
+# consistent with known retail-feed OHLC noise in 24h/OTC forex data,
+# not a pipeline defect. Scoped the CRITICAL check to `is_clean=TRUE`
+# rows: it now only fires when the self-flagging mechanism itself has a
+# gap, not on noise that's already correctly quarantined and already
+# excluded from Gold by every downstream consumer's own is_clean filter.
+#
+# (2) FIX QV-OUT-01 + FIX OP-LR-01 -- a sign-crossing close (CL/WTI
+# negative on 2020-04-20/21, a real historical event -- COVID storage
+# crunch -- not bad data) makes ln(close/prev_close) NaN/Inf.
+# quality_validator._check_outliers()'s single cross-symbol DuckDB
+# window-function query had no isfinite() guard, so CL's one poisoned
+# partition overflowed STDDEV_SAMP and aborted the ENTIRE query
+# ("STDDEV_SAMP is out of range!"), silently skipping outlier detection
+# for all 639 Layer 1 symbols in the same run, not just CL (QV-OUT-01,
+# fixed with an isfinite(log_return) filter). Separately, the same NaN
+# propagated into OHLCVProcessor._flag_is_clean()'s mean_/std_ (computed
+# from the full column), making `std_ and std_ > 0` silently False for
+# CL's ENTIRE history -- no exception, no log line -- since April 2020
+# (OP-LR-01, fixed in both _flag_is_clean() and _flag_is_clean_4h() by
+# computing the baseline from is_finite() log_return values only).
+#
+# NOT fixed this pass, left for Ovi: coverage_check at 92.8% (<95%
+# required). Root cause confirmed empirically (NOT the backfill-catchup
+# theory floated mid-session) -- of 45 missing Layer 1 symbols, 4
+# individually verified via web search: MRO and PXD permanently delisted
+# (ConocoPhillips/ExxonMobil all-stock mergers, Nov 2024/May 2024), EA
+# delisted 4 Aug 2026 (PIF/Silver Lake/Affinity $55B take-private, just
+# 3 weeks before this run), SQ renamed to XYZ (21 Jan 2025, still trades,
+# ticker changed not delisted). Remaining 41 symbols pattern-match the
+# same 2023-2025 M&A wave (energy sector consolidation, biotech/SPAC-era
+# names) but are NOT individually verified. This is a stale-universe
+# problem, not a code bug -- registered as KNOWN_RISKS.md RISK-26,
+# decision pending Ovi: manual verification of the remaining 41 vs. an
+# automated ticker-liveness preflight check (structural fix, catches
+# future delistings too) vs. some combination.
 # 2026-08-31 fixed in one pass, all reported by Ovi from live-test log
 # evidence (2026-08-31-AAPL-1D.txt, 2026-08-31-idx-1H.txt) plus an
 # operational report for the third.
