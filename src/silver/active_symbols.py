@@ -94,7 +94,8 @@ THRESHOLDS: dict[str, dict[str, float | int]] = {
         "min_days":          20,             # AS-3: 20 trading days (not 30)
     },
     "idx": {
-        "dollar_volume_20d": 5_000_000_000,  # IDR 5B/day — IDX liquidity unit
+        "dollar_volume_20d": 50_000_000_000, # UPD 2026-09-05 (Ovi): IDR 50B/day
+                                              # — was IDR 5B/day. IDX liquidity unit.
         "price_floor":       50.0,
         "min_days":          20,             # AS-3: 20 trading days
     },
@@ -355,6 +356,22 @@ class ActiveSymbolsResolver:
                 .unique() deduplicates in streaming fashion, .collect() materialises
                 only the small symbol set — O(n_distinct_symbols) RAM usage.
         hive_partitioning=False: consistent with AS-11 and _run_query() convention.
+
+        FIX AS-13 [chat thread, 5 Sep 2026]: this previously counted/warned
+        on EVERY symbol absent from mkt_map — but mkt_map is Layer 1-only
+        by this module's own design (GMI-CTX-001 extracted Layer 2 to
+        context_anchors.py). Live confirmation (5 Sep 2026): the reported
+        count (58) exactly matched silver_context_anchors's own resolved
+        count, every run — this metric was permanently reporting the full,
+        unchanging Layer 2 universe as "unknown", making it useless as a
+        signal (a genuine new orphan bumping 58->59 is easy to miss; 0->1
+        is not). Also cited a stale filename — instruments.yaml was split
+        into instruments_identity.yaml / instruments_taxonomy.yaml
+        (ADR-027) and no longer exists. Now cross-references against
+        get_loader().all_context(include_deferred=True) so the WARNING/
+        count reflects only symbols that are neither Layer 1 nor Layer 2 —
+        genuinely unregistered data. Layer 2 overlap is still logged, at
+        DEBUG (expected, not actionable, not counted).
         """
         try:
             # FIX F-AS-01 [P2]: lazy scan — only 'symbol' column loaded into RAM
@@ -366,11 +383,35 @@ class ActiveSymbolsResolver:
             )
             silver_syms = set(silver_syms_df["symbol"].to_list())
             known_syms  = set(mkt_map.keys())
-            orphans     = sorted(silver_syms - known_syms)
+
+            # FIX AS-13: Layer 2 lookup is best-effort — a failure here must
+            # not abort the orphan audit itself, only fall back to "no
+            # Layer 2 symbols known" (equivalent to pre-fix behavior for
+            # this subset only).
+            try:
+                context_syms = {
+                    i.symbol for i in get_loader().all_context(include_deferred=True)
+                }
+            except Exception:
+                context_syms = set()
+
+            unmatched  = silver_syms - known_syms
+            layer2_ovl = sorted(unmatched & context_syms)
+            orphans    = sorted(unmatched - context_syms)
+
+            if layer2_ovl:
+                logger.debug(
+                    f"[ActiveSymbols] {len(layer2_ovl)} Layer 2 context anchors "
+                    f"present in Silver market_ohlcv (expected — out of scope "
+                    f"for this Layer 1 resolver, not a data-quality issue): "
+                    f"{layer2_ovl[:10]}" + (" ..." if len(layer2_ovl) > 10 else "")
+                )
             if orphans:
                 logger.warning(
-                    f"[ActiveSymbols] {len(orphans)} unknown-market symbols excluded "
-                    f"(not in instruments.yaml): {orphans[:10]}"
+                    f"[ActiveSymbols] {len(orphans)} genuinely unknown symbols "
+                    f"excluded (absent from both Layer 1 market_map and Layer 2 "
+                    f"context registry — instruments_identity.yaml / "
+                    f"instruments_taxonomy.yaml): {orphans[:10]}"
                     + (" ..." if len(orphans) > 10 else "")
                 )
             return len(orphans)

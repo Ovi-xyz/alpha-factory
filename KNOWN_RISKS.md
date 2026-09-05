@@ -2372,6 +2372,23 @@ new tests, Infinity and NaN cases both isolated, unaffected baseline
 confirmed unchanged). 1558 → 1567 passed, 0 regressions, aggregate
 coverage 88.22% (gate ≥80%).
 
+### Amendment — 5 Sep 2026 (FIX QV-OUT-02)
+
+The fix above closed PASS 1's (`_check_outliers()`) own cross-symbol
+detection query only. It did not touch PASS 2 (`_flag_outliers_in_file()`,
+the per-symbol writeback helper from GAP-4 — already in the codebase
+three months before QV-OUT-01), which recomputes `mean_lr`/`std_lr`
+independently with no equivalent guard. Confirmed live (5 Sep 2026
+`silver_validate` run): CL's writeback still crashed with the identical
+`STDDEV_SAMP is out of range!` error, because CL has genuine z-score
+outliers elsewhere in its 10Y history — which is what makes PASS 1 call
+PASS 2 for CL at all — in addition to the 2020 event. Closed via FIX
+QV-OUT-02: `FILTER (WHERE isfinite(log_return)) OVER (...)` on both
+writeback queries (`FILTER`, not `WHERE`, so the non-finite row is not
+dropped from Silver — only excluded from the statistic). See CHANGELOG
+v1.17.8. This entry's original "FIXED (2 Sep 2026)" status covered PASS
+1 only; the writeback path is closed as of v1.17.8.
+
 ---
 
 ## RISK-28: Layer 1 instrument universe was stale — all 45 `coverage_check` gap symbols resolved (36 dead, 9 removed as stopgap/insufficient-evidence) — RESOLVED (fixed)
@@ -2522,7 +2539,19 @@ Ovi (which renames get a new instrument entry, if any).
 
 ---
 
-*Last updated: v1.17.7 — RISK-28 fully closed (Ovi, 3 Sep 2026): Ovi's
+*Last updated: v1.17.8 — silver_validate log audit (Ovi, 5 Sep 2026):
+four bugs found and fixed via live-code reads plus a live-data
+diagnostic query (not assumption) — FIX QV-OUT-02 closes RISK-27's
+residual writeback-path gap (see amendment above), FIX QV-L2-PS-01
+mirrors RISK-26's is_clean=TRUE scoping onto the Layer 2 sibling check
+(959 reported violations confirmed 100% already-quarantined noise via
+direct query against all 58 Layer 2 Silver files), FIX QV-MSG-01 fixes
+a self-contradicting log message, FIX AS-13 stops `unknown_market_count`
+from permanently reporting the full 58-symbol Layer 2 universe as
+"unknown." Also found and fixed a pre-existing test bug (wrong market
+directory name made two RISK-27 regression tests vacuous since they
+were written). 1567 → 1574 passed, 0 regressions.
+Prior entry: v1.17.7 — RISK-28 fully closed (Ovi, 3 Sep 2026): Ovi's
 explicit instruction ("resolve the untouched tickers with removal
 approach") closed the two buckets v1.17.6 had deliberately left open —
 6 confirmed-active symbols removed as a stopgap over an undiagnosed

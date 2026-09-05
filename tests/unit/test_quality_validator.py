@@ -423,7 +423,7 @@ class TestOutlierSurvivesNonFiniteLogReturn:
         monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
 
         cl_df = self._make_ohlcv("CL", nonfinite_idx=100, nonfinite_value=float("inf"))
-        self._write_symbol_1d(tmp_path, "CL", "commodity_trading", cl_df)
+        self._write_symbol_1d(tmp_path, "CL", "commodity", cl_df)
 
         validator = qv_mod.QualityValidator()
         result = validator._check_outliers(date(2025, 1, 1))
@@ -434,7 +434,7 @@ class TestOutlierSurvivesNonFiniteLogReturn:
         monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
 
         cl_df = self._make_ohlcv("CL", nonfinite_idx=100, nonfinite_value=float("nan"))
-        self._write_symbol_1d(tmp_path, "CL", "commodity_trading", cl_df)
+        self._write_symbol_1d(tmp_path, "CL", "commodity", cl_df)
 
         validator = qv_mod.QualityValidator()
         assert validator._check_outliers(date(2025, 1, 1)) is True
@@ -451,7 +451,7 @@ class TestOutlierSurvivesNonFiniteLogReturn:
 
         cl_df    = self._make_ohlcv("CL", nonfinite_idx=100, seed=1)
         tsla_df  = self._make_ohlcv("TSLA", outlier_idx=75, seed=2)
-        cl_path   = self._write_symbol_1d(tmp_path, "CL", "commodity_trading", cl_df)
+        cl_path   = self._write_symbol_1d(tmp_path, "CL", "commodity", cl_df)
         tsla_path = self._write_symbol_1d(tmp_path, "TSLA", "us_stocks", tsla_df)
 
         validator = qv_mod.QualityValidator()
@@ -612,3 +612,163 @@ class TestOutlierWriteback:
         assert set(dirty["log_return"].to_list()) == {
             df["log_return"][5], 12.0
         }
+
+
+class TestOutlierWritebackSurvivesNonFiniteLogReturn:
+    """
+    FIX QV-OUT-02 [chat thread, 5 Sep 2026]: FIX QV-OUT-01 (2 Sep 2026) added
+    an isfinite(log_return) guard to _check_outliers()'s PASS 1 cross-symbol
+    detection query, but PASS 2's writeback helper (_flag_outliers_in_file(),
+    GAP-4) recomputes mean_lr/std_lr independently and had no equivalent
+    guard. Live confirmation (5 Sep 2026 silver_validate run): CL's writeback
+    still crashed with the identical "STDDEV_SAMP is out of range!" error
+    QV-OUT-01 was meant to eliminate, because CL has >=1 genuine z-score
+    outlier elsewhere in its 10Y history (which is what makes PASS 1 call
+    _flag_outliers_in_file() for CL at all) in addition to its 2020-04-20/21
+    non-finite log_return. This reproduces that exact two-condition scenario
+    end-to-end, and pins the crash directly at the writeback helper too.
+    """
+
+    @staticmethod
+    def _write_symbol_1d(base_dir, symbol, market, df):
+        from pathlib import Path
+        out_dir = Path(base_dir) / market / f"symbol={symbol}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{symbol}_1D_silver.parquet"
+        df.write_parquet(out_path)
+        return out_path
+
+    def _make_ohlcv(self, symbol, n=250, outlier_idx=None, nonfinite_idx=None,
+                     nonfinite_value=float("inf"), seed=0):
+        import datetime
+        import numpy as np
+        import polars as pl
+
+        rng  = np.random.default_rng(seed)
+        base = datetime.datetime(2023, 1, 1, tzinfo=datetime.timezone.utc)
+        rows = []
+        for i in range(n):
+            lr = float(rng.normal(0, 0.01))
+            rows.append({
+                "symbol": symbol, "timestamp": base + datetime.timedelta(days=i),
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                "volume": 1_000_000, "log_return": lr, "is_clean": True,
+            })
+        if outlier_idx is not None:
+            rows[outlier_idx]["log_return"] = 12.0
+        if nonfinite_idx is not None:
+            rows[nonfinite_idx]["log_return"] = nonfinite_value
+        return pl.DataFrame(rows)
+
+    def test_writeback_does_not_raise_when_same_symbol_has_both(
+        self, tmp_path, monkeypatch
+    ):
+        """Core regression: CL has a real outlier (triggers the PASS 1 ->
+        PASS 2 call) AND a non-finite bar (previously overflowed PASS 2's
+        own STDDEV). Must not raise, and the genuine outlier must still be
+        flagged; the non-finite bar itself must be left untouched."""
+        import polars as pl
+        import src.silver.quality_validator as qv_mod
+
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+        cl_df = self._make_ohlcv("CL", outlier_idx=75, nonfinite_idx=100, seed=3)
+        path = self._write_symbol_1d(tmp_path, "CL", "commodity", cl_df)
+
+        validator = qv_mod.QualityValidator()
+        result = validator._check_outliers(date(2025, 1, 1))  # pre-fix: raised here
+
+        assert result is True
+        on_disk = pl.read_parquet(path)
+        assert on_disk.height == cl_df.height, "No row may be dropped by the rewrite"
+        flagged = on_disk.filter(~pl.col("is_clean"))
+        assert flagged.height == 1, "Exactly the genuine outlier bar (idx 75) must flip"
+        # OHLCVProcessor owns flagging the non-finite bar, not this z-score
+        # rule — it must survive this specific check untouched.
+        assert bool(on_disk[100, "is_clean"]) is True
+
+    def test_direct_writeback_call_does_not_raise(self, tmp_path, monkeypatch):
+        """Exercises _flag_outliers_in_file() directly (bypassing PASS 1's
+        own affected-symbol selection) to pin the exact pre-fix crash site."""
+        import src.silver.quality_validator as qv_mod
+
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+        cl_df = self._make_ohlcv("CL", outlier_idx=75, nonfinite_idx=100, seed=4)
+        self._write_symbol_1d(tmp_path, "CL", "commodity", cl_df)
+
+        validator = qv_mod.QualityValidator()
+        # Pre-fix: duckdb.Error "STDDEV_SAMP is out of range!" raised here.
+        flipped = validator._flag_outliers_in_file("CL", threshold=4.0)
+        assert flipped == 1
+
+    def test_nan_variant_also_survives_writeback(self, tmp_path, monkeypatch):
+        """Same scenario with NaN instead of Inf — both are non-finite."""
+        import src.silver.quality_validator as qv_mod
+
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+        cl_df = self._make_ohlcv(
+            "CL", outlier_idx=75, nonfinite_idx=100,
+            nonfinite_value=float("nan"), seed=5,
+        )
+        self._write_symbol_1d(tmp_path, "CL", "commodity", cl_df)
+
+        validator = qv_mod.QualityValidator()
+        flipped = validator._flag_outliers_in_file("CL", threshold=4.0)
+        assert flipped == 1
+
+
+class TestContextPriceSanityIsCleanScoping:
+    """
+    FIX QV-L2-PS-01 [chat thread, 5 Sep 2026]: _check_context_price_sanity()
+    never received FIX QV-PS-01's (2 Sep 2026) is_clean=TRUE scoping when
+    that fix was applied to its Layer 1 sibling (_check_price_sanity) — it
+    was re-counting every OHLC violation regardless of whether
+    OHLCVProcessor had already correctly flagged it is_clean=False at
+    Silver-write time. Live diagnostic query (5 Sep 2026, all 58 Layer 2 1D
+    files) confirmed: of 959 reported violations, ALL 959 were already
+    is_clean=False (0 with is_clean=TRUE), 94% concentrated in the 7
+    context_dollar_basket FX legs. This scopes the check the same way
+    QV-PS-01 did for Layer 1: verify the self-flagging invariant, don't
+    re-litigate noise already correctly handled.
+    """
+
+    @staticmethod
+    def _write(path, symbol, timestamps, **overrides):
+        import polars as pl
+        n = len(timestamps)
+        base = {
+            "symbol": [symbol] * n, "timestamp": timestamps,
+            "open": [100.0] * n, "high": [105.0] * n, "low": [95.0] * n,
+            "close": [102.0] * n, "volume": [1_000_000] * n,
+            "is_clean": [True] * n,
+        }
+        base.update(overrides)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(base).write_parquet(path)
+
+    def test_already_flagged_violation_no_longer_fails_check(self, tmp_path, monkeypatch):
+        """A Layer 2 row with high < low but is_clean already False
+        (OHLCVProcessor did its job) must NOT trip this WARNING check —
+        pre-fix this incorrectly returned False."""
+        import src.silver.quality_validator as qv_mod
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+        self._write(
+            tmp_path / "context" / "symbol=KRW" / "KRW_1D_silver.parquet",
+            "KRW", [date(2026, 6, 20)],
+            high=[10.0], low=[20.0], is_clean=[False],
+        )
+        qv = qv_mod.QualityValidator()
+        assert qv._check_context_price_sanity(date(2026, 6, 20)) is True
+
+    def test_escaped_violation_still_fails_check(self, tmp_path, monkeypatch):
+        """A Layer 2 row with high < low AND is_clean still True (the
+        self-flagging invariant itself broken) must still fail — the fix
+        narrows scope, it does not disable the check."""
+        import src.silver.quality_validator as qv_mod
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+        self._write(
+            tmp_path / "context" / "symbol=VIX" / "VIX_1D_silver.parquet",
+            "VIX", [date(2026, 6, 20)],
+            high=[10.0], low=[20.0], is_clean=[True],
+        )
+        qv = qv_mod.QualityValidator()
+        assert qv._check_context_price_sanity(date(2026, 6, 20)) is False

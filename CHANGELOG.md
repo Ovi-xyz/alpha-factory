@@ -1,5 +1,100 @@
 # CHANGELOG — Data Platform
 
+## v1.17.8 — Silver Validate Log Audit: 4 Bug Diperbaiki + IDR Threshold + Broad Dollar Basket Scoping (September 2026)
+
+Debug atas log `silver_validate`/`silver_active_symbols`/`silver_context_anchors`
+run 2026-09-05 04:54 — 4 anomali WARNING diinvestigasi terhadap live code
+(bukan asumsi dari teks log), 3 di antaranya bug nyata dengan root cause
+dikonfirmasi empiris. `gap_detection`/`context_gap_detection` tidak
+menunjukkan asimetri kode apapun, tidak ditindaklanjuti.
+
+**1. FIX QV-OUT-02 — outlier writeback masih crash `STDDEV_SAMP` pasca
+QV-OUT-01.** `_check_outliers()` PASS 1 (2 Sep 2026, QV-OUT-01) sudah
+memfilter `isfinite(log_return)` sebelum kalkulasi baseline, tapi
+`_flag_outliers_in_file()` PASS 2 (writeback per-symbol, GAP-4 — sudah
+ada sejak v1.7.5, 3 bulan sebelum QV-OUT-01) menghitung ulang
+`mean_lr`/`std_lr` secara independen tanpa guard yang sama. Live-test (5
+Sep 2026) mengonfirmasi: CL crash lagi persis "STDDEV_SAMP is out of
+range!" karena CL punya >=1 outlier genuine di history 10Y-nya (yang
+membuat PASS 1 memanggil PASS 2 untuk CL sama sekali) selain non-finite
+log_return 2020-04-20/21-nya. Fix: `FILTER (WHERE isfinite(log_return))`
+pada kedua window aggregate (`to_flip` COUNT query dan `copy_sql` COPY
+query) — FILTER dipilih di atas WHERE supaya baris non-finite TIDAK ikut
+ter-drop dari output (diverifikasi empiris dengan query DuckDB
+standalone sebelum diimplementasikan). 3 test baru
+(`TestOutlierWritebackSurvivesNonFiniteLogReturn`).
+
+**Efek samping: 2 test lama ternyata vacuous sejak ditulis.**
+`TestOutlierSurvivesNonFiniteLogReturn` (kelas test QV-OUT-01 sendiri)
+menulis symbol CL ke direktori `commodity_trading/` — nama market yang
+TIDAK PERNAH cocok dengan nama real (`commodity`, dikonfirmasi via
+`layer1_markets()`). Akibatnya `layer1_globs()` selalu mengembalikan `[]`
+untuk skenario CL-saja, `_check_outliers()` short-circuit via jalur "no
+Layer 1 data yet", dan assertion `result is True` lolos secara
+tautologis (fungsi ini SELALU return True) tanpa pernah benar-benar
+menjalankan query yang diklaim diuji. Ditemukan saat menulis test baru
+dengan nama direktori yang benar. Diperbaiki: 3 baris
+`"commodity_trading"` → `"commodity"` di kelas test lama juga — sekarang
+benar-benar exercise kode aslinya.
+
+**2. FIX QV-L2-PS-01 — `context_price_sanity` re-hitung noise yang
+sudah dikarantina.** `_check_context_price_sanity()` (Layer 2) tidak
+pernah menerima scoping `is_clean = TRUE` yang QV-PS-01 (2 Sep 2026)
+terapkan ke sibling Layer 1-nya. Diagnostic query live (5 Sep 2026,
+seluruh 58 file `*_1D_silver.parquet` Layer 2 di-copy ke sandbox via
+Filesystem MCP dan di-query DuckDB langsung, atas instruksi eksplisit
+Ovi untuk verifikasi live-data sebelum decide) mengonfirmasi: dari 959
+baris "violation", SEMUA 959 sudah `is_clean=False`; 0 baris escaped.
+Konsentrasi 94% (900/959) persis di 7 leg `context_dollar_basket` (KRW
+271, IDR 184, TWD 144, HKD 86, SGD 80, THB 72, NOK 63) — seluruhnya
+sudah beranotasi "ticker convention unconfirmed live" di
+`instruments_taxonomy.yaml`, pola sama dengan retail-feed OHLC noise
+yang QV-PS-01 temukan di forex Layer 1. Fix: tambah `AND is_clean =
+TRUE`, persis pola QV-PS-01. Post-fix, query yang sama menghasilkan 0
+baris. 2 test baru (`TestContextPriceSanityIsCleanScoping`).
+
+**3. FIX QV-MSG-01 — pesan "All checks passed (12/15)"
+self-contradicting.** `run()` selalu menulis "All checks passed (N/M)"
+bahkan saat N < M (WARNING check gagal) — bisa salah dibaca sebagai
+all-green saat di-skim. Diperbaiki: pesan sekarang membedakan "All N
+checks passed" (N==M) dari "CRITICAL gate passed — N/M checks green"
+(N<M, gate tetap lolos karena tidak ada CRITICAL failure, tapi tidak
+mengklaim "all").
+
+**4. FIX AS-13 — `unknown_market_count` permanent-58, referensi file
+basi.** `_audit_unknown_markets()` menghitung SEMUA symbol yang absen
+dari `mkt_map` (Layer 1-only by design) sebagai "unknown... not in
+instruments.yaml" — file yang sudah tidak ada sejak ADR-027 (dipecah
+jadi `instruments_identity.yaml`/`instruments_taxonomy.yaml`). Live log
+mengonfirmasi count (58) persis sama dengan jumlah `silver_context_anchors`
+setiap hari — metric ini secara permanen melaporkan seluruh universe
+Layer 2 sebagai "unknown", membuatnya tidak berguna sebagai sinyal
+(orphan baru yang menaikkan 58→59 mudah terlewat; 0→1 tidak). Fix:
+cross-reference terhadap `get_loader().all_context(include_deferred=True)`
+(lookup Layer 2 dibungkus try/except sendiri — kegagalan lookup tidak
+boleh menggagalkan audit orphan itu sendiri); symbol yang genuinely
+unknown dipisahkan dari overlap Layer 2 yang expected (di-log level
+DEBUG, tidak dihitung). 2 test baru (`TestAS10UnknownMarket`).
+
+**5. Config-only, bukan bug fix.** `THRESHOLDS["idx"]["dollar_volume_20d"]`:
+5.000.000.000 → 50.000.000.000 IDR (instruksi eksplisit Ovi, diterapkan
+lebih awal di sesi yang sama). ADR-049 (`instruments_taxonomy.yaml`,
+komentar saja): Layer-1-reuse currency set untuk future
+`compute_broad_dollar()` diperluas dari 6 ke 7 dengan penambahan
+NZD_USD, mengikuti pola reuse-from-Layer-1 yang sama dengan
+AUD_USD/USD_CAD — tidak ada perubahan kode karena CrossAssetEngine
+(Cycle 4) belum dibangun, masih terkunci Gate 1.
+
+Verifikasi: `ast.parse` bersih di semua file dimodifikasi, full suite
+**1574 passed / 0 failed / 0 error** (1567 baseline + 7 test baru),
+`python scripts/validate_instruments.py` → "VALIDATION PASSED — 654
+symbols (Layer 1=594, Layer 2=60), no errors." (tidak berubah — ADR-049
+komentar saja). PATCH bump (bug fix + config tuning, tidak ada
+kapabilitas baru). Total: **3 file source dimodifikasi**
+(`quality_validator.py`, `active_symbols.py`, `instruments_taxonomy.yaml`)
+| **2 file test dimodifikasi** (7 test baru + 3 baris market-name lama
+diperbaiki) | **1574 passed / 0 failed / 0 error**.
+
 ## v1.17.7 — RISK-28 Fully Closed: 9 Simbol Sisa Dihapus atas Instruksi Eksplisit Ovi (September 2026)
 
 Instruksi Ovi langsung, melanjutkan v1.17.6: "Resolve the untouched

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.17.7"
+version = "1.17.8"
 # FIX (chat thread, 3 Sep 2026): RISK-28 fully closed. Ovi's explicit
 # follow-up instruction: "Resolve the untouched tickers with removal
 # approach." Removes the two buckets v1.17.6 (GMI-VAL-004) deliberately

@@ -493,6 +493,59 @@ class TestAS10UnknownMarket:
         df = resolver.load_full(date(2025, 2, 28))
         assert df["unknown_market_count"][0] == 0
 
+    def test_layer2_symbol_not_counted_as_unknown(self, tmp_path, monkeypatch):
+        """FIX AS-13 [chat thread, 5 Sep 2026]: a Layer 2 context anchor
+        present in the same Silver market_ohlcv bucket (e.g. DXY) must NOT
+        bump unknown_market_count — it's expected, out-of-scope-for-Layer-1
+        data (mkt_map is Layer 1 only by design), not an orphan. Pre-fix,
+        this was permanently reporting the full Layer 2 universe (58 in
+        production) as 'unknown' every single run."""
+        df = pl.DataFrame({
+            "symbol": ["AAPL", "DXY"],
+            "timestamp": [date(2025, 1, 2), date(2025, 1, 2)],
+        })
+        silver_path = tmp_path / "silver_1d" / "data.parquet"
+        silver_path.parent.mkdir(parents=True)
+        df.write_parquet(silver_path)
+
+        fake_dxy = MagicMock()
+        fake_dxy.symbol = "DXY"
+        with patch("src.silver.active_symbols.get_loader") as mock_loader:
+            mock_loader.return_value.all_context.return_value = [fake_dxy]
+            resolver = ActiveSymbolsResolver()
+            count = resolver._audit_unknown_markets(
+                str(silver_path.parent / "*.parquet"),
+                date(2025, 1, 2),
+                mkt_map={"AAPL": "us_stocks"},
+            )
+        assert count == 0, "DXY is a known Layer 2 anchor, not a genuine orphan"
+
+    def test_genuine_orphan_still_counted_alongside_layer2_symbol(
+        self, tmp_path, monkeypatch
+    ):
+        """FIX AS-13: a real orphan alongside a Layer 2 anchor — only the
+        genuine orphan should be counted; the Layer 2 anchor must not
+        inflate (or hide within) the count."""
+        df = pl.DataFrame({
+            "symbol": ["AAPL", "DXY", "TYPO_SYM"],
+            "timestamp": [date(2025, 1, 2)] * 3,
+        })
+        silver_path = tmp_path / "silver_1d" / "data.parquet"
+        silver_path.parent.mkdir(parents=True)
+        df.write_parquet(silver_path)
+
+        fake_dxy = MagicMock()
+        fake_dxy.symbol = "DXY"
+        with patch("src.silver.active_symbols.get_loader") as mock_loader:
+            mock_loader.return_value.all_context.return_value = [fake_dxy]
+            resolver = ActiveSymbolsResolver()
+            count = resolver._audit_unknown_markets(
+                str(silver_path.parent / "*.parquet"),
+                date(2025, 1, 2),
+                mkt_map={"AAPL": "us_stocks"},
+            )
+        assert count == 1, "Only TYPO_SYM is a genuine orphan"
+
     def test_null_market_guard_in_query(self):
         """AS-10: query must filter m.market IS NOT NULL."""
         assert "m.market IS NOT NULL" in _RESOLVE_QUERY, (

@@ -684,6 +684,18 @@ context:
   # reclassification rationale (was Layer 1 USD_IDR). Basket-input
   # completion is now 7/7 within a single group, not 6+1 split across
   # Layer 1/Layer 2.
+  # UPD ADR-049 (chat thread, 5 Sep 2026, per Ovi's instruction): the
+  # Layer-1-reuse currency set referenced above — the 6 pairs sourced
+  # directly from Layer 1 forex rather than duplicated into this group
+  # (EUR_USD, USD_JPY, GBP_USD, USD_CAD, USD_CHF, AUD_USD) — is extended
+  # to 7 with NZD_USD. NZD_USD already exists as an always-on Layer 1
+  # forex pair (same as AUD_USD/USD_CAD before it) and will be reused the
+  # same way when compute_broad_dollar() is implemented, not duplicated
+  # here as an 8th dollar_basket instrument. compute_broad_dollar() itself
+  # remains unbuilt (CrossAssetEngine Cycle 4, still gated on Gate 1) —
+  # this is a scoping decision for that future implementation, not a code
+  # change today. NZD_USD's numeric basket weight is a Gate 1 concern,
+  # same as the existing 6/7 legs.
   dollar_basket:
     _meta:
       subcategory_id: context_dollar_basket

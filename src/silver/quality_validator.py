@@ -527,6 +527,21 @@ class QualityValidator:
 
         con = duckdb.connect()
 
+        # FIX QV-OUT-02 [chat thread, 5 Sep 2026]: FIX QV-OUT-01 (2 Sep 2026)
+        # added an isfinite(log_return) guard to _check_outliers()'s PASS 1
+        # cross-symbol detection query, but this PASS 2 per-symbol writeback
+        # recomputes mean_lr/std_lr independently and had NO equivalent
+        # guard — confirmed live (5 Sep 2026 silver_validate run): CL's
+        # writeback crashed with the identical "STDDEV_SAMP is out of
+        # range!" error QV-OUT-01 was meant to eliminate, because CL has
+        # >=1 genuine z-score outlier elsewhere in its 10Y history (which
+        # is what makes PASS 1 call this method for CL at all) alongside
+        # its 2020-04-20/21 non-finite log_return. FILTER (not WHERE) is
+        # used in the window aggregates so the non-finite row itself is
+        # NOT dropped from the output — only its contribution to
+        # mean_lr/std_lr is excluded; it is left exactly as-is by this
+        # method (OHLCVProcessor owns flagging it, not this z-score check).
+        #
         # Count rows that would actually flip (outlier AND currently is_clean=True).
         # Skip the write entirely if nothing would change — avoids a no-op
         # rewrite (and its atomic-replace cost) for files already flagged by
@@ -536,12 +551,13 @@ class QualityValidator:
             SELECT COUNT(*) FROM (
                 SELECT
                     is_clean,
-                    AVG(log_return)    OVER () AS mean_lr,
-                    STDDEV(log_return) OVER () AS std_lr,
+                    AVG(log_return)    FILTER (WHERE isfinite(log_return)) OVER () AS mean_lr,
+                    STDDEV(log_return) FILTER (WHERE isfinite(log_return)) OVER () AS std_lr,
                     log_return
                 FROM read_parquet($file)
             )
             WHERE is_clean = TRUE
+              AND isfinite(log_return)
               AND std_lr > 0
               AND ABS((log_return - mean_lr) / std_lr) > $threshold
             """,
@@ -565,14 +581,15 @@ class QualityValidator:
                 "  SELECT * EXCLUDE (mean_lr, std_lr) REPLACE ("
                 "    (CASE"
                 "      WHEN std_lr > 0"
+                "       AND isfinite(log_return)"
                 "       AND ABS((log_return - mean_lr) / std_lr) > $threshold"
                 "      THEN FALSE ELSE is_clean"
                 "     END) AS is_clean"
                 "  )"
                 "  FROM ("
                 "    SELECT *,"
-                "           AVG(log_return)    OVER () AS mean_lr,"
-                "           STDDEV(log_return) OVER () AS std_lr"
+                "           AVG(log_return)    FILTER (WHERE isfinite(log_return)) OVER () AS mean_lr,"
+                "           STDDEV(log_return) FILTER (WHERE isfinite(log_return)) OVER () AS std_lr"
                 "    FROM read_parquet($file)"
                 "  )"
                 ") TO '"
@@ -736,7 +753,26 @@ class QualityValidator:
 
     def _check_context_price_sanity(self, run_date: date) -> bool:
         """Layer 2 analogue of _check_price_sanity. OHLC ordering is a
-        universal physical invariant regardless of instrument type."""
+        universal physical invariant regardless of instrument type.
+
+        FIX QV-L2-PS-01 [chat thread, 5 Sep 2026]: this check never received
+        FIX QV-PS-01's (2 Sep 2026) is_clean=TRUE scoping when that fix was
+        applied to its Layer 1 sibling — it was re-counting every OHLC
+        violation regardless of whether OHLCVProcessor had already correctly
+        flagged it is_clean=False at Silver-write time, same duplication
+        QV-PS-01 eliminated for Layer 1. Live diagnostic query (5 Sep 2026,
+        all 58 Layer 2 1D files) confirmed: of 959 reported violations,
+        ALL 959 were already is_clean=False (0 with is_clean=TRUE), 94%
+        concentrated in the 7 context_dollar_basket FX legs (KRW 271, IDR
+        184, TWD 144, HKD 86, SGD 80, THB 72, NOK 63) — each already
+        annotated in instruments_taxonomy.yaml as 'ticker convention
+        unconfirmed live', consistent with the same class of retail-feed
+        OHLC noise QV-PS-01 found concentrated in Layer 1 forex. Scoping to
+        is_clean=TRUE makes this check verify the self-flagging invariant
+        (any violation escaping quarantine) rather than re-litigate noise
+        already correctly handled — confirmed zero regression risk since
+        the escaped-violation count was empirically confirmed to be 0.
+        """
         try:
             con = duckdb.connect()
             glob = context_glob(SILVER_OHLCV_PATH, "*_1D_silver.parquet")
@@ -746,9 +782,10 @@ class QualityValidator:
                 """
                 SELECT COUNT(*) AS violations
                 FROM read_parquet($glob, hive_partitioning=true)
-                WHERE high < low
+                WHERE (high < low
                    OR open < low OR open > high
-                   OR close < low OR close > high
+                   OR close < low OR close > high)
+                  AND is_clean = TRUE
                 """,
                 {"glob": glob},
             ).fetchone()
@@ -756,7 +793,10 @@ class QualityValidator:
             if result and result[0] > 0:
                 self._issues.append({
                     "check":  "context_price_sanity",
-                    "detail": f"{result[0]} Layer 2 rows violate OHLC constraints"
+                    "detail": f"{result[0]} Layer 2 rows violate OHLC constraints "
+                              f"and were NOT caught by OHLCVProcessor's own "
+                              f"self-flagging (is_clean still True) — "
+                              f"FIX QV-L2-PS-01"
                 })
                 return False
         except Exception as e:
@@ -1016,7 +1056,19 @@ def run(run_date: date) -> None:
         raise QualityGateError(critical_failed)
 
     passed_count = sum(1 for v in results.values() if v)
-    logger.success(
-        f"[silver_validate] All checks passed ({passed_count}/{len(results)}) "
-        f"for {run_date}"
-    )
+    total_count  = len(results)
+    # FIX QV-MSG-01 [chat thread, 5 Sep 2026]: previously this always read
+    # "All checks passed (N/M)" even when N < M (WARNING checks failed) —
+    # self-contradicting wording an operator could misread as full green on
+    # a skim. What's actually true at this point is narrower and precise:
+    # no CRITICAL check failed (QualityGateError would have been raised
+    # above otherwise). Say exactly that instead of "all".
+    if passed_count == total_count:
+        logger.success(
+            f"[silver_validate] All {total_count} checks passed for {run_date}"
+        )
+    else:
+        logger.success(
+            f"[silver_validate] CRITICAL gate passed — {passed_count}/{total_count} "
+            f"checks green for {run_date} (see WARNING lines above for the rest)"
+        )
