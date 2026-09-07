@@ -136,6 +136,7 @@ class IMFIngester(BronzeIngester):
                         source="imf",
                         domain="world_economic_outlook",
                         series_id=spec["name"],
+                        run_date=run_date,  # FIX GMI-BI-DATE-01
                     )
                     logger.info(
                         f"[IMF] {spec['id']} ({spec['name']}): {len(df)} rows"

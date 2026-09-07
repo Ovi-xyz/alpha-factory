@@ -119,6 +119,18 @@ def _bronze_treasury(run_date: date) -> None:
     TreasuryIngester().run(run_date)
 
 
+def _bronze_fred_daily(run_date: date) -> None:
+    """
+    FIX GMI-FRED-DAILY-01 — 9 cadence: daily FRED series (incl. 3 regime
+    inputs: VIXCLS, DEXUSEU, BAMLH0A0HYM2) had no reachable daily caller
+    once bronze_macro_weekly became Sunday-only (see that job's own
+    comment, 31 Aug 2026 fix). See src/bronze/fred_daily_ingester.py
+    docstring for the full root-cause account.
+    """
+    from src.bronze.fred_daily_ingester import run as fred_daily_run
+    fred_daily_run(run_date)
+
+
 def _bronze_eia(run_date: date) -> None:
     from src.bronze.eia_ingester import EIAIngester
     EIAIngester().run(run_date)
@@ -345,6 +357,30 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "depends_on":  [],
         "layer":       "bronze",
         "est_minutes": 2,
+    },
+
+    "bronze_fred_daily": {
+        # FIX GMI-FRED-DAILY-01 (Ovi, 7 Sep 2026) — split the full FRED
+        # sweep: 9 cadence: daily series (VIXCLS, DEXUSEU, BAMLH0A0HYM2,
+        # BAMLC0A0CM, DCOILWTICO, DEXJPUS, DFF, T5YIE, T10YIE) were
+        # permanently unreachable once bronze_macro_weekly's only caller
+        # of the full FRED registry became Sunday-only (31 Aug 2026 fix,
+        # see that entry's own comment) while fred_ingester.py's per-series
+        # cadence check requires Mon-Fri for "daily" series — a
+        # conjunction Sunday can never satisfy. Confirmed empirically:
+        # frozen at exactly 2 Bronze files each since 2026-08-31. 3 of the
+        # 9 are regime_input: true. No dependency on bronze_macro_weekly —
+        # GD §17.3.1: Bronze ingesters independent, and this job must run
+        # on the 6 days bronze_macro_weekly explicitly does not.
+        "description": (
+            "Ingest FRED daily-cadence series (VIXCLS, DEXUSEU, "
+            "BAMLH0A0HYM2 + 6 more) orphaned by bronze_macro_weekly's "
+            "Sunday-only schedule"
+        ),
+        "fn":          _bronze_fred_daily,
+        "depends_on":  [],
+        "layer":       "bronze",
+        "est_minutes": 1,
     },
 
     "bronze_eia": {
@@ -585,6 +621,7 @@ DAILY_SEQUENCE: list[str] = [
     "bronze_ohlcv_daily",
     "bronze_ohlcv_context_daily",  # ADD GMI-JR-002: Layer 2, independen dari Layer 1
     "bronze_treasury",
+    "bronze_fred_daily",  # FIX GMI-FRED-DAILY-01: 9 orphaned daily-cadence FRED series
     # bronze_finnhub, bronze_finnhub_sentiment DIHAPUS — ADR-043 (Finnhub full
     # retirement): sentiment 403 plan-tier gate, earnings/quotes never live.
     # bronze_macro_weekly DIHAPUS dari daily — weekly-only (FIX R-F03)

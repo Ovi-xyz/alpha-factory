@@ -16,7 +16,7 @@ Anti-patterns yang DILARANG di BronzeIngester:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -120,6 +120,7 @@ class BronzeIngester(ABC):
         source: str,
         domain: str,
         series_id: str,
+        run_date: date,
     ) -> Optional[Path]:
         """
         Write macro data dengan different Hive structure (no symbol partition).
@@ -134,15 +135,33 @@ class BronzeIngester(ABC):
         Check: if any file for this series_id exists with today's date prefix,
         skip writing. Each series should be written at most once per run_date.
 
+        FIX GMI-BI-DATE-01 (Ovi, 7 Sep 2026): date_prefix and the filename's
+        date component are now keyed off run_date, not datetime.utcnow().
+        Empirically confirmed (live-repo file metadata) that every routine
+        SOP run — executed 04:00-05:00 WIB per the documented daily/weekly
+        schedule — writes while UTC is still on the previous calendar day
+        (WIB = UTC+7). Every macro Bronze file was consequently dated one
+        day behind its true local run date, and the idempotency check
+        compared against the wrong day (visible in the wild as e.g.
+        "MORTGAGE30US already written for 20260905" during a run whose own
+        run_date was 2026-09-06). Same bug class GMI Decision Document v11
+        ADR-045 already flagged (but left unfixed) for write()'s analogous
+        check on the OHLCV path; write_macro() had its own independent copy
+        of the same mistake. run_date is reproducibility's single source of
+        truth throughout this pipeline (G1's IncFetchProtocol.resolve_start_date()
+        set this precedent) — datetime.utcnow() is retained ONLY for the
+        _ingested_at audit column and the filename's time-of-day suffix
+        (uniqueness only; carries no reproducibility meaning).
+
         Returns:
             Path to the file written, or None if skipped (idempotent).
         """
-        now = datetime.utcnow()
+        ingested_at = datetime.utcnow()
         path = self.BASE_PATH / "macro" / source / domain
         path.mkdir(parents=True, exist_ok=True)
 
-        # FIX BI-1: idempotency check — same logic as write()
-        date_prefix   = now.strftime("%Y%m%d")
+        # FIX BI-1 / FIX GMI-BI-DATE-01: idempotency keyed off run_date
+        date_prefix   = run_date.strftime("%Y%m%d")
         existing_today = list(path.glob(f"{series_id}_{date_prefix}*.parquet"))
         if existing_today:
             logger.debug(
@@ -152,11 +171,11 @@ class BronzeIngester(ABC):
             )
             return None
 
-        fname = path / f"{series_id}_{now.strftime('%Y%m%d_%H%M%S')}.parquet"
+        fname = path / f"{series_id}_{date_prefix}_{ingested_at.strftime('%H%M%S')}.parquet"
 
         df = df.with_columns([
             pl.lit(source).alias("_source"),
-            pl.lit(now.isoformat()).alias("_ingested_at"),
+            pl.lit(ingested_at.isoformat()).alias("_ingested_at"),
             pl.lit(series_id).alias("_series_id"),
         ])
 

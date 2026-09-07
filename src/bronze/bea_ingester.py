@@ -194,6 +194,7 @@ class BEAIngester(BronzeIngester):
                         source="bea",
                         domain="gdp_pce",
                         series_id=spec["name"],
+                        run_date=run_date,  # FIX GMI-BI-DATE-01
                     )
                     logger.info(f"[BEA] {spec['name']}: {len(df)} rows")
                 time.sleep(0.7)   # ~85 req/min — under 100 limit

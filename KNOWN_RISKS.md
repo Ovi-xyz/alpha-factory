@@ -2539,7 +2539,150 @@ Ovi (which renames get a new instrument entry, if any).
 
 ---
 
-*Last updated: v1.17.8 — silver_validate log audit (Ovi, 5 Sep 2026):
+## RISK-29: 9 `cadence: daily` FRED series (incl. 3 macro regime inputs) permanently unreachable via a scheduling deadlock; `write_macro()` dated every file one day behind local run_date; success counter masked both — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED (7 Sep 2026).** Opened this same day, from Ovi's
+manual finding: `data/bronze/macro/fred/volatility` had only 2 files,
+VIXCLS missing for 20260905. Requested: a precise check of
+`fred_ingester.py` and the `bronze_treasury` run log (2026-09-06
+04:51:48) for bug-clean/prime-condition status.
+
+**GD Reference:** GD §3.3.1 (FRED cadence), G1 Supplementary Design
+(`run_date` as reproducibility's single source of truth,
+`IncFetchProtocol.resolve_start_date()` precedent).
+
+### What the risk was
+
+Three independent bugs, found via live-repo reads (`fred_ingester.py`,
+`base_ingester.py`, `job_registry.py`, `treasury_ingester.py`,
+`config/fred_series.yaml`) plus direct `list_directory`/`get_file_info`
+inspection of `data/bronze/macro/fred/{volatility,credit}/` — none
+previously registered here.
+
+**1. Scheduling deadlock (GMI-FRED-DAILY-01).** `bronze_macro_weekly`
+— the only caller of `FREDIngester().run(run_date)` with no
+`series_filter` (the full registry) — got `run_on_weekdays: [6]`
+(Sunday-only) in the 31 Aug 2026 fix (see RISK-23 entry above,
+`job_registry.py`'s own comment on that entry). `fred_ingester.py`'s own
+per-series check requires `run_date.weekday()` in Mon-Fri for any
+`cadence: daily` series. Sunday can never satisfy Mon-Fri — an
+unconditional, permanent deadlock for any `cadence: daily` series not
+also covered by `treasury_ingester.py`'s own daily fetch
+(`TREASURY_FRED_SERIES`, 13 tenors). Affected: `VIXCLS`, `DEXUSEU`,
+`BAMLH0A0HYM2` (all 3 `regime_input: true` — vix_proxy, dxy_proxy,
+credit_spread), plus `BAMLC0A0CM`, `DCOILWTICO`, `DEXJPUS`, `DFF`,
+`T5YIE`, `T10YIE`. Confirmed empirically: `list_directory` on
+`data/bronze/macro/fred/volatility/` and `.../credit/` showed all 9
+frozen at exactly 2 files each (20260820 + 20260830 — the fix's own
+landing date), while `cadence: weekly` series in the same folders
+(M2SL, NFCI, STLFSI4, WALCL) kept updating through 20260905.
+
+**2. `write_macro()` UTC/run_date mismatch (GMI-BI-DATE-01).**
+`date_prefix` (idempotency key + filename date) came from
+`datetime.utcnow()`; `run_date` wasn't even a parameter. SOP runs
+04:00-05:00 WIB (UTC+7) — UTC is still on the previous calendar day for
+that entire window, which is the routine daily case, not an edge case.
+`get_file_info` on two live files confirmed it directly:
+`VIXCLS_20260830_200632.parquet` was created **Mon 31 Aug 03:06:32
+WIB**; `VIXCLS_20260820_211150.parquet` was created **Fri 21 Aug
+04:11:50 WIB** — both filenames one calendar day earlier than their
+real creation date. Same bug class already flagged (but left unfixed)
+in `GMI_Decision_Document_v11.docx` ADR-045 for `write()` (the OHLCV
+path) — `write_macro()` had its own independent, previously-unflagged
+copy of the identical mistake.
+
+**3. Misleading success counter (GMI-FRED-COUNT-01).**
+`fred_ingester.py::run()` incremented `success` immediately after
+calling `write_macro()`, without checking its return value — an
+idempotent skip (`None`) was counted the same as a real write. Live
+symptom: the `bronze_treasury` log Ovi flagged reported `"[FRED]
+Complete: 1 OK, 0 failed"` for a run that wrote zero new Bronze rows
+(that "1 OK" was `MORTGAGE30US` hitting bug #2's idempotent-skip path
+against the wrong reference date).
+
+### Why this was invisible
+
+Each piece was independently reasonable in isolation — the same failure
+shape RISK-19/20/21/23 already name in this document. The 31 Aug
+schedule-guard fix (RISK-23) was correct and necessary for what it
+targeted (the `bronze_treasury` idempotent-skip collision); it simply
+had a side effect on a different, unrelated set of series that nothing
+tested for. `write_macro()`'s idempotency check reused `write()`'s
+FIX BI-1 pattern verbatim, including the same `datetime.utcnow()`
+mistake ADR-045 had already found once elsewhere in this codebase — but
+`write_macro()` itself was outside that ADR's stated scope. The
+"not weekday" skip and the idempotent-skip both log at DEBUG level only
+— a routine `INFO`-level scan of pipeline output shows a clean
+`"N OK, M failed"` summary with no visible anomaly.
+
+### Fix
+
+Ovi's chosen repair path (of three offered: split the full FRED sweep /
+drop the internal weekday gate for the weekly caller / reclassify these
+9 series' cadence to weekly) — **split the full FRED sweep.** New
+module `src/bronze/fred_daily_ingester.py`, thin delegate to
+`FREDIngester` with an explicit `series_filter` (mirrors
+`treasury_ingester.py`'s own established pattern exactly). New job
+`bronze_fred_daily` in `DAILY_SEQUENCE`, `depends_on: []`, no
+`run_on_weekdays` guard — `fred_ingester.py`'s own weekday check is
+correct and sufficient for a caller that is itself invoked daily, as it
+already is for `bronze_treasury`. `bronze_macro_weekly`'s full-registry
+Sunday call is deliberately left unchanged: it will keep evaluating
+these 9 series and skipping them via the same weekday check every
+Sunday (a debug log line, no API call, no write) — a second
+hand-maintained exclusion list was rejected to avoid reproducing the
+dual-source-of-truth shape `GMI_Decision_Document_v11.docx` ADR-047
+already rejected for a different ticker table.
+
+`write_macro()` gained a required `run_date: date` parameter;
+`date_prefix` and the filename's date component now come from it,
+matching `IncFetchProtocol.resolve_start_date()`'s established
+reproducibility precedent. `datetime.utcnow()` retained only for the
+`_ingested_at` audit column and the filename's time-of-day suffix
+(uniqueness only). All 5 callers (`fred_ingester.py`, `bea_ingester.py`,
+`bls_ingester.py`, `imf_ingester.py`, `eia_ingester.py`) updated.
+`write()` (the OHLCV path, ADR-045's original scope) deliberately left
+untouched — out of scope for what was diagnosed/approved this session;
+remains a known adjacent issue.
+
+`fred_ingester.py::run()`'s success counter now only increments when
+`write_macro()` returns a non-`None` path; a new `skipped` counter
+tracks idempotent skips separately. Log line now reads `"N OK, M
+failed, K skipped (idempotent)"`. Not applied to the other ingesters
+sharing the same counting pattern (`bea`/`bls`/`imf`/`eia_ingester.py`)
+— out of scope for what was diagnosed this session; flagged, not
+silently fixed, for a future pass.
+
+### Verification
+
+16 new tests (`tests/unit/test_fred_daily_ingester.py`) covering
+delegation + exact series-filter contents (incl. a regression guard
+against overlap with `TREASURY_FRED_SERIES`), exception handling, and
+`job_registry.py` wiring (registered, no dependencies, no schedule
+guard, present in `DAILY_SEQUENCE` and `LAYER_JOB_NAMES["bronze"]`, not
+double-scheduled in `WEEKLY_SEQUENCE`'s weekly-only prefix). 3 new tests
+(`TestWriteMacroDateOwnership` in `tests/unit/test_base_ingester.py`)
+reproduce the exact WIB/UTC day-boundary shape found live via a mocked,
+fixed `datetime.utcnow()` — confirm filename date uses `run_date` not
+`utcnow()`, idempotency survives a UTC day-rollover between calls for
+the same `run_date`, and genuinely different `run_date`s do not
+collide. `ast.parse` clean on all modified/new files. Full suite: 1592
+passed / 0 failed / 0 error (1574 baseline + 18 new). No existing test
+broke — checked every `write_macro()` call site (5 real callers + 1
+test file) and every `JOB_REGISTRY`/`DAILY_SEQUENCE`/`WEEKLY_SEQUENCE`
+assertion in the suite (all use floors or self-derived comparisons, not
+hardcoded exact lists, so the new job doesn't collide with anything).
+
+---
+
+*Last updated: v1.17.9 — VIXCLS starvation investigation (Ovi, 7 Sep
+2026): Ovi's manual finding (2 files in `data/bronze/macro/fred/
+volatility/`, VIXCLS missing 20260905) traced to 3 bugs — RISK-29 above
+has the full account. Ovi chose the "split the full FRED sweep" repair
+path from 3 offered for the scheduling deadlock; the UTC/run_date and
+success-counter bugs each had one correct fix, applied directly. 1574 →
+1592 passed, 0 regressions.
+Prior entry: v1.17.8 — silver_validate log audit (Ovi, 5 Sep 2026):
 four bugs found and fixed via live-code reads plus a live-data
 diagnostic query (not assumption) — FIX QV-OUT-02 closes RISK-27's
 residual writeback-path gap (see amendment above), FIX QV-L2-PS-01

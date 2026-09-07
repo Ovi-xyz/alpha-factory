@@ -4,7 +4,25 @@ Ingest FRED economic series ke Bronze layer.
 
 Rate limit: 120 req/min — managed via sleep throttle.
 API key: FRED_API_KEY dari .env
-Cadence: weekly (Sunday) untuk semua series, daily untuk high-freq (T10Y2Y, VIXCLS)
+Cadence: weekly (Sunday) untuk semua series, daily untuk high-freq (T10Y2Y, VIXCLS).
+
+FIX GMI-FRED-DAILY-01 (Ovi, 7 Sep 2026): the "daily untuk high-freq" half of
+that line above was aspirational, not actual, for any cadence="daily" series
+NOT also covered by treasury_ingester.py's own daily fetch. The only caller
+that reaches the full registry (bronze_macro_weekly, job_registry.py) is
+itself gated to Sunday-only (RISK-23) — but this run()'s own per-series
+weekday guard (below) requires Mon-Fri for "daily" cadence series. Sunday
+can never satisfy Mon-Fri: 9 series (VIXCLS, DFF, T5YIE, T10YIE,
+BAMLH0A0HYM2, BAMLC0A0CM, DCOILWTICO, DEXUSEU, DEXJPUS) — 3 of them
+regime_input: true (vix_proxy, dxy_proxy, credit_spread) — were permanently
+unreachable. Confirmed empirically: frozen at exactly 2 Bronze files each
+since 2026-08-31 (the date RISK-23 landed). Fixed by giving those 9 series
+their own daily-cadence caller — see src/bronze/fred_daily_ingester.py
+(job: bronze_fred_daily, DAILY_SEQUENCE). This run() method and its
+per-series weekday guard are unchanged and were never the bug: the guard is
+correct for any caller that is itself invoked daily (bronze_treasury,
+bronze_fred_daily) — it only ever malfunctioned as a side effect of being
+the sole path for a caller (bronze_macro_weekly) invoked weekly.
 
 Output: data/bronze/macro/fred/{domain}/{series_id}_{ts}.parquet
 
@@ -151,7 +169,16 @@ class FREDIngester(BronzeIngester):
             f"[FRED] last_known_cache: {len(last_known_cache)} series with existing data"
         )
 
-        success = failed = 0
+        # FIX GMI-FRED-COUNT-01 (Ovi, 7 Sep 2026): success now increments only
+        # when write_macro() actually returns a path. Previously it incremented
+        # unconditionally right after the write_macro() *call*, so an idempotent
+        # skip (return None) was silently counted as "OK" — the log's own
+        # "N OK, M failed" summary could report a fully clean run while writing
+        # zero new Bronze rows (observed live: "[FRED] Complete: 1 OK, 0 failed"
+        # for a run where that one series hit the idempotent-skip path). skipped
+        # is now tracked and reported separately so the summary line can no
+        # longer mask a no-op run.
+        success = failed = skipped = 0
         for spec in series_list:
             series_id = spec["id"]
             domain    = spec.get("domain", "other")
@@ -176,13 +203,17 @@ class FREDIngester(BronzeIngester):
                             failed += 1
                             time.sleep(THROTTLE_SECONDS)
                             continue
-                    self.write_macro(
+                    written = self.write_macro(
                         df=df,
                         source="fred",
                         domain=domain,
                         series_id=series_id,
+                        run_date=run_date,  # FIX GMI-BI-DATE-01
                     )
-                    success += 1
+                    if written is not None:
+                        success += 1
+                    else:
+                        skipped += 1  # FIX GMI-FRED-COUNT-01: idempotent skip, not OK
                 else:
                     logger.debug(f"[FRED] No data for {series_id}")
                 time.sleep(THROTTLE_SECONDS)
@@ -190,7 +221,10 @@ class FREDIngester(BronzeIngester):
                 logger.error(f"[FRED] Failed {series_id}: {e}")
                 failed += 1
 
-        logger.info(f"[FRED] Complete: {success} OK, {failed} failed")
+        logger.info(
+            f"[FRED] Complete: {success} OK, {failed} failed, "
+            f"{skipped} skipped (idempotent)"
+        )
 
     def _fetch_series(
         self,

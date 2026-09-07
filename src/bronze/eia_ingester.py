@@ -98,6 +98,7 @@ class EIAIngester(BronzeIngester):
                         source="eia",
                         domain="crude_oil",
                         series_id=spec["name"],
+                        run_date=run_date,  # FIX GMI-BI-DATE-01
                     )
                     success += 1
                 time.sleep(0.5)

@@ -219,6 +219,7 @@ class BLSIngester(BronzeIngester):
                         source="bls",
                         domain="labor_market",
                         series_id=spec["name"],
+                        run_date=run_date,  # FIX GMI-BI-DATE-01
                     )
                     logger.debug(
                         f"[BLS] {series_id} ({spec['name']}): {len(rows)} obs"

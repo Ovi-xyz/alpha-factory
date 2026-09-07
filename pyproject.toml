@@ -1,6 +1,20 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.17.8"
+version = "1.17.9"
+# FIX (chat thread, 7 Sep 2026): 3 bugs behind VIXCLS starvation, closed.
+# Ovi's manual finding: data/bronze/macro/fred/volatility only had 2 files,
+# VIXCLS missing for 20260905. GMI-FRED-DAILY-01: 9 cadence:daily FRED
+# series (incl. regime inputs VIXCLS/DEXUSEU/BAMLH0A0HYM2) permanently
+# deadlocked between bronze_macro_weekly's Sunday-only guard (31 Aug fix)
+# and fred_ingester.py's own Mon-Fri weekday check -- fixed via Ovi's
+# chosen path, a new bronze_fred_daily job (src/bronze/fred_daily_ingester.py).
+# GMI-BI-DATE-01: write_macro() used datetime.utcnow() instead of run_date
+# for its idempotency/filename date -- every WIB-morning SOP run (the
+# routine case, not an edge case) filed macro Bronze writes one calendar
+# day behind, confirmed via live file-metadata timestamps. GMI-FRED-COUNT-01:
+# fred_ingester.py's success counter counted idempotent skips as "OK",
+# masking exactly this kind of silent no-op run. See CHANGELOG.md v1.17.9.
+#
 # FIX (chat thread, 3 Sep 2026): RISK-28 fully closed. Ovi's explicit
 # follow-up instruction: "Resolve the untouched tickers with removal
 # approach." Removes the two buckets v1.17.6 (GMI-VAL-004) deliberately

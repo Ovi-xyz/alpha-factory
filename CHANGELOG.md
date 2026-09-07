@@ -1,5 +1,107 @@
 # CHANGELOG — Data Platform
 
+## v1.17.9 — VIXCLS Starvation + Macro Write UTC/Run_Date Bug: 3 Bug Diperbaiki (September 2026)
+
+Investigasi Ovi atas temuan manual: `data/bronze/macro/fred/volatility` hanya
+berisi 2 file, VIXCLS absen untuk tanggal 20260905. Precise-check diminta
+atas `fred_ingester.py` dan log `bronze_treasury` run 2026-09-06 04:51:48.
+Live-repo read penuh (Filesystem MCP: `fred_ingester.py`, `base_ingester.py`,
+`job_registry.py`, `treasury_ingester.py`, `config/fred_series.yaml`,
+`KNOWN_RISKS.md`, plus `list_directory`/`get_file_info` langsung atas
+`data/bronze/macro/fred/{volatility,credit}/`) — 3 bug dikonfirmasi empiris,
+tidak satupun sebelumnya teregister di `KNOWN_RISKS.md`.
+
+**1. FIX GMI-FRED-DAILY-01 — 9 series `cadence: daily` FRED starved permanen
+oleh deadlock scheduling.** `bronze_macro_weekly` (satu-satunya caller full
+registry FRED) mendapat `run_on_weekdays: [6]` (Sunday-only) pada fix 31 Aug
+2026 (entry job_registry.py sebelumnya). `fred_ingester.py::run()`'s sendiri
+mensyaratkan `run_date.weekday()` Senin-Jumat untuk series `cadence: daily`.
+Minggu tidak pernah memenuhi Senin-Jumat — konjungsi mustahil. 9 series
+(`VIXCLS`, `DEXUSEU`, `BAMLH0A0HYM2`, `BAMLC0A0CM`, `DCOILWTICO`, `DEXJPUS`,
+`DFF`, `T5YIE`, `T10YIE`) — 3 di antaranya `regime_input: true` (vix_proxy,
+dxy_proxy, credit_spread) — tidak pernah punya jalur reachable. Dikonfirmasi
+empiris: `list_directory` atas `data/bronze/macro/fred/volatility/` dan
+`.../credit/` menunjukkan seluruh 9 series daily-non-treasury beku persis di
+2 file (20260820 + 20260830), sedangkan series `cadence: weekly` di folder
+yang sama (M2SL, NFCI, STLFSI4, WALCL) terus update sampai 20260905 —
+signature deadlock yang jelas, bukan kegagalan API/network. `get_file_info`
+mengonfirmasi lebih jauh: file `VIXCLS_20260830_200632.parquet` sebenarnya
+dibuat **Senin 31 Aug 03:06 WIB** — bug kedua (lihat FIX GMI-BI-DATE-01 di
+bawah) mengungkap deadlock ini via nama file yang satu hari lebih awal dari
+tanggal pembuatan lokal sebenarnya. Keputusan Ovi (dari 3 opsi yang diajukan:
+split full sweep / drop weekday-gate untuk caller mingguan / reklasifikasi
+cadence ke weekly): **split full FRED sweep**. Modul baru
+`src/bronze/fred_daily_ingester.py` — delegate tipis ke `FREDIngester` dengan
+`series_filter` eksplisit (pola sama persis dengan `treasury_ingester.py`),
+job baru `bronze_fred_daily` di `DAILY_SEQUENCE`, tanpa `run_on_weekdays`
+(guard weekday internal `fred_ingester.py` sudah benar dan cukup untuk
+caller yang sendiri dipanggil harian — persis seperti sudah berlaku untuk
+`bronze_treasury`). `bronze_macro_weekly` sengaja TIDAK diubah — 9 series ini
+tetap dievaluasi dan di-skip di sana tiap Minggu (debug log saja, tanpa API
+call/write, tidak berbahaya) — menghindari exclusion-list kedua yang akan
+mengulang pola dual-source-of-truth yang sudah ditolak ADR-047 (GMI Decision
+Document v11) untuk alasan yang sama. 16 test baru
+(`test_fred_daily_ingester.py`).
+
+**2. FIX GMI-BI-DATE-01 — `write_macro()` pakai `datetime.utcnow()`, bukan
+`run_date`.** `date_prefix` (idempotency key) dan komponen tanggal nama file
+dihitung dari `datetime.utcnow()` — `run_date` bahkan bukan parameter method
+ini. Karena SOP berjalan 04:00-05:00 WIB (UTC+7) setiap hari, UTC masih di
+hari kalender SEBELUMNYA pada window operasi rutin ini — bukan edge case
+langka, melainkan kondisi operasi harian yang biasa. Dikonfirmasi via
+`get_file_info` pada 2 file live: `VIXCLS_20260830_200632.parquet` dibuat
+lokal Senin 31 Aug 03:06:32 WIB; `VIXCLS_20260820_211150.parquet` dibuat
+lokal Jumat 21 Aug 04:11:50 WIB — keduanya bernama satu hari kalender lebih
+awal dari tanggal pembuatan asli. Manifestasi langsung di log
+`bronze_treasury` yang memicu precise-check ini: "`MORTGAGE30US already
+written for 20260905`" padahal `run_date=2026-09-06` pada run yang sama. Bug
+class yang sama persis dengan yang sudah diflag (tapi belum diperbaiki) GMI
+Decision Document v11 ADR-045 untuk `write()` (jalur OHLCV) — `write_macro()`
+punya copy independen dari kesalahan yang sama, tidak pernah masuk lingkup
+ADR-045. Fix: `write_macro()` menerima `run_date: date` (parameter wajib,
+tanpa default — konsisten dengan prinsip reproducibility `run_date` sebagai
+single source of truth yang sudah ditetapkan G1
+`IncFetchProtocol.resolve_start_date()`). `date_prefix` dan komponen tanggal
+nama file sekarang dari `run_date`; `datetime.utcnow()` dipertahankan HANYA
+untuk kolom audit `_ingested_at` dan suffix waktu nama file (unik saja, tidak
+punya makna reproducibility). Seluruh 5 caller (`fred_ingester.py`,
+`bea_ingester.py`, `bls_ingester.py`, `imf_ingester.py`, `eia_ingester.py`)
+diupdate meneruskan `run_date=run_date`. `write()` (jalur OHLCV, ADR-045)
+sengaja TIDAK disentuh — di luar scope 3 bug yang didiagnosis/disetujui sesi
+ini; tetap known-adjacent-issue. 3 test baru
+(`TestWriteMacroDateOwnership`) — mock `datetime.utcnow()` terfixasi
+mereproduksi persis shape day-boundary yang ditemukan live, termasuk uji
+idempotency tetap benar melintasi UTC day-rollover dan uji run_date berbeda
+tidak collide.
+
+**3. FIX GMI-FRED-COUNT-01 — success counter `fred_ingester.py::run()`
+menghitung idempotent-skip sebagai "OK".** `success += 1` naik tepat setelah
+memanggil `write_macro()`, tanpa memeriksa return value — `None` (skip
+idempotent) dihitung sama dengan file yang benar-benar ditulis. Live-test:
+log `bronze_treasury` melaporkan "`[FRED] Complete: 1 OK, 0 failed`" padahal
+1 series itu (MORTGAGE30US) adalah idempotent-skip, bukan write baru — run
+menulis nol baris Bronze baru sambil melaporkan sukses bersih. Fix:
+`success` sekarang hanya naik jika `write_macro()` mengembalikan path
+non-None; counter `skipped` baru menghitung idempotent-skip secara terpisah.
+Log akhir: "`N OK, M failed, K skipped (idempotent)`" — tidak lagi bisa
+menyamarkan silent no-op run. Tidak diterapkan ke ingester lain
+(`bea`/`bls`/`imf`/`eia_ingester.py`) yang punya pola sama — di luar scope
+diagnosis sesi ini, dicatat sebagai known-adjacent-issue untuk audit
+berikutnya, bukan diperbaiki diam-diam.
+
+Verifikasi: `ast.parse` bersih di semua file dimodifikasi/dibuat, full suite
+**1592 passed / 0 failed / 0 error** (1574 baseline + 18 test baru). PATCH
+bump (bug fix — job baru `bronze_fred_daily` adalah mekanisme pemulihan
+kapabilitas yang sudah dimaksudkan sejak awal — `regime_input: true`/
+`cadence: daily` sudah ada di `fred_series.yaml` — bukan kapabilitas baru).
+Total: **7 file source dimodifikasi**
+(`base_ingester.py`, `fred_ingester.py`, `eia_ingester.py`, `bls_ingester.py`,
+`imf_ingester.py`, `bea_ingester.py`, `job_registry.py`)
+| **1 file source baru** (`fred_daily_ingester.py`)
+| **1 file test dimodifikasi** (`test_base_ingester.py`, +3 test)
+| **1 file test baru** (`test_fred_daily_ingester.py`, 16 test)
+| **1592 passed / 0 failed / 0 error**.
+
 ## v1.17.8 — Silver Validate Log Audit: 4 Bug Diperbaiki + IDR Threshold + Broad Dollar Basket Scoping (September 2026)
 
 Debug atas log `silver_validate`/`silver_active_symbols`/`silver_context_anchors`
