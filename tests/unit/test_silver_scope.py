@@ -11,7 +11,14 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from src.utils.silver_scope import CONTEXT_MARKET, context_glob, layer1_globs, layer1_markets
+from src.utils.silver_scope import (
+    CONTEXT_MARKET,
+    context_glob,
+    context_peer_groups,
+    layer1_globs,
+    layer1_markets,
+    layer1_peer_groups,
+)
 
 
 def _touch_parquet(path: Path) -> None:
@@ -128,3 +135,100 @@ class TestScopingCorrectnessEndToEnd:
         # exact defect that let a fresh Layer 2 anchor mask Layer 1 staleness.
         assert result[0] == date(2026, 6, 1)
         assert result[1] == 1
+
+
+class TestLayer1PeerGroups:
+    """ADD GAP-PEER-01 — see src/utils/gap_analysis.py for the consumer
+    (quality_validator.py's _check_gap_detection()) and rationale."""
+
+    def test_commodity_members_share_one_peer_group(self):
+        """Empirically confirmed universe: commodity = {AU, AG, CL}. CL is
+        excluded here deliberately — see test_colliding_symbol_is_unclassified
+        below; AU and AG are the clean case."""
+        peer_map, sizes = layer1_peer_groups()
+        assert peer_map["AU"] == "commodity"
+        assert peer_map["AG"] == "commodity"
+        assert sizes["commodity"] == 3
+
+    def test_colliding_symbol_is_unclassified_not_silently_assigned(self):
+        """'CL' is a REAL, confirmed cross-market collision in the live
+        universe: WTI crude oil (commodity) AND Colgate-Palmolive
+        (us_stocks) both use ticker 'CL'. A bare SQL `symbol` string
+        cannot trace back to which market's file it came from, so any
+        single-market assignment would be a guess dressed up as a fact.
+        Must be None (gap_analysis.py treats that as "never suppress"),
+        not silently pinned to whichever market layer1_markets() happens
+        to iterate last."""
+        peer_map, _ = layer1_peer_groups()
+        assert peer_map["CL"] is None
+
+    def test_every_layer1_market_present_in_sizes(self):
+        peer_map, sizes = layer1_peer_groups()
+        assert set(sizes.keys()) == set(layer1_markets())
+
+    def test_peer_map_covers_every_layer1_symbol(self):
+        from src.config.instrument_loader import get_loader
+        peer_map, _ = layer1_peer_groups()
+        assert set(peer_map.keys()) == {i.symbol for i in get_loader().all_symbols()}
+
+    def test_sizes_match_by_market_counts(self):
+        from src.config.instrument_loader import get_loader
+        loader = get_loader()
+        _, sizes = layer1_peer_groups()
+        for market in layer1_markets():
+            assert sizes[market] == len(loader.by_market(market))
+
+    def test_symbols_from_different_markets_are_different_groups(self):
+        peer_map, _ = layer1_peer_groups()
+        assert peer_map["AU"] != peer_map["EUR_USD"]
+
+
+class TestContextPeerGroups:
+    """ADD GAP-PEER-01 — grouped by context_category (finer than
+    context_group), see context_peer_groups() docstring for why."""
+
+    def test_asia_pacific_equity_indices_share_one_peer_group(self):
+        """Empirically confirmed universe: context_equity_em = {HSI, JKSE,
+        KOSPI, SSEC, TWSE} — exactly the 5-symbol cluster the live
+        diagnostic (8 Sep 2026) found responsible for 69 of the 87
+        reported context_gap_detection occurrences."""
+        peer_map, sizes = context_peer_groups()
+        em_symbols = {"HSI", "JKSE", "KOSPI", "SSEC", "TWSE"}
+        assert {peer_map[s] for s in em_symbols} == {"context_equity_em"}
+        assert sizes["context_equity_em"] == 5
+
+    def test_dm_and_em_equity_are_different_groups(self):
+        """The whole point of using context_category over the coarser
+        context_group='equity': DAX (DM) must never be pooled with
+        TWSE (EM) — they don't share a holiday calendar."""
+        peer_map, _ = context_peer_groups()
+        assert peer_map["DAX"] != peer_map["TWSE"]
+        assert peer_map["DAX"] == "context_equity_dm"
+        assert peer_map["TWSE"] == "context_equity_em"
+
+    def test_aluminium_grouped_with_its_real_metal_peers(self):
+        peer_map, sizes = context_peer_groups()
+        assert peer_map["ALUMINIUM"] == "context_commodity_metals"
+        assert sizes["context_commodity_metals"] >= 4  # at least COPPER/NICKEL/ZINC/IRON_ORE too
+
+    def test_singleton_categories_have_size_one(self):
+        """DXY (context_dollar) and VIX (context_volatility) are each the
+        sole member of their category — confirms the "no peers to compare
+        against" path in gap_analysis.py is reachable with real data, not
+        just synthetic test fixtures."""
+        peer_map, sizes = context_peer_groups()
+        assert sizes[peer_map["DXY"]] == 1
+        assert sizes[peer_map["VIX"]] == 1
+
+    def test_deferred_instruments_excluded(self):
+        """TIN and RUBBER (context_available=False, ADR-034) must not
+        appear at all — including them would only inflate a group's
+        denominator with permanently-absent members."""
+        peer_map, _ = context_peer_groups()
+        assert "TIN" not in peer_map
+        assert "RUBBER" not in peer_map
+
+    def test_sizes_sum_matches_total_active_context_count(self):
+        from src.config.instrument_loader import get_loader
+        _, sizes = context_peer_groups()
+        assert sum(sizes.values()) == len(get_loader().all_context(include_deferred=False))

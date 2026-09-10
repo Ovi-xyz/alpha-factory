@@ -2675,7 +2675,131 @@ hardcoded exact lists, so the new job doesn't collide with anything).
 
 ---
 
-*Last updated: v1.17.9 — VIXCLS starvation investigation (Ovi, 7 Sep
+## RISK-30 (NEW): `gap_detection`/`context_gap_detection` counted market-wide holiday closures as data gaps — RESOLVED (fixed) via peer-agreement classification; surfaced a separate, unfixed 'CL' cross-market symbol collision — OPEN
+
+**Symptom**: `gap_detection` (Layer 1) and `context_gap_detection` (Layer 2)
+WARNING checks were chronically red — 282 and 87 occurrences respectively,
+essentially unchanged run over run across log samples spanning 2–8 Sep
+2026. Neither number ever meaningfully decreased, since both checks scan
+full 10-year history every run and `IncFetchProtocol`'s forward-only
+design (Supplementary Design v1.1 G1) can never backfill a gap once it's
+in the past.
+
+**Root cause**: `_check_gap_detection()`/`_check_context_gap_detection()`
+applied a flat `day_gap > 5 calendar days` threshold uniformly to every
+instrument, with no concept of market-specific trading calendars. Live
+diagnostic (8 Sep 2026 — all 594 Layer 1 + 58 Layer 2 Silver 1D files
+copied via Filesystem MCP into a Claude sandbox and queried directly with
+DuckDB, not inferred from logs) found:
+  - Layer 1's 282: 100% IDX (all 30 symbols, identical `min_gap=6/
+    max_gap=12` day signature scaling with each symbol's listing age —
+    the fingerprint of shared Indonesian national holiday closures, e.g.
+    Eid al-Fitr week). us_stocks/forex/commodity contributed zero.
+  - Layer 2's 87: SSEC(28)/JKSE(13)/TWSE(13)/KOSPI(12)/N225(12)/HSI(4) —
+    Asia-Pacific equity indices sharing regional holiday timing (Lunar
+    New Year etc.) — plus DAX(2) and ALUMINIUM(3, a one-time 2016
+    cold-start thin-liquidity artifact in its first two months of
+    history, not a calendar effect).
+  SSEC's excess over the ~12–13 baseline other Asian indices show is
+  consistent with its already-documented `reliability_flag`/circuit-
+  breaker history (Architecture v2.0 §3.5) — corroborating an
+  already-known, already-registered risk, not a new one.
+
+**Fix**: `src/utils/gap_analysis.py` (new) classifies each flagged gap via
+peer agreement: if ≥50% of a symbol's peers in the same group (Layer 1:
+InstrumentLoader `market`; Layer 2: the finer `context_category`, not the
+coarser `context_group` — DM and EM equity do not share a calendar) show
+an overlapping gap over the same window, it's a market-wide closure,
+excluded from the WARNING count and logged at DEBUG. No Silver data or
+`is_clean` flag is touched — this only changes what these two checks
+count. `_check_gap_detection()`/`_check_context_gap_detection()` in
+`quality_validator.py` were refactored to share one SQL-fetch helper
+(`_fetch_raw_gap_events`) and one classification call
+(`_classified_gap_counts`) instead of each carrying its own copy of the
+WITH-gaps CTE — closing off the exact "same fix, unmirrored copy" shape
+separately responsible for the still-open EIA Bronze/Silver path
+mismatch (`macro_processor.py::process_eia()`'s stale glob never
+receiving FIX EIA-5's correction).
+
+**New finding, deliberately NOT fixed here — OPEN**: building the Layer 1
+peer map surfaced a confirmed live symbol collision: ticker `CL` refers to
+BOTH the commodity WTI crude proxy AND the us_stocks ticker for
+Colgate-Palmolive (`loader.by_market('commodity')` and
+`loader.by_market('us_stocks')` both return an instrument with
+`symbol == 'CL'`; verified empirically, not assumed — this is the SAME
+`CL` RISK-27 already found poisons cross-symbol outlier z-scores).
+`layer1_peer_groups()` now detects this and sets `CL`'s peer group to
+`None` (gap_analysis.py's designed-in "cannot classify, never suppress"
+path) rather than silently picking whichever market `layer1_markets()`
+iterates last — confirmed via a direct unit test. This narrowly protects
+the new peer-classification feature, but does NOT fix the deeper,
+pre-existing issue: `silver_scope.layer1_globs()` feeds ALL Layer 1
+markets into ONE combined `read_parquet()` call with no market column to
+disambiguate on, so `PARTITION BY symbol` in `_check_null`,
+`_check_price_sanity`, `_check_coverage`, `_check_outliers`, and
+`_check_adj_integrity` ALL silently interleave WTI crude's and
+Colgate-Palmolive's rows under one shared "CL" partition today, not just
+in gap_detection. `InstrumentLoader.get(symbol, market=None)`'s existing
+optional `market` parameter confirms the loader itself already
+anticipates this exact class of ambiguity at the lookup level — the
+combined-glob checks in quality_validator.py do not. Scope of the
+collision is narrow (confirmed via full scan: exactly one symbol, Layer 1
+only, no Layer 2 collisions, no Layer 1/Layer 2 overlap) but the fix
+(giving every Layer-1-scoped check a market-aware partition, not just a
+symbol-aware one) touches 5 existing CRITICAL/WARNING checks — wider
+blast radius than this session's scope. Needs Ovi's decision before
+touching those checks.
+
+**Verification**: `tests/unit/test_gap_analysis.py` (new, 21 tests) —
+exhaustive synthetic coverage of `classify_gaps_by_peer_agreement()`:
+full-agreement closure, isolated-with-no-agreement, exact 50% boundary,
+just-below-threshold, non-overlapping same-group gaps, `peer_group=None`,
+singleton groups, unknown groups, cross-group isolation, self-match
+exclusion, invalid/boundary `min_peer_agreement` values.
+`tests/unit/test_silver_scope.py` — 12 new tests confirming
+`layer1_peer_groups()`/`context_peer_groups()` against the REAL live
+instrument universe (not mocks): commodity membership, the `CL` collision
+handling specifically, DM/EM equity separation, ALUMINIUM's real metal
+peers, singleton categories (DXY/VIX), deferred-instrument exclusion
+(TIN/RUBBER). `tests/unit/test_quality_validator.py` — 8 new tests: real
+end-to-end fixture tests using the actual `commodity` market and
+`context_equity_em` category (not synthetic group names) proving
+market-wide closures are excluded and isolated gaps are still caught,
+plus threshold-decision unit tests confirming
+`_check_gap_detection`/`_check_context_gap_detection` correctly pass when
+peer-confirmed closures absorb what would otherwise trip the `>50`
+threshold. `ast.parse` clean on all new/modified files. Full suite: 1632
+passed / 0 failed / 0 error (1592 baseline + 40 new). No existing test
+broke.
+
+---
+
+*Last updated: v1.17.10 — gap_detection/context_gap_detection peer-agreement
+classification (chat thread, 8 Sep 2026): RISK-30 above has the full
+account. Live diagnostic (Filesystem MCP copy + direct DuckDB query
+against all 594 Layer 1 + 58 Layer 2 Silver 1D files) found both chronic
+WARNING checks were ~100% explained by market-wide holiday closures
+(IDX; SSEC/JKSE/TWSE/KOSPI/N225/HSI), not data defects. New
+src/utils/gap_analysis.py module classifies gaps via peer agreement
+within InstrumentLoader market (Layer 1) / context_category (Layer 2);
+quality_validator.py's two gap checks now share one SQL-fetch + one
+classification call instead of duplicating the WITH-gaps CTE. Surfaced
+(not fixed) a separate, real 'CL' cross-market symbol collision (WTI
+crude vs. Colgate-Palmolive) affecting 5 OTHER Layer-1-scoped checks —
+narrowly contained for gap_detection via peer_group=None, flagged OPEN
+for the rest. 1592 → 1632 passed, 0 regressions. Two further,
+unrelated Silver fixes landed in the same v1.17.10 session (no
+KNOWN_RISKS entry needed — both fully resolved, no open questions):
+FIX EIA-6 (macro_processor.py::process_eia()'s domain_glob pointed at
+data/bronze/commodity/eia/, a directory that has never existed — real
+EIA data lives at data/bronze/macro/eia/crude_oil/, exactly the FIX
+EIA-5 path correction never mirrored from Bronze to Silver) and FIX
+AV-CNH-01 (AlphaVantageForexAdapter wrote timestamp as a raw string
+instead of the already-parsed obs_date, leaving CNH's Bronze timestamp
+column Utf8 and silently nulling its VWAP — see CHANGELOG.md v1.17.10
+for full detail on both). Final count this session: 1592 → 1639
+passed, 0 regressions, 0 failed, 0 error.
+Prior entry: v1.17.9 — VIXCLS starvation investigation (Ovi, 7 Sep
 2026): Ovi's manual finding (2 files in `data/bronze/macro/fred/
 volatility/`, VIXCLS missing 20260905) traced to 3 bugs — RISK-29 above
 has the full account. Ovi chose the "split the full FRED sweep" repair

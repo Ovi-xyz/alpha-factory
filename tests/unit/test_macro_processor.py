@@ -36,6 +36,57 @@ def _bronze_macro_df(series_id: str, observation_date: str, value: float,
     })
 
 
+class TestProcessEIACreatesSilverOutput:
+    """FIX EIA-6 [chat thread, 8/9 Sep 2026]: process_eia()'s domain_glob
+    was a hardcoded literal pointing at data/bronze/commodity/eia/ — a
+    directory that has never existed (confirmed empirically against the
+    live repo). EIAIngester actually writes to data/bronze/macro/eia/
+    crude_oil/ via write_macro(source="eia", domain="crude_oil", ...),
+    the same convention process_fred()/process_bls()/process_bea() above
+    already glob at the source level. This test uses the REAL path EIA
+    data lives at, not the old broken one — the regression this guards
+    against is exactly "glob points somewhere no ingester ever writes
+    to", which a test asserting against the wrong path would not catch."""
+
+    def test_process_eia_creates_silver_output(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        bronze_dir = tmp_path / "data" / "bronze" / "macro" / "eia" / "crude_oil"
+        bronze_dir.mkdir(parents=True)
+        _bronze_macro_df(
+            "PET.RWTC.W", "2026-08-26", 63.5, "2026-08-27"
+        ).write_parquet(bronze_dir / "wti_spot_price_fixture.parquet")
+
+        run_date = date(2026, 9, 1)   # well after release_date -> passes PIT filter
+        MacroProcessor().process_eia(run_date)
+
+        silver_dir = tmp_path / "data" / "silver" / "macro_enriched"
+        matches = list(silver_dir.glob("eia_*_silver.parquet"))
+        assert len(matches) == 1, f"Expected exactly one eia_*_silver.parquet, got {matches}"
+
+        out = pl.read_parquet(matches[0])
+        assert out.height == 1
+        assert out["series_id"][0] == "PET.RWTC.W"
+
+    def test_process_eia_does_not_look_in_old_broken_path(self, tmp_path, monkeypatch):
+        """Data sitting ONLY at the old, never-real 'commodity/eia' path
+        must NOT be found — if it were, that would mean the glob had been
+        widened rather than corrected, silently reintroducing a source of
+        confusion about where EIA data actually lives."""
+        monkeypatch.chdir(tmp_path)
+
+        old_wrong_dir = tmp_path / "data" / "bronze" / "commodity" / "eia"
+        old_wrong_dir.mkdir(parents=True)
+        _bronze_macro_df(
+            "PET.RWTC.W", "2026-08-26", 63.5, "2026-08-27"
+        ).write_parquet(old_wrong_dir / "wti_spot_price_fixture.parquet")
+
+        MacroProcessor().process_eia(date(2026, 9, 1))
+
+        silver_dir = tmp_path / "data" / "silver" / "macro_enriched"
+        assert list(silver_dir.glob("eia_*_silver.parquet")) == []
+
+
 class TestProcessBLSCreatesSilverOutput:
     """Test Case 1 (GAP-8 spec): patch Bronze BLS fixture -> run process_bls()
     -> assert Silver Parquet exists at SILVER_MACRO_PATH/bls_*."""

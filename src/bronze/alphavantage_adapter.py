@@ -171,7 +171,28 @@ class AlphaVantageForexAdapter(SourceAdapter):
                     if obs_date < start or obs_date > end:
                         continue
                     records.append({
-                        "timestamp": dt_str[:10],
+                        # FIX AV-CNH-01 [chat thread, 8/9 Sep 2026]: was
+                        # dt_str[:10] — a raw string — even though obs_date
+                        # (a proper date object) is computed one line above
+                        # and already used for the start/end filter. Polars
+                        # then inferred this column as Utf8, not Date.
+                        # OHLCVProcessor._normalize_timestamps() only has
+                        # branches for pl.Date/pl.Datetime — a Utf8 column
+                        # silently passes through untouched — and
+                        # _add_derived_fields()'s VWAP calc then calls
+                        # .dt.date() on it, which requires Date/Datetime and
+                        # raises "expected Datetime or Date, got str"
+                        # (caught by a broad except, so VWAP silently became
+                        # all-null rather than erroring loudly). CNH is the
+                        # only instrument that hit this in practice, being
+                        # the sole consumer of this adapter as a PRIMARY
+                        # (not fallback) source (ADR-048) — confirmed via
+                        # live diagnostic (8 Sep 2026): CNH's Bronze
+                        # timestamp column was the only Utf8 one across all
+                        # 58 Layer 2 symbols, all others being yfinance-
+                        # sourced (pl.from_pandas() on a real pandas
+                        # DatetimeIndex, already correctly typed).
+                        "timestamp": obs_date,
                         # FIX AV-3 (HIGH): None when key absent — not 0.0 default.
                         # float(vals.get('1. open', 0)) produced zero-price bars that
                         # silently passed Silver null check. None is detected correctly.

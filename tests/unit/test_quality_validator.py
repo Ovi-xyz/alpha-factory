@@ -297,6 +297,206 @@ class TestQVL2MaskingBugsFixed:
         assert qv._check_freshness(date(2026, 6, 20)) is True
 
 
+class TestGapDetectionPeerAgreement:
+    """ADD GAP-PEER-01 [chat thread, 8 Sep 2026] — see
+    src/utils/gap_analysis.py and quality_validator.py module docstring
+    for full rationale. classify_gaps_by_peer_agreement() itself is
+    exhaustively covered by tests/unit/test_gap_analysis.py with synthetic
+    data; these tests confirm the real SQL-fetch + real InstrumentLoader
+    peer-grouping wiring behaves correctly end to end, using the
+    smallest real Layer 1 market (commodity = {AU, AG, CL}, 3 members) so
+    fixtures stay small while still exercising genuine peer agreement.
+    """
+
+    @staticmethod
+    def _write(path, symbol, timestamps):
+        import polars as pl
+        n = len(timestamps)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "symbol": [symbol] * n, "timestamp": timestamps,
+            "open": [100.0] * n, "high": [105.0] * n, "low": [95.0] * n,
+            "close": [102.0] * n, "volume": [1_000_000] * n,
+            "is_clean": [True] * n,
+        }).write_parquet(path)
+
+    def test_market_wide_gap_across_all_commodity_peers_is_excluded(self, tmp_path, monkeypatch):
+        """AU, AG, and CL all show the identical gap window. AU and AG are
+        clean commodity peers (each sees the other agree -> 1 of their 2
+        other peers -> 50% -> closure). CL is a REAL, confirmed cross-
+        market collision (WTI crude vs. Colgate-Palmolive, both ticker
+        'CL' — see test_silver_scope.py::test_colliding_symbol_is_unclassified)
+        and is therefore always isolated regardless of what data it shows,
+        by design. This is the actual live-universe version of the
+        IDX/SSEC finding, collision and all — not an idealized synthetic
+        case."""
+        import duckdb
+        import src.silver.quality_validator as qv_mod
+        from src.utils.silver_scope import layer1_globs, layer1_peer_groups
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+
+        before_gap = date(2026, 4, 10)
+        after_gap  = date(2026, 4, 20)   # 10-day gap, > 5 threshold
+        for sym in ("AU", "AG", "CL"):
+            self._write(
+                tmp_path / "commodity" / f"symbol={sym}" / f"{sym}_1D_silver.parquet",
+                sym, [before_gap, after_gap],
+            )
+
+        qv = QualityValidator()
+        con = duckdb.connect()
+        globs = layer1_globs(tmp_path, "*_1D_silver.parquet")
+        peer_map, peer_sizes = layer1_peer_groups()
+        isolated, closures, by_group = qv._classified_gap_counts(con, globs, peer_map, peer_sizes)
+
+        assert isolated == 1     # CL, unconditionally (collision -> peer_group=None)
+        assert closures == 2     # AU and AG, each confirmed by the other
+        assert by_group == {"commodity": 2}
+
+    def test_isolated_gap_on_one_commodity_symbol_still_counted(self, tmp_path, monkeypatch):
+        """Only AU has a gap; AG and CL have no data at all (i.e. traded
+        normally / no gap) -> AU's agreement is 0/2 -> isolated, not
+        suppressed. This is the "real, actionable gap" case the whole
+        mechanism must continue to catch."""
+        import duckdb
+        import src.silver.quality_validator as qv_mod
+        from src.utils.silver_scope import layer1_globs, layer1_peer_groups
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+
+        self._write(
+            tmp_path / "commodity" / "symbol=AU" / "AU_1D_silver.parquet",
+            "AU", [date(2026, 4, 10), date(2026, 4, 20)],
+        )
+
+        qv = QualityValidator()
+        con = duckdb.connect()
+        globs = layer1_globs(tmp_path, "*_1D_silver.parquet")
+        peer_map, peer_sizes = layer1_peer_groups()
+        isolated, closures, by_group = qv._classified_gap_counts(con, globs, peer_map, peer_sizes)
+
+        assert isolated == 1
+        assert closures == 0
+        assert by_group == {}
+
+    def test_context_gap_detection_uses_context_category_grouping(self, tmp_path, monkeypatch):
+        """Layer 2 analogue: HSI and JKSE (both context_equity_em) share
+        an overlapping gap window -> peer-confirmed closure, using the
+        REAL context_category taxonomy (not a mock)."""
+        import duckdb
+        import src.silver.quality_validator as qv_mod
+        from src.utils.silver_scope import context_glob, context_peer_groups
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+
+        before_gap = date(2026, 2, 15)
+        after_gap  = date(2026, 2, 25)
+        for sym in ("HSI", "JKSE"):
+            self._write(
+                tmp_path / "context" / f"symbol={sym}" / f"{sym}_1D_silver.parquet",
+                sym, [before_gap, after_gap],
+            )
+
+        qv = QualityValidator()
+        con = duckdb.connect()
+        glob = context_glob(tmp_path, "*_1D_silver.parquet")
+        peer_map, peer_sizes = context_peer_groups()
+        isolated, closures, by_group = qv._classified_gap_counts(con, glob, peer_map, peer_sizes)
+
+        # HSI and JKSE are 2 of 5 context_equity_em members; each one's
+        # other peer that HAS data (the other of the pair) fully overlaps,
+        # and the 3 no-data peers (KOSPI/SSEC/TWSE) count toward the
+        # denominator but not the numerator: agreement = 1/4 = 25% < 50%.
+        # This deliberately documents current behavior with only 2 of 5
+        # real peers populated — see the full-market test above for the
+        # >=50% case with every peer present.
+        assert isolated == 2
+        assert closures == 0
+        assert by_group == {}
+
+    def test_all_five_em_equity_peers_agreeing_is_excluded(self, tmp_path, monkeypatch):
+        """All 5 real context_equity_em members share the identical gap
+        window -> 100% agreement for each -> the full live-diagnosed
+        scenario (SSEC/JKSE/TWSE/KOSPI/HSI, 8 Sep 2026)."""
+        import duckdb
+        import src.silver.quality_validator as qv_mod
+        from src.utils.silver_scope import context_glob, context_peer_groups
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+
+        before_gap = date(2026, 2, 15)
+        after_gap  = date(2026, 2, 25)
+        for sym in ("HSI", "JKSE", "KOSPI", "SSEC", "TWSE"):
+            self._write(
+                tmp_path / "context" / f"symbol={sym}" / f"{sym}_1D_silver.parquet",
+                sym, [before_gap, after_gap],
+            )
+
+        qv = QualityValidator()
+        con = duckdb.connect()
+        glob = context_glob(tmp_path, "*_1D_silver.parquet")
+        peer_map, peer_sizes = context_peer_groups()
+        isolated, closures, by_group = qv._classified_gap_counts(con, glob, peer_map, peer_sizes)
+
+        assert isolated == 0
+        assert closures == 5
+        assert by_group == {"context_equity_em": 5}
+
+
+class TestGapDetectionThresholdDecision:
+    """Unit-level tests for _check_gap_detection() / _check_context_gap_detection()'s
+    own >50-isolated-occurrence decision, isolated from the SQL/classification
+    layer via mocking _classified_gap_counts directly — that layer is already
+    covered above and in test_gap_analysis.py."""
+
+    def test_gap_detection_fails_when_isolated_exceeds_threshold(self, monkeypatch):
+        import unittest.mock as mock
+        import src.silver.quality_validator as qv_mod
+        from src.utils.silver_scope import CONTEXT_MARKET  # noqa: F401 (import sanity)
+
+        qv = QualityValidator()
+        with mock.patch.object(qv_mod, "layer1_globs", return_value=["fake_glob"]):
+            with mock.patch.object(QualityValidator, "_classified_gap_counts",
+                                    return_value=(51, 0, {})):
+                assert qv._check_gap_detection(date(2026, 6, 20)) is False
+        assert any("51 isolated gaps" in str(i) for i in qv._issues)
+
+    def test_gap_detection_passes_when_isolated_at_or_below_threshold(self):
+        import unittest.mock as mock
+        import src.silver.quality_validator as qv_mod
+
+        qv = QualityValidator()
+        with mock.patch.object(qv_mod, "layer1_globs", return_value=["fake_glob"]):
+            with mock.patch.object(QualityValidator, "_classified_gap_counts",
+                                    return_value=(50, 300, {"idx": 282, "commodity": 18})):
+                # 300 market-closure gaps excluded, only 50 isolated left —
+                # must pass even though the RAW total (350) would have failed
+                # under the pre-FIX-GAP-PEER-01 behavior.
+                assert qv._check_gap_detection(date(2026, 6, 20)) is True
+
+    def test_context_gap_detection_fails_when_isolated_exceeds_threshold(self):
+        import unittest.mock as mock
+        import src.silver.quality_validator as qv_mod
+
+        qv = QualityValidator()
+        with mock.patch.object(qv_mod, "context_glob", return_value="fake_glob"):
+            with mock.patch.object(QualityValidator, "_classified_gap_counts",
+                                    return_value=(51, 0, {})):
+                assert qv._check_context_gap_detection(date(2026, 6, 20)) is False
+        assert any("51 isolated Layer 2 gaps" in str(i) for i in qv._issues)
+
+    def test_context_gap_detection_passes_when_market_closures_absorb_the_count(self):
+        import unittest.mock as mock
+        import src.silver.quality_validator as qv_mod
+
+        qv = QualityValidator()
+        with mock.patch.object(qv_mod, "context_glob", return_value="fake_glob"):
+            with mock.patch.object(QualityValidator, "_classified_gap_counts",
+                                    return_value=(5, 82, {"context_equity_em": 69,
+                                                           "context_equity_dm": 2,
+                                                           "context_commodity_metals": 3})):
+                # This is the real 8 Sep 2026 scenario reconstructed: 87 raw
+                # gaps, 82 peer-confirmed closures, 5 isolated remain -> pass.
+                assert qv._check_context_gap_detection(date(2026, 6, 20)) is True
+
+
 class TestPriceSanityIsCleanScoping:
     """
     FIX QV-PS-01 [chat thread, 2 Sep 2026]: price_sanity previously counted

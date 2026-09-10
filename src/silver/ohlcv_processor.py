@@ -181,6 +181,30 @@ class OHLCVProcessor:
                         .dt.replace_time_zone(tz_source)
                         .dt.convert_time_zone("UTC")
                     )
+            elif ts_col.dtype == pl.Utf8:
+                # FIX AV-CNH-01 defense-in-depth [chat thread, 8/9 Sep 2026]:
+                # the actual root cause (AlphaVantageForexAdapter writing a
+                # raw date string instead of a proper date object) is fixed
+                # at the source in alphavantage_adapter.py. This branch is
+                # for the NEXT adapter that makes the identical mistake:
+                # previously a Utf8 timestamp column matched neither branch
+                # above and passed through completely untouched, only to
+                # fail opaquely later inside _add_derived_fields()'s VWAP
+                # calc ("expected Datetime or Date, got str") — a confusing
+                # place to discover a Bronze-layer typing bug. str.to_datetime
+                # with strict=False handles both "YYYY-MM-DD" (confirmed:
+                # parses as midnight) and full "YYYY-MM-DD HH:MM:SS" style
+                # strings, and nulls out anything genuinely unparseable
+                # rather than raising — same graceful-degradation contract
+                # as the two branches above.
+                df = df.with_columns(
+                    pl.col("timestamp").str.to_datetime(strict=False)
+                )
+                df = df.with_columns(
+                    pl.col("timestamp")
+                    .dt.replace_time_zone(tz_source)
+                    .dt.convert_time_zone("UTC")
+                )
         except Exception as e:
             logger.debug(f"[OHLCVProcessor] Timestamp normalization note: {e}")
 

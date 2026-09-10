@@ -104,10 +104,37 @@ class MacroProcessor:
         )
 
     def process_eia(self, run_date: date) -> None:
-        """Process EIA crude oil data dari Bronze."""
+        """Process EIA crude oil data dari Bronze.
+
+        FIX EIA-6 [chat thread, 8/9 Sep 2026]: domain_glob was a hardcoded
+        literal "data/bronze/commodity/eia/**/*.parquet" — a directory that
+        has never existed (confirmed empirically: data/bronze/commodity/
+        does not exist on disk at all). EIAIngester.run() writes via
+        self.write_macro(source="eia", domain="crude_oil", ...), which
+        (per base_ingester.py's write_macro()) resolves to
+        BASE_PATH/macro/eia/crude_oil/ — the exact same convention
+        process_fred()/process_bls()/process_bea() above already glob at
+        the source level (data/bronze/macro/{source}/**/*.parquet). This
+        is the Silver-side half of a bug already half-fixed: FIX EIA-5
+        (eia_ingester.py::_build_last_known_cache()) corrected the
+        IDENTICAL wrong literal for Bronze's own incremental-fetch cache
+        scan, but that fix was never mirrored here — the two glob strings
+        were independent copies of the same wrong path, and only one
+        copy ever got corrected. Confirmed via live Bronze inspection
+        (Filesystem MCP, 8 Sep 2026): real EIA data exists at
+        data/bronze/macro/eia/crude_oil/ (4 files, all 4 EIA_SERIES
+        entries present), so this was pure path mismatch, not missing
+        upstream data — every run's macro_processor.py silently logged
+        "eia: no data yet" while genuine EIA data sat one directory over,
+        unread, indefinitely. Schema compatibility with the generic
+        _process_domain() query (series_id, observation_date,
+        release_date, value) was verified directly against
+        eia_ingester.py's _fetch_series() record construction — no
+        further fix needed there.
+        """
         self._process_domain(
             source="eia",
-            domain_glob="data/bronze/commodity/eia/**/*.parquet",
+            domain_glob="data/bronze/macro/eia/**/*.parquet",
             run_date=run_date,
         )
 

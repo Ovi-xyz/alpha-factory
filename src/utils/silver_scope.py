@@ -100,3 +100,98 @@ def context_glob(silver_root: Path, filename_pattern: str) -> str | None:
     if not root.exists():
         return None
     return str(root / "**" / filename_pattern)
+
+
+def layer1_peer_groups() -> tuple[dict[str, str], dict[str, int]]:
+    """
+    ADD GAP-PEER-01: return (symbol -> market, market -> member_count) for
+    every active Layer 1 instrument, derived from InstrumentLoader.
+
+    Consumed by src/utils/gap_analysis.classify_gaps_by_peer_agreement()
+    via quality_validator.py's _check_gap_detection() — a flagged gap on
+    one symbol is treated as a market-wide holiday closure (not a data
+    problem) rather than an isolated real gap if enough of its market
+    peers show an overlapping gap over the same window. "Market" (the
+    same grouping layer1_globs() already scopes by) is the right peer
+    unit here: every Layer 1 market currently in the universe (us_stocks,
+    idx, forex, commodity) is a single country/venue with one shared
+    trading calendar, so a real market-wide closure WILL show up as
+    near-100% peer agreement within it.
+
+    Cross-market symbol collisions (currently exactly one: 'CL' is BOTH
+    the commodity WTI proxy AND the us_stocks ticker for Colgate-Palmolive
+    — confirmed empirically, not hypothetical) are mapped to peer_group
+    = None rather than silently picked by whichever market happens to be
+    iterated last. gap_analysis.py's classifier already treats
+    peer_group=None as "cannot be evaluated, never suppressed" — the
+    correct conservative behavior here, since a bare `symbol` string
+    returned by the gap-detection SQL cannot be traced back to which
+    market's file it actually came from; any classification decision for
+    a colliding symbol would be a guess, not a peer-agreement fact. This
+    does NOT fix the deeper pre-existing issue that layer1_globs() itself
+    reads all Layer 1 markets through one combined read_parquet() call
+    with no market column to disambiguate PARTITION BY symbol on — that
+    affects every Layer 1 check in quality_validator.py, not just this
+    one, and is a separate, wider-blast-radius fix than this function's
+    scope.
+    """
+    from src.config.instrument_loader import get_loader
+    loader = get_loader()
+
+    symbol_markets: dict[str, set[str]] = {}
+    for market in layer1_markets():
+        for inst in loader.by_market(market):
+            symbol_markets.setdefault(inst.symbol, set()).add(market)
+
+    colliding = {sym for sym, markets in symbol_markets.items() if len(markets) > 1}
+    if colliding:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"[silver_scope] layer1_peer_groups: {len(colliding)} symbol(s) exist "
+            f"in more than one Layer 1 market — {sorted(colliding)}. Peer group set "
+            f"to None (never suppressed) for these; see function docstring."
+        )
+
+    peer_map: dict[str, str] = {}
+    sizes: dict[str, int] = {}
+    for market in layer1_markets():
+        members = loader.by_market(market)
+        sizes[market] = len(members)
+        for inst in members:
+            peer_map[inst.symbol] = None if inst.symbol in colliding else market
+    return peer_map, sizes
+
+
+def context_peer_groups() -> tuple[dict[str, str], dict[str, int]]:
+    """
+    ADD GAP-PEER-01: Layer 2 analogue of layer1_peer_groups(), grouped by
+    context_category (e.g. 'context_equity_dm', 'context_equity_em')
+    rather than the coarser context_group (e.g. 'equity').
+
+    Deliberately the FINER taxonomy. context_group='equity' would lump
+    together DM indices (US/UK/Germany/France/Japan/Australia) that do
+    NOT share a holiday calendar with each other at all — diluting the
+    genuine Asia-Pacific holiday clustering (Lunar New Year etc., shared
+    across TWSE/KOSPI/HSI/SSEC/JKSE, i.e. context_equity_em) below any
+    reasonable agreement threshold. context_category is the
+    CrossAssetEngine taxonomy's actual unit of "these instruments plausibly
+    share a calendar or economic relationship" — context_group is not.
+
+    Deferred instruments (context_available=False, e.g. TIN/RUBBER —
+    ADR-034) are excluded: they have no Silver data to ever have a gap in,
+    and including them would only ever inflate a group's denominator with
+    permanently-absent members, making genuine agreement look weaker than
+    it is.
+    """
+    from src.config.instrument_loader import get_loader
+    loader = get_loader()
+    peer_map: dict[str, str] = {}
+    sizes: dict[str, int] = {}
+    for inst in loader.all_context(include_deferred=False):
+        # Fallback key is unique per-symbol (not a shared literal) so an
+        # uncategorized instrument never gets accidentally pooled with
+        # other uncategorized instruments it has no real relationship to.
+        category = inst.context_category or f"_uncategorized_{inst.symbol}"
+        peer_map[inst.symbol] = category
+        sizes[category] = sizes.get(category, 0) + 1
+    return peer_map, sizes

@@ -46,6 +46,23 @@ FIX QV-L2-01 [P1] (GMI Wave 1 Bronze/Silver Solidification): every check
     Layer 2 check suite (_check_context_*) was added alongside — see
     "Layer 2 (Context Anchor) Checks" section below for why these are
     WARNING not CRITICAL.
+
+ADD GAP-PEER-01 (chat thread, 8 Sep 2026): _check_gap_detection() and
+    _check_context_gap_detection() previously counted every day_gap > 5
+    occurrence identically, with no way to tell "this whole market was
+    legitimately closed" (IDX multi-day national holidays, Shanghai
+    circuit-breaker halts) from "this one symbol has a real, isolated
+    problem". Live diagnostic (8 Sep 2026, all 594 Layer 1 + 58 Layer 2
+    symbols) found the reported 282 / 87 counts were 100% and 100%
+    explained by market-wide holiday calendars respectively — a permanent
+    noise floor requiring no action, chronically red for the wrong reason.
+    Both checks now classify each gap via peer agreement within its
+    market (Layer 1) / context_category (Layer 2) — see
+    src/utils/gap_analysis.py for the classification logic and full
+    rationale, and src/utils/silver_scope.py's layer1_peer_groups() /
+    context_peer_groups() for how peer groups are derived from
+    InstrumentLoader. This changes what these two checks COUNT; it never
+    modifies any Silver data or is_clean flag.
 """
 
 from __future__ import annotations
@@ -62,7 +79,13 @@ from loguru import logger
 
 from src.config.pipeline_config import duckdb_connection, get_config
 from src.utils.atomic_io import atomic_write_parquet  # FIX SIL-SQL-001 / SIL-AIO usage
-from src.utils.silver_scope import context_glob, layer1_globs  # FIX QV-L2-01
+from src.utils.gap_analysis import GapEvent, classify_gaps_by_peer_agreement  # ADD GAP-PEER-01
+from src.utils.silver_scope import (  # FIX QV-L2-01, ADD GAP-PEER-01
+    context_glob,
+    context_peer_groups,
+    layer1_globs,
+    layer1_peer_groups,
+)
 
 SILVER_OHLCV_PATH  = Path("data/silver/market_ohlcv")
 SILVER_MACRO_PATH  = Path("data/silver/macro_enriched")
@@ -331,6 +354,73 @@ class QualityValidator:
 
     # ── WARNING Checks ────────────────────────────────────────────────────────
 
+    # ── ADD GAP-PEER-01: shared gap-fetch + peer-classification helpers ────
+    # Used by both _check_gap_detection() and _check_context_gap_detection()
+    # so the WITH-gaps CTE and the classification call exist in exactly one
+    # place — the prior implementation had this SQL duplicated verbatim
+    # across both methods (see module docstring for why that shape is
+    # itself a known risk class in this codebase).
+
+    def _fetch_raw_gap_events(
+        self, con, glob_or_globs, threshold_days: int = 5
+    ) -> list[tuple]:
+        """Return raw (symbol, prev_ts, ts, day_gap) rows where day_gap
+        exceeds threshold_days. No aggregation, no classification —
+        callers turn these into GapEvent objects and classify them via
+        gap_analysis.classify_gaps_by_peer_agreement(). Accepts either a
+        single glob string (Layer 2) or a list of globs (Layer 1) — DuckDB
+        read_parquet() handles both identically."""
+        return con.execute(
+            """
+            WITH gaps AS (
+                SELECT
+                    symbol,
+                    LAG(CAST(timestamp AS DATE)) OVER (
+                        PARTITION BY symbol ORDER BY timestamp
+                    ) AS prev_ts,
+                    CAST(timestamp AS DATE) AS ts,
+                    DATEDIFF(
+                        'day',
+                        LAG(CAST(timestamp AS DATE)) OVER (
+                            PARTITION BY symbol ORDER BY timestamp
+                        ),
+                        CAST(timestamp AS DATE)
+                    ) AS day_gap
+                FROM read_parquet($src, hive_partitioning=true)
+            )
+            SELECT symbol, prev_ts, ts, day_gap
+            FROM gaps
+            WHERE day_gap > $threshold
+            """,  # FIX SIL-SQL-001
+            {"src": glob_or_globs, "threshold": threshold_days},
+        ).fetchall()
+
+    def _classified_gap_counts(
+        self,
+        con,
+        glob_or_globs,
+        peer_map: dict[str, str],
+        peer_sizes: dict[str, int],
+        threshold_days: int = 5,
+    ) -> tuple[int, int, dict[str, int]]:
+        """Fetch + classify in one call. Returns (isolated_count,
+        closure_count, closures_by_group) — the third element is only for
+        the caller's DEBUG log line, e.g. {'idx': 282} or
+        {'context_equity_em': 66, 'context_equity_dm': 2}."""
+        raw = self._fetch_raw_gap_events(con, glob_or_globs, threshold_days)
+        events = [
+            GapEvent(symbol=r[0], prev_ts=r[1], ts=r[2], day_gap=r[3],
+                     peer_group=peer_map.get(r[0]))
+            for r in raw
+        ]
+        isolated, closures = classify_gaps_by_peer_agreement(events, peer_sizes)
+
+        closures_by_group: dict[str, int] = {}
+        for e in closures:
+            closures_by_group[e.peer_group] = closures_by_group.get(e.peer_group, 0) + 1
+
+        return len(isolated), len(closures), closures_by_group
+
     def _check_gap_detection(self, run_date: date) -> bool:
         """
         FIX F-QV-02 [P1]: Implemented — previously listed in WARNING_CHECKS
@@ -338,11 +428,22 @@ class QualityValidator:
 
         Detect timestamp gaps in Silver 1D: if any symbol has > 5 consecutive
         calendar-day gap (excluding weekends still counts when > 5), flag it.
-        Threshold: > 50 gap occurrences triggers warning.
+        Threshold: > 50 ISOLATED gap occurrences triggers warning (see
+        FIX GAP-PEER-01 below for what "isolated" now means).
 
         DuckDB LAG window: DATEDIFF('day', prev_ts, timestamp) > 5
         covers 3-day weekends and single public holidays gracefully.
         Consistent with GD §13.1 "Gap Detection — log gap, < 3 bars interpolate".
+
+        FIX GAP-PEER-01 [chat thread, 8 Sep 2026]: raw gaps are now
+        classified via peer agreement within each symbol's InstrumentLoader
+        market (see module docstring + src/utils/gap_analysis.py). A gap
+        shared by most of a symbol's market peers over the same window is
+        a market-wide holiday closure, excluded here and logged at DEBUG —
+        not deleted, not modified in Silver, just no longer counted toward
+        this WARNING. Live-confirmed (8 Sep 2026) this fully explains the
+        prior chronic 282-gap count: 100% IDX, uniform min=6/max=12 day-gap
+        signature across all 30 symbols.
         """
         try:
             con = duckdb.connect()
@@ -350,44 +451,34 @@ class QualityValidator:
             globs_1d = layer1_globs(SILVER_OHLCV_PATH, "*_1D_silver.parquet")
             if not globs_1d:
                 return True
-            result = con.execute(
-                """
-                WITH gaps AS (
-                    SELECT
-                        symbol,
-                        CAST(timestamp AS DATE)                                    AS ts_date,
-                        LAG(CAST(timestamp AS DATE)) OVER (
-                            PARTITION BY symbol
-                            ORDER BY timestamp
-                        )                                                          AS prev_ts,
-                        DATEDIFF(
-                            'day',
-                            LAG(CAST(timestamp AS DATE)) OVER (
-                                PARTITION BY symbol
-                                ORDER BY timestamp
-                            ),
-                            CAST(timestamp AS DATE)
-                        )                                                          AS day_gap
-                    FROM read_parquet($globs, hive_partitioning=true)
-                )
-                SELECT COUNT(*) AS gap_count
-                FROM gaps
-                WHERE day_gap > 5
-                """,  # FIX SIL-SQL-001
-                {"globs": globs_1d},
-            ).fetchone()
 
-            gap_count = result[0] if result else 0
-            if gap_count > 50:
+            peer_map, peer_sizes = layer1_peer_groups()
+            isolated_count, closure_count, closures_by_group = self._classified_gap_counts(
+                con, globs_1d, peer_map, peer_sizes
+            )
+
+            if closure_count:
+                logger.debug(
+                    f"[QV] gap_detection: {closure_count} gap(s) peer-confirmed "
+                    f"as market closures, excluded (FIX GAP-PEER-01) — "
+                    f"by market: {closures_by_group}"
+                )
+
+            if isolated_count > 50:
                 self._issues.append({
                     "check":  "gap_detection",
-                    "detail": f"{gap_count} gaps > 5 calendar days in Silver 1D"
+                    "detail": f"{isolated_count} isolated gaps > 5 calendar days "
+                              f"in Silver 1D ({closure_count} peer-confirmed "
+                              f"market closures excluded)"
                 })
                 logger.debug(
-                    f"[QV] gap_detection: {gap_count} gaps > 5 days found"
+                    f"[QV] gap_detection: {isolated_count} isolated gaps > 5 days found"
                 )
                 return False
-            logger.debug(f"[QV] gap_detection: {gap_count} gaps found (threshold=50)")
+            logger.debug(
+                f"[QV] gap_detection: {isolated_count} isolated gaps found "
+                f"(threshold=50; {closure_count} market-closure gaps excluded)"
+            )
         except Exception as e:
             logger.debug(f"[QV] gap_detection skipped: {e}")
         return True
@@ -843,39 +934,49 @@ class QualityValidator:
     def _check_context_gap_detection(self, run_date: date) -> bool:
         """Layer 2 analogue of _check_gap_detection. Same >5 calendar-day /
         >50-occurrence thresholds as Layer 1 (see class docstring rationale
-        for reusing thresholds across layers in this first pass)."""
+        for reusing thresholds across layers in this first pass).
+
+        FIX GAP-PEER-01 [chat thread, 8 Sep 2026]: same peer-agreement
+        classification as the Layer 1 check, grouped by context_category
+        (finer than context_group — see context_peer_groups() docstring
+        for why DM/EM equity must not be pooled together here). Live-
+        confirmed this fully explains the prior chronic 87-gap count:
+        SSEC(28)/JKSE(13)/TWSE(13)/KOSPI(12)/N225(12)/HSI(4) — Asia-Pacific
+        holiday-calendar clustering — plus DAX(2) and ALUMINIUM(3, a
+        one-time 2016 cold-start artifact these two small counts don't
+        reach the >50 threshold on their own regardless of classification).
+        """
         try:
             con = duckdb.connect()
             con.execute("SET memory_limit='2GB';")
             glob = context_glob(SILVER_OHLCV_PATH, "*_1D_silver.parquet")
             if glob is None:
                 return True
-            result = con.execute(
-                """
-                WITH gaps AS (
-                    SELECT
-                        symbol,
-                        DATEDIFF(
-                            'day',
-                            LAG(CAST(timestamp AS DATE)) OVER (
-                                PARTITION BY symbol ORDER BY timestamp
-                            ),
-                            CAST(timestamp AS DATE)
-                        ) AS day_gap
-                    FROM read_parquet($glob, hive_partitioning=true)
-                )
-                SELECT COUNT(*) AS gap_count FROM gaps WHERE day_gap > 5
-                """,
-                {"glob": glob},
-            ).fetchone()
 
-            gap_count = result[0] if result else 0
-            if gap_count > 50:
+            peer_map, peer_sizes = context_peer_groups()
+            isolated_count, closure_count, closures_by_group = self._classified_gap_counts(
+                con, glob, peer_map, peer_sizes
+            )
+
+            if closure_count:
+                logger.debug(
+                    f"[QV] context_gap_detection: {closure_count} gap(s) "
+                    f"peer-confirmed as market closures, excluded "
+                    f"(FIX GAP-PEER-01) — by category: {closures_by_group}"
+                )
+
+            if isolated_count > 50:
                 self._issues.append({
                     "check":  "context_gap_detection",
-                    "detail": f"{gap_count} Layer 2 gaps > 5 calendar days"
+                    "detail": f"{isolated_count} isolated Layer 2 gaps > 5 "
+                              f"calendar days ({closure_count} peer-confirmed "
+                              f"market closures excluded)"
                 })
                 return False
+            logger.debug(
+                f"[QV] context_gap_detection: {isolated_count} isolated gaps "
+                f"found (threshold=50; {closure_count} market-closure gaps excluded)"
+            )
         except Exception as e:
             logger.debug(f"[QV] context_gap_detection skipped: {e}")
         return True

@@ -1,5 +1,172 @@
 # CHANGELOG — Data Platform
 
+## v1.17.10 — Peer-Agreement Classification untuk gap_detection/context_gap_detection + 2 Fix Silver Lain (September 2026)
+
+Tindak lanjut dari diskusi chat 8 Sep 2026: `gap_detection` (Layer 1, 282
+occurrence) dan `context_gap_detection` (Layer 2, 87 occurrence) kronis
+WARNING di log `silver_validate`, angka nyaris tidak berubah lintas
+beberapa run (2–8 Sep 2026). Diagnostik live dilakukan — bukan asumsi dari
+log semata: seluruh 594 file Silver 1D Layer 1 dan 58 file Layer 2
+di-copy via Filesystem MCP ke sandbox Claude dan di-query langsung dengan
+DuckDB.
+
+**1. FIX GAP-PEER-01 — kedua check menghitung penutupan pasar market-wide
+sebagai gap data.** Root cause: threshold flat `day_gap > 5 hari kalender`
+diterapkan seragam ke semua instrumen, tanpa konsep kalender trading
+per-market. Hasil diagnostik: 282 gap Layer 1 100% berasal dari IDX
+(seluruh 30 simbol, signature identik `min_gap=6/max_gap=12` yang skalanya
+mengikuti umur listing tiap simbol — sidik jari kalender libur nasional
+bersama, mis. libur Lebaran). us_stocks/forex/commodity kontribusi nol. 87
+gap Layer 2 terkonsentrasi di SSEC(28)/JKSE(13)/TWSE(13)/KOSPI(12)/
+N225(12)/HSI(4) — indeks ekuitas Asia-Pasifik dengan kalender libur
+regional yang sama (Imlek dkk.) — plus DAX(2) dan ALUMINIUM(3, artifact
+cold-start 2016 satu kali, bukan efek kalender). Kelebihan gap SSEC di atas
+baseline ~12–13 indeks Asia lainnya konsisten dengan `reliability_flag`/
+riwayat circuit-breaker yang sudah terdokumentasi (Architecture v2.0
+§3.5) — mengonfirmasi risk yang sudah diketahui, bukan temuan baru. Tidak
+satupun gap ini adalah data hilang yang bisa di-backfill — desain
+incremental fetch (`IncFetchProtocol`, Supplementary Design v1.1 G1) hanya
+extend maju dari tanggal terakhir, tidak pernah mengisi gap historis di
+tengah series.
+
+Fix: modul baru `src/utils/gap_analysis.py` — `classify_gaps_by_peer_agreement()`
+mengklasifikasi tiap gap via peer agreement: jika ≥50% peer simbol dalam
+grup yang sama (Layer 1: `market` dari InstrumentLoader; Layer 2:
+`context_category` yang lebih granular, BUKAN `context_group` yang lebih
+kasar — equity DM dan EM tidak berbagi kalender libur) menunjukkan gap
+yang overlap pada window tanggal yang sama, gap tersebut diklasifikasi
+sebagai penutupan pasar market-wide, dikecualikan dari hitungan WARNING
+dan di-log di level DEBUG saja. Tidak ada data Silver atau flag `is_clean`
+yang diubah — fix ini hanya mengubah apa yang dihitung oleh kedua check.
+`src/utils/silver_scope.py` mendapat dua fungsi baru:
+`layer1_peer_groups()` dan `context_peer_groups()` — keduanya derive peer
+group dari `InstrumentLoader`, bukan hardcode. `_check_gap_detection()`
+dan `_check_context_gap_detection()` di `quality_validator.py` di-refactor
+untuk berbagi satu helper fetch SQL (`_fetch_raw_gap_events`) dan satu
+classification call (`_classified_gap_counts`) — sebelumnya masing-masing
+punya copy independen dari WITH-gaps CTE yang identik, pola "same bug,
+unmirrored fix" yang sama persis dengan bug path EIA yang masih open
+(`macro_processor.py::process_eia()` tidak pernah menerima koreksi path
+FIX EIA-5 yang diterapkan ke `eia_ingester.py`).
+
+**2. TEMUAN BARU, SENGAJA TIDAK DIPERBAIKI SESI INI — collision simbol
+lintas-market pada 'CL'.** Saat membangun peer map Layer 1, ditemukan
+collision live yang terkonfirmasi: ticker `CL` merujuk ke DUA instrumen
+berbeda — proxy WTI crude oil (`market=commodity`) DAN ticker
+Colgate-Palmolive (`market=us_stocks`). Dikonfirmasi empiris via
+`loader.by_market('commodity')` dan `loader.by_market('us_stocks')` —
+keduanya mengembalikan instrumen dengan `symbol == 'CL'`. Ini persis `CL`
+yang sama yang sudah ditemukan RISK-27 meracuni z-score outlier
+lintas-simbol. `layer1_peer_groups()` sekarang mendeteksi collision ini
+dan set peer group `CL` ke `None` (jalur "tidak bisa diklasifikasi, tidak
+pernah di-suppress" yang memang didesain di `gap_analysis.py`) — bukan
+diam-diam memilih market manapun yang kebetulan di-iterasi terakhir oleh
+`layer1_markets()`. Ini melindungi fitur peer-classification baru secara
+sempit, TAPI tidak memperbaiki masalah yang lebih dalam:
+`silver_scope.layer1_globs()` menggabungkan SEMUA market Layer 1 ke DALAM
+SATU query `read_parquet()` gabungan tanpa kolom market untuk
+disambiguasi — artinya `PARTITION BY symbol` di `_check_null`,
+`_check_price_sanity`, `_check_coverage`, `_check_outliers`, dan
+`_check_adj_integrity` SEMUANYA diam-diam menginterleave baris WTI crude
+dan Colgate-Palmolive di bawah satu partition "CL" yang sama HARI INI,
+tidak hanya di gap_detection. Scope collision sempit (dikonfirmasi via
+full scan: hanya 1 simbol, hanya Layer 1, tidak ada collision Layer 2,
+tidak ada overlap Layer 1/Layer 2) tapi fix-nya (memberi setiap check
+Layer-1-scoped partition yang market-aware, bukan hanya symbol-aware)
+menyentuh 5 check CRITICAL/WARNING yang sudah ada — blast radius lebih
+lebar dari scope sesi ini. Diregister sebagai **RISK-30 (OPEN, sebagian)**
+di `KNOWN_RISKS.md` — menunggu keputusan Ovi sebelum menyentuh 5 check
+tersebut.
+
+Test baru: `tests/unit/test_gap_analysis.py` (21 test, murni sintetis —
+full-agreement closure, isolated tanpa agreement, boundary tepat 50%,
+di bawah threshold, gap non-overlap dalam grup sama, `peer_group=None`,
+grup singleton, grup tidak dikenal, isolasi lintas-grup, exclusion
+self-match, nilai `min_peer_agreement` invalid/boundary).
+`tests/unit/test_silver_scope.py` (+12 test) — terhadap universe
+instrumen live sesungguhnya, bukan mock: membership commodity, penanganan
+collision `CL` secara spesifik, separasi DM/EM equity, peer metal asli
+ALUMINIUM, kategori singleton (DXY/VIX), exclusion instrumen deferred
+(TIN/RUBBER). `tests/unit/test_quality_validator.py` (+8 test) — fixture
+end-to-end nyata memakai market `commodity` dan kategori
+`context_equity_em` sesungguhnya (bukan nama grup sintetis), membuktikan
+penutupan market-wide dikecualikan dan gap terisolasi tetap tertangkap,
+plus test keputusan threshold yang mengonfirmasi kedua check tetap PASS
+saat closure yang terkonfirmasi peer menyerap apa yang sebelumnya akan
+melewati threshold `>50`. `ast.parse` bersih pada seluruh file baru/
+dimodifikasi. Full suite: **1632 passed / 0 failed / 0 error** (1592
+baseline + 40 test baru). Tidak ada test lama yang rusak.
+
+**3. FIX EIA-6 — silver_macro selalu warning "eia: no data yet" meski
+data Bronze EIA nyata sudah ada.** Root cause: `macro_processor.py::
+process_eia()` menggunakan glob hardcoded `"data/bronze/commodity/
+eia/**/*.parquet"` — direktori yang TIDAK PERNAH ada (dikonfirmasi
+empiris: `data/bronze/commodity/` tidak eksis sama sekali di disk).
+`EIAIngester.run()` menulis via `self.write_macro(source="eia",
+domain="crude_oil", ...)`, yang resolve ke `BASE_PATH/macro/eia/
+crude_oil/` — konvensi path yang SAMA persis dengan `process_fred()`/
+`process_bls()`/`process_bea()` (`data/bronze/macro/{source}/**/
+*.parquet`). Ini adalah sisi Silver dari bug yang setengah diperbaiki:
+FIX EIA-5 (sudah ada di `eia_ingester.py`) mengoreksi literal path yang
+SAMA PERSIS salahnya untuk Bronze-side incremental-fetch cache scan,
+tapi fix itu tidak pernah di-mirror ke sisi Silver ini — dua salinan
+independen dari string path yang sama-sama salah, hanya satu yang
+pernah dikoreksi. Dikonfirmasi via inspeksi Bronze langsung (Filesystem
+MCP, 8 Sep 2026): data EIA asli ada di `data/bronze/macro/eia/
+crude_oil/` (4 file, seluruh 4 entry EIA_SERIES hadir) — jadi murni
+path mismatch, bukan data upstream yang hilang. Kompatibilitas schema
+dengan query generik `_process_domain()` (`series_id`, `observation_
+date`, `release_date`, `value`) diverifikasi langsung terhadap
+`eia_ingester.py::_fetch_series()` — tidak perlu fix tambahan di sana.
+Fix: `domain_glob` dikoreksi ke `"data/bronze/macro/eia/**/*.parquet"`,
+mengikuti konvensi source-level yang sama dengan fred/bls/bea. Docstring
+`eia_ingester.py`'s yang menyebut path lama (`Output: data/bronze/
+commodity/eia/...`) — kemungkinan besar sumber asli dari literal salah
+yang sama ini — turut dikoreksi. Test baru: `tests/unit/
+test_macro_processor.py` (+2 test) — satu mengonfirmasi data di path
+BENAR (`data/bronze/macro/eia/crude_oil/`) berhasil diproses ke Silver,
+satu mengonfirmasi data yang HANYA ada di path lama yang salah TIDAK
+ditemukan (regression guard supaya glob tidak pernah dilebarkan,
+melainkan benar-benar dikoreksi).
+
+**4. FIX AV-CNH-01 — VWAP Layer 2 gagal untuk CNH: "expected Datetime or
+Date, got str".** Root cause: `AlphaVantageForexAdapter.fetch()` (satu-
+satunya sumber untuk CNH, ADR-048) membangun kolom `timestamp` Bronze
+sebagai `dt_str[:10]` — string Python mentah — padahal `obs_date`
+(objek `date` yang sudah di-parse dengan benar) dihitung SATU BARIS
+SEBELUMNYA dan sudah dipakai untuk filter start/end, tapi tidak pernah
+dipakai untuk kolom itu sendiri. `pl.DataFrame(records)` akibatnya
+meng-infer kolom `timestamp` sebagai Utf8, bukan Date. `OHLCVProcessor.
+_normalize_timestamps()` hanya punya cabang untuk `pl.Date` dan
+`pl.Datetime` — kolom Utf8 lolos tanpa disentuh — dan `_add_derived_
+fields()`'s kalkulasi VWAP lalu memanggil `.dt.date()` yang mensyaratkan
+tipe Date/Datetime, menghasilkan persis error yang terlihat di log,
+ditangkap oleh `except` yang luas sehingga VWAP diam-diam menjadi
+all-null untuk CNH alih-alih error yang jelas. Dikonfirmasi via
+perbandingan langsung: DXY (sumber yfinance, via `pl.from_pandas()` atas
+`pandas.DatetimeIndex` asli) sudah bertipe benar sejak awal — CNH
+satu-satunya di antara 58 simbol Layer 2 yang bertipe Utf8. Fix: baris
+`"timestamp": dt_str[:10]` diganti `"timestamp": obs_date` — memakai
+variabel yang sudah benar yang sudah ada, bukan menambah logika baru.
+Defense-in-depth ditambahkan di `OHLCVProcessor._normalize_timestamps()`:
+cabang baru untuk dtype Utf8 yang mem-parse via `str.to_datetime(strict=
+False)` (menangani baik string tanggal murni maupun datetime penuh,
+graceful null untuk yang genuinely tidak valid, tidak pernah raise) —
+supaya adapter manapun di masa depan yang membuat kesalahan identik
+terdegradasi dengan baik alih-alih gagal opaque di dalam kalkulasi VWAP.
+Test baru: `tests/unit/test_alphavantage_adapter.py` (2 test lama
+diperbaiki assertion-nya dari string ke objek `date` — assertion lama
+memvalidasi perilaku BUGGY, bukan yang benar), `tests/unit/
+test_ohlcv_processor.py` (+5 test baru: parsing Utf8 tanggal murni,
+Utf8 datetime penuh, VWAP tidak lagi gagal, null parsial untuk baris
+campuran valid/invalid, kolom yang 100% tidak valid dibiarkan utuh
+tanpa crash).
+
+Full suite akhir sesi ini (ketiga fix + seluruh test baru): **1639
+passed / 0 failed / 0 error** (1592 baseline awal sesi + 47 test baru
+total). `ast.parse` bersih pada seluruh file baru/dimodifikasi. Tidak
+ada f-string SQL baru (Gate G-2 CI bersih).
+
 ## v1.17.9 — VIXCLS Starvation + Macro Write UTC/Run_Date Bug: 3 Bug Diperbaiki (September 2026)
 
 Investigasi Ovi atas temuan manual: `data/bronze/macro/fred/volatility` hanya

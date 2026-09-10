@@ -164,6 +164,67 @@ def _make_silver_1h(n_days: int = 5, symbol: str = "AAPL") -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
+class TestNormalizeTimestampsUtf8Fallback:
+    """FIX AV-CNH-01 defense-in-depth [chat thread, 8/9 Sep 2026]. The
+    actual root cause (AlphaVantageForexAdapter writing a raw date string
+    instead of a date object) is fixed at the source — these tests cover
+    the separate, deliberately-added safety net in _normalize_timestamps()
+    itself, for whatever future adapter makes the identical mistake.
+    Before this fix, a Utf8 timestamp column matched neither the pl.Date
+    nor pl.Datetime branch and passed through completely untouched, only
+    to fail later and opaquely inside _add_derived_fields()'s VWAP calc."""
+
+    def test_utf8_date_strings_are_parsed_and_utc_localized(self):
+        df = pl.DataFrame({"timestamp": ["2025-01-15", "2025-01-16"]})
+        out = OHLCVProcessor._normalize_timestamps(df, market="forex")
+        assert out["timestamp"].dtype.time_zone == "UTC"
+        assert out["timestamp"].dt.date().to_list() == [date(2025, 1, 15), date(2025, 1, 16)]
+
+    def test_utf8_datetime_strings_are_parsed(self):
+        df = pl.DataFrame({"timestamp": ["2025-01-15 09:30:00"]})
+        out = OHLCVProcessor._normalize_timestamps(df, market="us_stocks")
+        assert out["timestamp"].dtype.time_zone == "UTC"
+
+    def test_downstream_vwap_no_longer_fails_on_string_timestamp(self):
+        """The actual symptom this whole fix chain addresses: VWAP must
+        compute normally once the string has been parsed, not silently
+        fall back to all-null."""
+        df = pl.DataFrame({
+            "timestamp": ["2025-01-15", "2025-01-16"],
+            "open":  [1.10, 1.11], "high": [1.12, 1.13],
+            "low":   [1.09, 1.10], "close": [1.11, 1.12],
+            "volume": [1000, 1200],
+        })
+        df = OHLCVProcessor._normalize_timestamps(df, market="forex")
+        df = OHLCVProcessor._add_derived_fields(df, timeframe="1D")
+        assert "vwap" in df.columns
+        assert df["vwap"].null_count() == 0
+
+    def test_mixed_valid_and_invalid_strings_nulls_only_the_bad_rows(self):
+        """When most of the column parses, format inference succeeds and
+        the specific unparseable row nulls out individually — same
+        graceful-degradation contract as the Date/Datetime branches."""
+        df = pl.DataFrame({"timestamp": ["2025-01-15", "garbage", "2025-01-17"]})
+        out = OHLCVProcessor._normalize_timestamps(df, market="forex")
+        result = out["timestamp"].to_list()
+        assert result[1] is None
+        assert result[0] is not None and result[2] is not None
+
+    def test_wholly_unparseable_column_left_untouched_not_crashed(self):
+        """When NO row in the column matches any recognizable format,
+        Polars' format inference itself fails (raises internally) rather
+        than nulling row-by-row — caught by the outer try/except in
+        _normalize_timestamps(), which logs a debug note and returns the
+        DataFrame unchanged. Verified empirically: this is a materially
+        different failure mode from the mixed-validity case above, not a
+        bug in either branch — the point is the SAME as the Date/Datetime
+        branches' contract: never raise out of this method and take down
+        a whole ingestion run over one column's data quality."""
+        df = pl.DataFrame({"timestamp": ["not-a-date"]})
+        out = OHLCVProcessor._normalize_timestamps(df, market="forex")
+        assert out["timestamp"].to_list() == ["not-a-date"]
+
+
 class TestFlagIsCleanOutlierIsolation:
     """
     FIX OP-LR-01 [chat thread, 2 Sep 2026]: a single sign-crossing close

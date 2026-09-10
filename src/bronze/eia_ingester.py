@@ -12,7 +12,15 @@ Series ingested:
     PET.WGIRIUS2.W  — US Crude Oil Refinery Input
     PET.RWTC.W      — WTI Crude Oil Spot Price (weekly)
 
-Output: data/bronze/commodity/eia/{series_id}_{ts}.parquet
+Output: data/bronze/macro/eia/crude_oil/{series_name}_{ts}.parquet
+    (FIX EIA-6, chat thread, 8/9 Sep 2026: this docstring previously said
+    data/bronze/commodity/eia/{series_id}_{ts}.parquet — a path this
+    ingester has never actually written to; the real path is whatever
+    write_macro(source="eia", domain="crude_oil", ...) resolves to below.
+    That stale docstring is the most likely original source of the exact
+    wrong literal macro_processor.py::process_eia() carried until FIX
+    EIA-6 corrected it — fixing the doc now that the code is fixed, so it
+    can't mislead the next reader the same way again.)
 """
 
 from __future__ import annotations

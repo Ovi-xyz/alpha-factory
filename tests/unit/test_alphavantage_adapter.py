@@ -2,6 +2,7 @@
 
 from datetime import date
 
+import polars as pl
 import pytest
 
 from src.bronze.alphavantage_adapter import AlphaVantageForexAdapter
@@ -188,7 +189,19 @@ class TestFetchHttpFlow:
         with patch("requests.get", return_value=resp):
             df = adapter.fetch("EUR/USD", "1D", date(2025, 1, 2), date(2025, 1, 31))
         assert df is not None
-        assert df["timestamp"].to_list() == ["2025-01-10", "2025-01-15"]
+        # FIX AV-CNH-01 [chat thread, 8/9 Sep 2026]: was dt_str[:10] (a raw
+        # string) even though obs_date (a proper date object, already used
+        # for the start/end filter two lines above in fetch()) was sitting
+        # right there unused. A Utf8 timestamp column matched neither
+        # branch in OHLCVProcessor._normalize_timestamps() and passed
+        # through untouched, only to fail later inside _add_derived_fields()
+        # 's VWAP calc ("expected Datetime or Date, got str") — this is
+        # exactly the bug that produced that error for CNH, the sole
+        # consumer of this adapter as a PRIMARY (not fallback) source
+        # (ADR-048). Asserting real date objects here, not "YYYY-MM-DD"
+        # strings, is the actual regression guard.
+        assert df["timestamp"].dtype == pl.Date
+        assert df["timestamp"].to_list() == [date(2025, 1, 10), date(2025, 1, 15)]
         assert df["volume"].to_list() == [None, None]
         assert SourceLimiters.alphavantage.used == before + 1   # FIX AV-1: consumed on success
 
@@ -219,7 +232,11 @@ class TestFetchHttpFlow:
         with patch("requests.get", return_value=resp):
             df = adapter.fetch("EUR/USD", "1D", date(2025, 1, 2), date(2025, 1, 31))
         assert df is not None
-        assert df["timestamp"].to_list() == ["2025-01-15"]
+        # FIX AV-CNH-01: real date object, not the "YYYY-MM-DD" string the
+        # old (buggy) code produced — see test_successful_fetch_returns_
+        # sorted_filtered_df above for the full rationale.
+        assert df["timestamp"].dtype == pl.Date
+        assert df["timestamp"].to_list() == [date(2025, 1, 15)]
 
     def test_all_rows_out_of_range_returns_none(self, monkeypatch):
         from unittest.mock import patch
