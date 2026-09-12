@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.config.instrument_loader import get_loader, InstrumentLoader
+from src.config.instrument_loader import get_loader, InstrumentLoader, Instrument
 
 
 class TestInstrumentLoader:
@@ -37,8 +37,13 @@ class TestInstrumentLoader:
         (confirmed genuinely ACTIVE — stopgap over an undiagnosed
         fetch-pipeline bug, not a delisting) and SJW/NEW/PEAK
         (insufficient evidence either way).
+
+        UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): 594 -> 593.
+        CL (Colgate-Palmolive) removed to resolve a cross-market ticker
+        collision with commodity CL (WTI crude). See KNOWN_RISKS.md
+        RISK-30.
         """
-        assert self.loader.count() == 594
+        assert self.loader.count() == 593
 
     def test_get_aapl(self):
         inst = self.loader.get("AAPL")
@@ -93,8 +98,11 @@ class TestInstrumentLoader:
         us_stocks 552->543 (-9 more — 6 confirmed active/stopgap, 3
         unresolved, all us_stocks too). idx/forex/commodity still
         unaffected.
+        UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): us_stocks
+        543->542 (-1, CL/Colgate-Palmolive — resolved a cross-market
+        collision with commodity CL). idx/forex/commodity unaffected.
         """
-        assert len(self.loader.by_market("us_stocks")) == 543
+        assert len(self.loader.by_market("us_stocks")) == 542
         assert len(self.loader.by_market("idx"))       == 30
         assert len(self.loader.by_market("forex"))     == 18
         assert len(self.loader.by_market("commodity")) == 3
@@ -111,16 +119,54 @@ class TestInstrumentLoader:
         with pytest.raises(Exception):   # frozen=True → AttributeError
             inst.symbol = "CHANGED"
 
-    def test_cl_requires_market_param(self):
-        """CL ada di us_stocks (Colgate) DAN commodity (WTI) — butuh market param."""
-        with pytest.raises(KeyError):
-            self.loader.get("CL")   # ambiguous — must specify market
+    def test_get_disambiguates_by_market_when_symbol_collides(self):
+        """Historically exercised via real ticker 'CL' (WTI crude in
+        commodity vs. Colgate-Palmolive in us_stocks) — that collision was
+        resolved by removing the equity ticker (chat thread, 9 Sep 2026,
+        RISK-30; see KNOWN_RISKS.md and scripts/validate_instruments.py
+        GMI-VAL-006). get()'s market= disambiguation parameter is general-
+        purpose defensive code for ANY future collision, not code specific
+        to CL, so this test now injects a synthetic collision directly
+        into the loader's internal index rather than depending on the
+        live universe happening to contain a real one — the mechanism
+        under test is get()'s branching logic, not today's instrument
+        list.
+        """
+        fake_a = Instrument(
+            symbol="ZZ_COLLISION_TEST", raw_symbol="ZZ_COLLISION_TEST",
+            market="commodity", sector=None, yfinance_symbol="ZZ=F",
+            polygon_symbol="ZZ_COLLISION_TEST", tvfeed_symbol=None,
+            eia_series=None, timezone="America/New_York",
+        )
+        fake_b = Instrument(
+            symbol="ZZ_COLLISION_TEST", raw_symbol="ZZ_COLLISION_TEST",
+            market="us_stocks", sector="Consumer Staples",
+            yfinance_symbol="ZZ_COLLISION_TEST", polygon_symbol="ZZ_COLLISION_TEST",
+            tvfeed_symbol=None, eia_series=None, timezone="America/New_York",
+        )
+        self.loader._by_symbol["ZZ_COLLISION_TEST"] = [fake_a, fake_b]
+        try:
+            with pytest.raises(KeyError):
+                self.loader.get("ZZ_COLLISION_TEST")   # ambiguous — must specify market
 
-        cl_stock = self.loader.get("CL", market="us_stocks")
-        cl_commo = self.loader.get("CL", market="commodity")
-        assert cl_stock.market == "us_stocks"
-        assert cl_commo.market == "commodity"
-        assert cl_commo.eia_series == "PET.RWTC.W"
+            got_commodity = self.loader.get("ZZ_COLLISION_TEST", market="commodity")
+            got_stock     = self.loader.get("ZZ_COLLISION_TEST", market="us_stocks")
+            assert got_commodity.market == "commodity"
+            assert got_stock.market == "us_stocks"
+        finally:
+            del self.loader._by_symbol["ZZ_COLLISION_TEST"]
+
+    def test_cl_is_no_longer_ambiguous(self):
+        """UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): CL used to
+        require market= (collided between commodity WTI and us_stocks
+        Colgate-Palmolive). The equity side was removed, so CL now
+        resolves unambiguously to the one remaining instrument — the
+        commodity WTI proxy — with no market= needed at all."""
+        cl = self.loader.get("CL")
+        assert cl.market == "commodity"
+        assert cl.eia_series == "PET.RWTC.W"
+        with pytest.raises(KeyError):
+            self.loader.get("CL", market="us_stocks")
 
     def test_market_map_returns_dict(self):
         mkt_map = self.loader.market_map()
@@ -206,8 +252,11 @@ class TestInstrumentLoaderLayer2:
 
         FIX GMI-VAL-005 (chat thread, 3 Sep 2026, RISK-28 follow-up):
         Layer 1 603 -> 594 (-9 more), so 661 -> 652.
+
+        UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): Layer 1
+        594 -> 593 (-1, CL/Colgate-Palmolive), so 652 -> 651.
         """
-        assert self.loader.count_total() == 652
+        assert self.loader.count_total() == 651
 
     def test_deferred_count_is_2(self):
         """FIX ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):

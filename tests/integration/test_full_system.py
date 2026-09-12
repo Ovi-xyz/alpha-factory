@@ -291,9 +291,15 @@ class TestFullSystemPipeline:
         ACTIVE; this is an explicit stopgap over an undiagnosed
         fetch-pipeline bug, not a delisting) and SJW/NEW/PEAK
         (insufficient evidence either way). See KNOWN_RISKS.md RISK-28.
+
+        UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): 594 -> 593.
+        CL (Colgate-Palmolive, Consumer Staples) removed to resolve a
+        cross-market ticker collision with commodity CL (WTI crude) —
+        see KNOWN_RISKS.md RISK-30 and scripts/validate_instruments.py
+        module docstring.
         """
         from src.config.instrument_loader import get_loader
-        assert get_loader().count() == 594
+        assert get_loader().count() == 593
 
     def test_l7_layer2_context_universe_present(self):
         """ADD GMI-IL-001: Layer 2 context anchors — Extension v1.0 §3.1 total

@@ -1,5 +1,85 @@
 # CHANGELOG — Data Platform
 
+## v1.17.11 — Hapus Ticker Colgate-Palmolive (CL) dari Universe: Resolusi RISK-30 (September 2026)
+
+Keputusan Ovi atas temuan RISK-30 (sesi v1.17.10): daripada memperbaiki 5
+check `quality_validator.py` (`_check_null`, `_check_price_sanity`,
+`_check_coverage`, `_check_outliers`, `_check_adj_integrity`) agar
+market-aware demi menangani collision ticker `CL` (WTI crude oil di
+`commodity` vs Colgate-Palmolive di `us_stocks`), Ovi memilih fix yang
+lebih sederhana: hapus ticker equity-nya. Instruksi eksplisit: "remove
+Colgate-Palmolive ticker from the universe... it's a fair trade-off."
+
+**Perubahan data**: `CL` (Colgate-Palmolive, sector Consumer Staples)
+dihapus dari `config/instruments_identity.yaml` DAN
+`config/instruments_taxonomy.yaml` secara lockstep — posisi list yang
+sama persis (antara `CHEF` dan `CLX` di list `us_stocks.Consumer
+Staples`) di kedua file, sesuai positional-join contract
+(`src/config/yaml_split_merge.py`) yang mensyaratkan kedua file tetap
+selaras index-per-index. WTI crude (`commodity`, `CL=F`) TIDAK disentuh
+— tetap menjadi satu-satunya instrumen `CL` di universe setelah
+perubahan ini. `EXPECTED_TOTAL` di `scripts/validate_instruments.py`
+dikoreksi 654 → 653 (GMI-VAL-006, entry baru mengikuti konvensi
+changelog-in-docstring GMI-VAL-NNN yang sudah ada).
+
+**Dampak terverifikasi**: `get_loader().get("CL")` sekarang resolve
+tanpa ambiguitas (sebelumnya wajib parameter `market=` atau raise
+KeyError). `layer1_peer_groups()`'s `peer_map["CL"]` sekarang
+`"commodity"` (sebelumnya `None` karena collision). Collision-nya
+sendiri sudah tidak ada — dikonfirmasi via full scan
+(`get_loader().all_symbols()` filtered `symbol=='CL'` mengembalikan
+tepat satu instrumen).
+
+**Kode general-purpose TIDAK dihapus**: mekanisme disambiguasi
+`InstrumentLoader.get(symbol, market=None)` dan collision-detection di
+`layer1_peer_groups()` (`src/utils/silver_scope.py`) sengaja
+dipertahankan utuh — keduanya bukan kode yang spesifik untuk `CL`,
+melainkan pertahanan generik terhadap collision APAPUN di masa depan.
+Menghapusnya akan menjadi regresi coverage tanpa manfaat nyata. Sebagai
+gantinya, test yang sebelumnya bergantung pada collision `CL` yang
+nyata dikonversi ke fixture sintetis, supaya mekanisme tersebut tetap
+teruji tanpa bergantung pada keberadaan collision live:
+- `tests/unit/test_instrument_loader.py`:
+  `test_cl_requires_market_param` (lama) diganti
+  `test_get_disambiguates_by_market_when_symbol_collides` (sintetis,
+  inject instrumen palsu langsung ke `_by_symbol`) +
+  `test_cl_is_no_longer_ambiguous` (baru, mengonfirmasi resolusi).
+  Assertion count (`594`→`593`, `543`→`542`, `652`→`651`) diperbarui.
+- `tests/unit/test_silver_scope.py`:
+  `test_colliding_symbol_is_unclassified_not_silently_assigned` (lama)
+  diganti `test_no_collisions_in_current_universe` +
+  `test_collision_detection_nulls_peer_group_not_silently_assigned`
+  (sintetis, monkeypatch `get_loader` di modul SUMBER
+  `src.config.instrument_loader` — bukan namespace `silver_scope`,
+  karena setiap fungsi di `silver_scope.py` melakukan local import
+  `from src.config.instrument_loader import get_loader` di dalam badan
+  fungsi, di-resolve ulang dari modul sumber setiap kali dipanggil,
+  BUKAN dari namespace `silver_scope` sendiri — monkeypatch di tempat
+  yang salah akan diam-diam tidak berpengaruh sama sekali).
+- `tests/unit/test_quality_validator.py`:
+  `test_market_wide_gap_across_all_commodity_peers_is_excluded`
+  disederhanakan — AU/AG/CL sekarang ke-3nya peer bersih (100%
+  agreement, 0 isolated, 3 closures), bukan skenario 2-agree-1-collision
+  yang lama.
+- `tests/integration/test_pipeline_config_integration.py`,
+  `tests/integration/test_full_system.py`,
+  `tests/unit/test_package_exports.py`: assertion count `loader.count()`
+  diperbarui `594`→`593` mengikuti konvensi GMI-VAL-NNN yang sudah ada
+  di setiap file (comment history dipertahankan, tidak ditulis ulang).
+
+**Test yang TIDAK berubah** (dikonfirmasi tidak terpengaruh): 
+`tests/unit/test_market_ingester.py::test_wti_crude_unaffected_still_resolves_cl_f`
+memakai fake commodity instrument yang dikonstruksi langsung, tidak
+lewat loader nyata. `tests/unit/test_sector_rotation.py::test_run_produces_correct_disaggregated_weights_for_layer1_commodities`
+sudah mengasersi weight AU/AG/CL via loader nyata — setelah fix ini
+outputnya lebih robust (hanya 1 baris CL, bukan berpotensi 2 baris yang
+sebelumnya bergantung pada urutan proses yang kebetulan benar).
+
+Full suite: **1641 passed / 0 failed / 0 error** (1639 baseline + 2 baru,
+net dari 3 test lama diganti 5 test baru). `validate_instruments.py`:
+**653 symbols (Layer 1=593, Layer 2=60), no errors**. `ast.parse` bersih.
+Tidak ada f-string SQL baru.
+
 ## v1.17.10 — Peer-Agreement Classification untuk gap_detection/context_gap_detection + 2 Fix Silver Lain (September 2026)
 
 Tindak lanjut dari diskusi chat 8 Sep 2026: `gap_detection` (Layer 1, 282

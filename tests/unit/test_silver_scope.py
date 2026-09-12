@@ -11,6 +11,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from src.config.instrument_loader import Instrument
 from src.utils.silver_scope import (
     CONTEXT_MARKET,
     context_glob,
@@ -142,25 +143,78 @@ class TestLayer1PeerGroups:
     (quality_validator.py's _check_gap_detection()) and rationale."""
 
     def test_commodity_members_share_one_peer_group(self):
-        """Empirically confirmed universe: commodity = {AU, AG, CL}. CL is
-        excluded here deliberately — see test_colliding_symbol_is_unclassified
-        below; AU and AG are the clean case."""
+        """UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): CL's
+        us_stocks/commodity collision was resolved by removing the equity
+        ticker (Colgate-Palmolive) — CL now maps cleanly to 'commodity'
+        like AU and AG, no special-casing needed."""
         peer_map, sizes = layer1_peer_groups()
         assert peer_map["AU"] == "commodity"
         assert peer_map["AG"] == "commodity"
+        assert peer_map["CL"] == "commodity"
         assert sizes["commodity"] == 3
 
-    def test_colliding_symbol_is_unclassified_not_silently_assigned(self):
-        """'CL' is a REAL, confirmed cross-market collision in the live
-        universe: WTI crude oil (commodity) AND Colgate-Palmolive
-        (us_stocks) both use ticker 'CL'. A bare SQL `symbol` string
-        cannot trace back to which market's file it came from, so any
-        single-market assignment would be a guess dressed up as a fact.
-        Must be None (gap_analysis.py treats that as "never suppress"),
-        not silently pinned to whichever market layer1_markets() happens
-        to iterate last."""
+    def test_no_collisions_in_current_universe(self):
+        """Confirms the CL/WTI vs. Colgate-Palmolive collision RISK-30
+        flagged is actually gone from the live universe, not just no
+        longer asserted. If this ever fails again, some future addition
+        reintroduced a same-ticker collision across two Layer 1 markets —
+        see test_collision_detection_nulls_peer_group_not_silently_assigned
+        below for what layer1_peer_groups() does when that happens."""
         peer_map, _ = layer1_peer_groups()
-        assert peer_map["CL"] is None
+        assert None not in peer_map.values()
+
+    def test_collision_detection_nulls_peer_group_not_silently_assigned(self, monkeypatch):
+        """layer1_peer_groups()'s collision handling is general-purpose
+        defense against ANY future cross-market ticker collision, not
+        code specific to CL (which is why it's kept even though CL itself
+        is no longer a real example — see RISK-30 / GMI-VAL-006). Exercised
+        here with a synthetic collision instead of depending on the live
+        universe happening to contain a real one.
+        """
+        import src.config.instrument_loader as loader_mod
+
+        colliding_a = Instrument(
+            symbol="ZZ_COLLISION_TEST", raw_symbol="ZZ_COLLISION_TEST",
+            market="commodity", sector=None, yfinance_symbol="ZZ=F",
+            polygon_symbol="ZZ_COLLISION_TEST", tvfeed_symbol=None,
+            eia_series=None, timezone="America/New_York",
+        )
+        colliding_b = Instrument(
+            symbol="ZZ_COLLISION_TEST", raw_symbol="ZZ_COLLISION_TEST",
+            market="us_stocks", sector="Consumer Staples",
+            yfinance_symbol="ZZ_COLLISION_TEST", polygon_symbol="ZZ_COLLISION_TEST",
+            tvfeed_symbol=None, eia_series=None, timezone="America/New_York",
+        )
+        clean = Instrument(
+            symbol="ZZ_CLEAN_TEST", raw_symbol="ZZ_CLEAN_TEST",
+            market="commodity", sector=None, yfinance_symbol="ZZ2=F",
+            polygon_symbol="ZZ_CLEAN_TEST", tvfeed_symbol=None,
+            eia_series=None, timezone="America/New_York",
+        )
+        fake_by_market = {
+            "commodity": [colliding_a, clean],
+            "us_stocks": [colliding_b],
+            "idx": [], "forex": [],
+        }
+
+        class _FakeLoader:
+            def all_symbols(self):
+                return colliding_a, colliding_b, clean
+            def by_market(self, market):
+                return fake_by_market.get(market, [])
+
+        # NOTE: layer1_markets()/layer1_peer_groups() both do
+        # `from src.config.instrument_loader import get_loader` as a LOCAL
+        # import inside the function body, resolved fresh from the source
+        # module on every call — patching silver_scope's own namespace
+        # would silently do nothing. The source module is the only
+        # correct patch target.
+        monkeypatch.setattr(loader_mod, "get_loader", lambda: _FakeLoader())
+        peer_map, sizes = layer1_peer_groups()
+
+        assert peer_map["ZZ_COLLISION_TEST"] is None   # never silently assigned
+        assert peer_map["ZZ_CLEAN_TEST"] == "commodity"  # unaffected by the collision
+        assert sizes["commodity"] == 2
 
     def test_every_layer1_market_present_in_sizes(self):
         peer_map, sizes = layer1_peer_groups()

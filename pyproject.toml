@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.17.10"
+version = "1.17.11"
 # FIX (chat thread, 7 Sep 2026): 3 bugs behind VIXCLS starvation, closed.
 # Ovi's manual finding: data/bronze/macro/fred/volatility only had 2 files,
 # VIXCLS missing for 20260905. GMI-FRED-DAILY-01: 9 cadence:daily FRED

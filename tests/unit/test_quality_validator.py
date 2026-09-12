@@ -321,15 +321,19 @@ class TestGapDetectionPeerAgreement:
         }).write_parquet(path)
 
     def test_market_wide_gap_across_all_commodity_peers_is_excluded(self, tmp_path, monkeypatch):
-        """AU, AG, and CL all show the identical gap window. AU and AG are
-        clean commodity peers (each sees the other agree -> 1 of their 2
-        other peers -> 50% -> closure). CL is a REAL, confirmed cross-
-        market collision (WTI crude vs. Colgate-Palmolive, both ticker
-        'CL' — see test_silver_scope.py::test_colliding_symbol_is_unclassified)
-        and is therefore always isolated regardless of what data it shows,
-        by design. This is the actual live-universe version of the
-        IDX/SSEC finding, collision and all — not an idealized synthetic
-        case."""
+        """AU, AG, and CL all show the identical gap window -> 100% peer
+        agreement for each -> zero isolated gaps, three closures. This is
+        the real-universe version of the IDX/SSEC finding: a market-wide
+        closure must not count toward the WARNING at all.
+
+        UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): CL used to be
+        a real cross-market collision with us_stocks (Colgate-Palmolive),
+        which meant it was always isolated regardless of what data it
+        showed (see git history for the pre-fix version of this test).
+        That collision was resolved by removing the equity ticker, so CL
+        is now a clean commodity peer like AU and AG — this test's
+        scenario is simpler and closer to the real IDX/SSEC finding as a
+        result, not a coincidence."""
         import duckdb
         import src.silver.quality_validator as qv_mod
         from src.utils.silver_scope import layer1_globs, layer1_peer_groups
@@ -349,9 +353,9 @@ class TestGapDetectionPeerAgreement:
         peer_map, peer_sizes = layer1_peer_groups()
         isolated, closures, by_group = qv._classified_gap_counts(con, globs, peer_map, peer_sizes)
 
-        assert isolated == 1     # CL, unconditionally (collision -> peer_group=None)
-        assert closures == 2     # AU and AG, each confirmed by the other
-        assert by_group == {"commodity": 2}
+        assert isolated == 0
+        assert closures == 3     # AU, AG, and CL — all agree, all excluded
+        assert by_group == {"commodity": 3}
 
     def test_isolated_gap_on_one_commodity_symbol_still_counted(self, tmp_path, monkeypatch):
         """Only AU has a gap; AG and CL have no data at all (i.e. traded

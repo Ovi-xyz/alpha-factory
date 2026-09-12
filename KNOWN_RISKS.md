@@ -2675,7 +2675,7 @@ hardcoded exact lists, so the new job doesn't collide with anything).
 
 ---
 
-## RISK-30 (NEW): `gap_detection`/`context_gap_detection` counted market-wide holiday closures as data gaps — RESOLVED (fixed) via peer-agreement classification; surfaced a separate, unfixed 'CL' cross-market symbol collision — OPEN
+## RISK-30: `gap_detection`/`context_gap_detection` counted market-wide holiday closures as data gaps — RESOLVED (fixed) via peer-agreement classification; 'CL' cross-market symbol collision — RESOLVED (removed)
 
 **Symptom**: `gap_detection` (Layer 1) and `context_gap_detection` (Layer 2)
 WARNING checks were chronically red — 282 and 87 occurrences respectively,
@@ -2750,6 +2750,31 @@ symbol-aware one) touches 5 existing CRITICAL/WARNING checks — wider
 blast radius than this session's scope. Needs Ovi's decision before
 touching those checks.
 
+**Resolution (Ovi, 9 Sep 2026)**: rather than making all 5 checks
+market-aware, Ovi chose the simpler, narrower fix — remove the equity
+ticker. CL (Colgate-Palmolive, us_stocks, Consumer Staples) was deleted
+from `config/instruments_identity.yaml` and `config/instruments_taxonomy.yaml`
+in lockstep (positional join contract, `src/config/yaml_split_merge.py`;
+order re-verified identical in both files post-removal). WTI crude
+(commodity, `CL=F`) is retained — it's the instrument every other part
+of this pipeline already assumes 'CL' refers to. `EXPECTED_TOTAL`:
+654 -> 653 (GMI-VAL-006, `scripts/validate_instruments.py`). Post-removal,
+`get_loader().get("CL")` resolves unambiguously with no `market=` needed;
+`layer1_peer_groups()`'s `peer_map["CL"]` is now `"commodity"`, no longer
+`None`. The general-purpose collision-detection code in
+`layer1_peer_groups()` (src/utils/silver_scope.py) and the disambiguation
+logic in `InstrumentLoader.get()` are both left in place, unchanged —
+neither was CL-specific, and removing either would be a coverage
+regression against any FUTURE collision, not a cleanup. Their test
+coverage was converted from depending on the real CL collision to
+synthetic fixtures for exactly this reason (`tests/unit/
+test_silver_scope.py::test_collision_detection_nulls_peer_group_not_silently_assigned`,
+`tests/unit/test_instrument_loader.py::test_get_disambiguates_by_market_when_symbol_collides`).
+One Consumer Staples equity traded for eliminating an entire class of
+silent cross-instrument data interleaving (across 5 checks, not just
+gap_detection) is the trade-off Ovi judged worth making. **This risk is
+now fully closed — nothing left open.**
+
 **Verification**: `tests/unit/test_gap_analysis.py` (new, 21 tests) —
 exhaustive synthetic coverage of `classify_gaps_by_peer_agreement()`:
 full-agreement closure, isolated-with-no-agreement, exact 50% boundary,
@@ -2774,7 +2799,20 @@ broke.
 
 ---
 
-*Last updated: v1.17.10 — gap_detection/context_gap_detection peer-agreement
+*Last updated: v1.17.11 — CL/Colgate-Palmolive removed to resolve RISK-30's
+cross-market ticker collision (Ovi, 9 Sep 2026): Ovi's instruction ("remove
+Colgate-Palmolive ticker from the universe... it's a fair trade-off") chose
+symbol removal over the 5-check market-aware-partitioning fix RISK-30
+flagged as open. CL removed from instruments_identity.yaml and
+instruments_taxonomy.yaml in lockstep; EXPECTED_TOTAL 654 → 653
+(GMI-VAL-006). WTI crude (commodity CL=F) retained, unaffected. Tests
+depending on the real collision (test_instrument_loader.py,
+test_silver_scope.py, test_quality_validator.py) converted to synthetic
+fixtures so the general-purpose disambiguation/collision-detection code
+in InstrumentLoader.get() and layer1_peer_groups() keeps coverage without
+depending on a real collision existing. RISK-30 above is now fully
+closed. 1639 → 1641 passed, 0 regressions.
+Prior entry: v1.17.10 — gap_detection/context_gap_detection peer-agreement
 classification (chat thread, 8 Sep 2026): RISK-30 above has the full
 account. Live diagnostic (Filesystem MCP copy + direct DuckDB query
 against all 594 Layer 1 + 58 Layer 2 Silver 1D files) found both chronic

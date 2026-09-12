@@ -50,10 +50,13 @@ class TestPackageExports:
         FIX GMI-VAL-004 (chat thread, 3 Sep 2026, RISK-28): 639 -> 603
         (-36 dead Layer 1 tickers). See KNOWN_RISKS.md RISK-28.
         FIX GMI-VAL-005 (chat thread, 3 Sep 2026, RISK-28 follow-up):
-        603 -> 594 (-9 more). See KNOWN_RISKS.md RISK-28."""
+        603 -> 594 (-9 more). See KNOWN_RISKS.md RISK-28.
+        UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): 594 -> 593
+        (-1, CL/Colgate-Palmolive removed to resolve a cross-market
+        ticker collision with commodity CL). See KNOWN_RISKS.md RISK-30."""
         from src import get_loader
         loader = get_loader()
-        assert loader.count() == 594
+        assert loader.count() == 593
 
     def test_get_config_returns_config(self):
         from src import get_config, PipelineConfig

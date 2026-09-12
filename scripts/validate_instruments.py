@@ -74,6 +74,40 @@ terpisah (CI Gate G-3).
     and instruments_taxonomy.yaml in lockstep (positional join contract,
     src/config/yaml_split_merge.py) — order re-verified identical in both
     files post-removal before this constant was touched.
+
+# UPD GMI-VAL-006 — chat thread (Ovi, 9 Sep 2026), KNOWN_RISKS.md RISK-30,
+  Ovi's explicit instruction ("remove Colgate-Palmolive ticker from the
+  universe... it's a fair trade-off"):
+  - EXPECTED_TOTAL: 654 -> 653 (-1 Layer 1 us_stocks: CL / Colgate-
+    Palmolive, Consumer Staples sector).
+  - Root cause this resolves: ticker 'CL' collided across two Layer 1
+    markets — commodity (WTI crude proxy, CL=F) and us_stocks (Colgate-
+    Palmolive). RISK-30 (FIX GAP-PEER-01 session, 8 Sep 2026) found this
+    caused silver_scope.layer1_globs()'s combined read_parquet() call to
+    interleave both instruments' rows under one shared "CL" PARTITION BY
+    symbol in 5 quality_validator.py checks (_check_null,
+    _check_price_sanity, _check_coverage, _check_outliers,
+    _check_adj_integrity) — a wider-blast-radius fix (making every
+    Layer-1-scoped check market-aware, not just symbol-aware) was flagged
+    but deliberately not done that session, pending Ovi's decision.
+  - Decision: remove the equity ticker rather than fix all 5 checks —
+    one Consumer Staples name traded for eliminating an entire class of
+    silent cross-instrument data interleaving is the simpler, precise
+    resolution. WTI crude (commodity CL=F) is retained; it is the
+    instrument every other part of this pipeline (fallback chains,
+    fred_series.yaml DCOILWTICO cross-reference, EIA fundamental join)
+    already assumes 'CL' refers to.
+  - No new subcategories, no taxonomy field changes — pure removal of 1
+    Layer 1 us_stocks entry from BOTH instruments_identity.yaml and
+    instruments_taxonomy.yaml in lockstep (positional join contract,
+    src/config/yaml_split_merge.py) — same procedure as GMI-VAL-004/005.
+    Post-removal: get_loader().all_symbols() filtered to symbol=='CL'
+    returns exactly one instrument (market='commodity'); the collision
+    no longer exists. layer1_peer_groups()'s collision-detection logic
+    (src/utils/silver_scope.py) is left in place unchanged — it is
+    general-purpose defense against any FUTURE collision, not code
+    specific to CL, and removing it would be a regression in coverage
+    for no benefit.
 """
 
 import sys
@@ -112,7 +146,11 @@ from src.config.yaml_split_merge import merge_split_trees
 #   insufficient evidence either way after AlphaVantage + web search).
 #   Same lockstep-removal + order-parity-reverification + real-loader
 #   load-test procedure as GMI-VAL-004.
-EXPECTED_TOTAL = 654
+# UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): EXPECTED_TOTAL
+#   654 -> 653 (-1 Layer 1 us_stocks: CL / Colgate-Palmolive). Resolves
+#   the CL/WTI-crude cross-market ticker collision by removing the
+#   equity side — see module docstring for full rationale.
+EXPECTED_TOTAL = 653
 
 REQUIRED_FIELDS: dict[str, list[str]] = {
     "us_stocks": ["symbol"],

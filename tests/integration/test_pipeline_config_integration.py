@@ -73,4 +73,8 @@ class TestPipelineConfigIntegration:
         # 603 -> 594. 9 more removed — 6 confirmed active (stopgap over
         # an undiagnosed fetch-pipeline bug), 3 unresolved. See
         # KNOWN_RISKS.md RISK-28.
-        assert loader.count() == 594
+        # UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): 594 -> 593.
+        # CL (Colgate-Palmolive) removed to resolve a cross-market ticker
+        # collision with commodity CL (WTI crude) — see KNOWN_RISKS.md
+        # RISK-30 and scripts/validate_instruments.py module docstring.
+        assert loader.count() == 593
