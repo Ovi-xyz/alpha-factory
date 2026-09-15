@@ -14,6 +14,44 @@ correctly typed, simply permanently null instead of sometimes-populated.
 v1.2 additions (retained):
     - Correlation cluster deduplication: max 2 per cluster
 
+ADD GMI Wave 1 Cycle 4 — CrossAssetEngine integration (Architecture v2.0
+§5.3, §9.1 Phase 5, §10.1 roadmap item "gold_screener: integrate
+CrossAssetEngine outputs"). Three new optional sources, following the
+EXACT same soft-dependency, graceful-degrade-to-NULL pattern already
+established here for sector_tbl/active_tbl/regime_tbl — never a filter
+or ranking input, purely informational DATA fields (Section 0.2/0.3
+Separation of Concerns: pipeline supplies data, Trading Engine decides),
+same treatment as days_to_earnings/sentiment_score before Finnhub's
+retirement:
+
+    global_regime_tbl (data/gold/cross_asset/global_regime.parquet,
+        GlobalIndexRegimeModule, daily) -> global_risk_score,
+        global_regime_label, dm_em_divergence. Single-row-per-date
+        broadcast table, same LEFT JOIN ... ON TRUE pattern as
+        regime_tbl (GLD-SCR-001) for the identical reason: a CROSS JOIN
+        against a same-day-missing table would silently zero the whole
+        watchlist, not just this table's columns.
+
+    lead_lag_tbl (data/gold/cross_asset/lead_lag_matrix.parquet,
+        LeadLagModule, weekly) -> lead_lag_signal (bool: at least one
+        BH-significant leader this week), lead_lag_top_leader,
+        lead_lag_optimal_lag. Pre-aggregated per follower symbol in
+        Python before registration — the raw store is one row per
+        (leader, follower), screener wants one row per symbol.
+
+    forecast_tbl (data/gold/cross_asset/cross_asset_forecast.parquet,
+        ForecastModule, weekly) -> forecast_return_1d, forecast_stable,
+        filtered to horizon_days=1 (nearest-term, most relevant to a
+        watchlist of current candidates) — one row per symbol.
+
+None of these three are in gold_screener's depends_on (job_registry.py) —
+deliberately, matching silver_active_symbols' own precedent (feeds
+active_tbl, also not a hard dependency): all three degrade to empty/NULL
+via the same has_X / try-except / _empty_*_df() idiom already used for
+sector_tbl/active_tbl/regime_tbl, so a missing or stale (weekly, possibly
+several days old within the week) CrossAssetEngine output never blocks
+the screener the way a missing gold_mtf does.
+
 Output: data/gold/screener/watchlist_{date}.parquet
 """
 
@@ -36,6 +74,11 @@ GOLD_REGIME_PATH    = Path("data/gold/macro/regime_store.parquet")
 GOLD_SECTOR_PATH    = Path("data/gold/sector/sector_regime_weights.parquet")
 GOLD_CORR_PATH      = Path("data/gold/correlation/correlation_clusters.parquet")
 GOLD_SCREENER_PATH  = Path("data/gold/screener")
+# ADD GMI Wave 1 Cycle 4 — CrossAssetEngine outputs (see module docstring).
+GOLD_CROSS_ASSET_PATH   = Path("data/gold/cross_asset")
+GLOBAL_REGIME_PATH      = GOLD_CROSS_ASSET_PATH / "global_regime.parquet"
+LEAD_LAG_PATH           = GOLD_CROSS_ASSET_PATH / "lead_lag_matrix.parquet"
+CROSS_ASSET_FORECAST_PATH = GOLD_CROSS_ASSET_PATH / "cross_asset_forecast.parquet"
 # FIX GLD-SCR-002: this was previously built inline as an ad hoc string/
 # f-string Path construction inside build_watchlist() (not the SQL-injection
 # kind — a plain filesystem path — but an un-patchable hardcode all the
@@ -91,6 +134,37 @@ def _empty_active_df() -> pl.DataFrame:
     return pl.DataFrame({
         "symbol":           pl.Series([], dtype=pl.Utf8),
         "dollar_volume_20d": pl.Series([], dtype=pl.Float64),
+    })
+
+
+# ADD GMI Wave 1 Cycle 4 — CrossAssetEngine placeholder schemas, same
+# "empty typed DataFrame" idiom as the three above (FIX GLD-003).
+
+def _empty_global_regime_df() -> pl.DataFrame:
+    """Placeholder GlobalIndexRegimeModule DataFrame dengan schema minimal."""
+    return pl.DataFrame({
+        "global_risk_score":   pl.Series([], dtype=pl.Float64),
+        "global_regime_label": pl.Series([], dtype=pl.Utf8),
+        "dm_em_divergence":    pl.Series([], dtype=pl.Float64),
+    })
+
+
+def _empty_lead_lag_df() -> pl.DataFrame:
+    """Placeholder LeadLagModule per-follower aggregate DataFrame dengan schema minimal."""
+    return pl.DataFrame({
+        "follower":              pl.Series([], dtype=pl.Utf8),
+        "lead_lag_signal_count": pl.Series([], dtype=pl.Int64),
+        "lead_lag_top_leader":   pl.Series([], dtype=pl.Utf8),
+        "lead_lag_top_lag":      pl.Series([], dtype=pl.Int64),
+    })
+
+
+def _empty_forecast_df() -> pl.DataFrame:
+    """Placeholder ForecastModule (horizon=1) DataFrame dengan schema minimal."""
+    return pl.DataFrame({
+        "symbol":              pl.Series([], dtype=pl.Utf8),
+        "forecast_return_1d":  pl.Series([], dtype=pl.Float64),
+        "forecast_stable":     pl.Series([], dtype=pl.Boolean),
     })
 
 
@@ -264,6 +338,62 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
         active_df = _empty_active_df()
     con.register("active_tbl", active_df.to_arrow())
 
+    # ADD GMI Wave 1 Cycle 4 — CrossAssetEngine sources (see module
+    # docstring). Same has_X / try-except / _empty_*_df() idiom as above.
+
+    # Global regime table (GlobalIndexRegimeModule, daily) — single row
+    # for run_date, broadcast via LEFT JOIN ON TRUE like regime_tbl.
+    if GLOBAL_REGIME_PATH.exists():
+        try:
+            global_regime_df = pl.read_parquet(GLOBAL_REGIME_PATH).filter(
+                pl.col("date").cast(pl.Utf8) == str(run_date)
+            ).select(
+                ["global_risk_score", "global_regime_label", "dm_em_divergence"]
+            ).head(1)
+        except Exception:
+            global_regime_df = _empty_global_regime_df()
+    else:
+        global_regime_df = _empty_global_regime_df()
+    con.register("global_regime_tbl", global_regime_df.to_arrow())
+
+    # Lead-lag table (LeadLagModule, weekly) — pre-aggregated per follower
+    # symbol here in Python (raw store is one row per leader x follower).
+    if LEAD_LAG_PATH.exists():
+        try:
+            lead_lag_raw = pl.read_parquet(LEAD_LAG_PATH)
+            lead_lag_df = (
+                lead_lag_raw
+                .filter(pl.col("bh_significant"))
+                .sort("p_value_adjusted")
+                .group_by("follower", maintain_order=True)
+                .agg([
+                    pl.len().alias("lead_lag_signal_count"),
+                    pl.col("leader").first().alias("lead_lag_top_leader"),
+                    pl.col("optimal_lag").first().alias("lead_lag_top_lag"),
+                ])
+            )
+        except Exception:
+            lead_lag_df = _empty_lead_lag_df()
+    else:
+        lead_lag_df = _empty_lead_lag_df()
+    con.register("lead_lag_tbl", lead_lag_df.to_arrow())
+
+    # Forecast table (ForecastModule, weekly) — nearest-term (1-day)
+    # horizon only, one row per symbol.
+    if CROSS_ASSET_FORECAST_PATH.exists():
+        try:
+            forecast_df = (
+                pl.read_parquet(CROSS_ASSET_FORECAST_PATH)
+                .filter(pl.col("horizon_days") == 1)
+                .select(["symbol", "forecast_return", "stable"])
+                .rename({"forecast_return": "forecast_return_1d", "stable": "forecast_stable"})
+            )
+        except Exception:
+            forecast_df = _empty_forecast_df()
+    else:
+        forecast_df = _empty_forecast_df()
+    con.register("forecast_tbl", forecast_df.to_arrow())
+
     # ── Parameterized query — no f-string SQL ─────────────────────────────────
     # FIX GLD-003: read_parquet($mtf_path) + $min_mtf_score, $min_sector_weight,
     # $min_dollar_volume, $run_date — semua via $name binding.
@@ -305,6 +435,14 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
         (NULL::INTEGER) <= 3                        AS near_earnings_flag,
         NULL::DOUBLE                                AS sentiment_score,
         NULL::DOUBLE                                AS buzz_score,
+        gr.global_risk_score,
+        gr.global_regime_label,
+        gr.dm_em_divergence,
+        COALESCE(ll.lead_lag_signal_count, 0) > 0   AS lead_lag_signal,
+        ll.lead_lag_top_leader,
+        ll.lead_lag_top_lag,
+        f.forecast_return_1d,
+        f.forecast_stable,
         $run_date                                  AS watchlist_date
     FROM mtf m
     LEFT JOIN sector_tbl s ON m.symbol = s.symbol
@@ -324,6 +462,12 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     -- drop the left side" join — the same graceful-degrade contract
     -- sector_tbl/active_tbl already get via LEFT JOIN + COALESCE above.
     LEFT JOIN (SELECT * FROM regime_tbl LIMIT 1) r ON TRUE
+    -- ADD GMI Wave 1 Cycle 4: global_regime_tbl is the same "single row
+    -- for this run_date, or legitimately zero rows" shape as regime_tbl
+    -- above — same LEFT JOIN ... ON TRUE broadcast, same reasoning.
+    LEFT JOIN (SELECT * FROM global_regime_tbl LIMIT 1) gr ON TRUE
+    LEFT JOIN lead_lag_tbl ll ON m.symbol = ll.follower
+    LEFT JOIN forecast_tbl  f ON m.symbol = f.symbol
     WHERE COALESCE(s.sector_weight_adj, 1.0) > $min_sector_weight
       AND COALESCE(a.dollar_volume_20d, 1e9) > $min_dollar_volume
     ORDER BY ABS(m.mtf_score) DESC,

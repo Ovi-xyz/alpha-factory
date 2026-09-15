@@ -1,5 +1,128 @@
 # CHANGELOG — Data Platform
 
+## v1.18.0 — GMI Wave 1 Cycle 4: CrossAssetEngine (4 modul) + Integrasi gold_screener (September 2026)
+
+Implementasi penuh CrossAssetEngine (Architecture v2.0 §6, Architecture
+Extension v1.0) — empat modul analitik baru di bawah `src/gold/cross_asset/`,
+plus integrasi output-nya ke `gold_screener`. Dikerjakan sandbox-first
+selama satu thread berkelanjutan atas instruksi eksplisit Ovi per modul
+("continue with... cross asset engine cycle 4" → pilih GlobalIndexRegimeModule
+lebih dulu dari 3 opsi yang disajikan; lalu "continue with the completion of
+correlation module, lead-lag module, forecast module in sequence"; lalu
+"continue with gold_screener: integrate CrossAssetEngine outputs"). Tidak
+ada satupun modul lama yang diganti atau dihapus — semua penambahan bersifat
+aditif, coexist dengan job yang sudah berjalan.
+
+**Modul #1 — GlobalIndexRegimeModule** (`gold/cross_asset/global_index_regime.py`,
+Architecture v2.0 §6.5): sinyal regime harian dari 14 indeks ekuitas global
+Layer 2 (`context_equity_dm`=9 termasuk SPX, `context_equity_em`=5 — angka
+live-terverifikasi terhadap `instruments_taxonomy.yaml`, BUKAN angka "13"
+yang sudah stale di dokumen sejak ADR-003 me-reklasifikasi SPX). Output:
+`global_risk_score` (% indeks di atas EMA-50), `dm_em_divergence`,
+`asia_pac_breadth` (7 indeks Asia-Pacific di atas EMA-20),
+`global_regime_label` (RISK_ON/RISK_OFF/MIXED, threshold 60/40 — kalibrasi
+awal modul ini sendiri, didokumentasikan sebagai such, BUKAN dari
+Architecture v2.0 yang tidak pernah memberi angka pasti), `regime_transition`.
+Job `gold_global_regime`, harian, independen dari chain
+gold_signals→mtf→regime→sector→screener (depends_on hanya
+`silver_ohlcv_context`). 20 test baru.
+
+**Modul #2 — CorrelationModule** (`gold/cross_asset/correlation_module.py`,
+Architecture v2.0 §6.2): matriks korelasi Ledoit-Wolf shrinkage
+(`sklearn.covariance.LedoitWolf`) atas universe gabungan Layer 1
+(`active_ohlcv`) + Layer 2 (`correlation_context`), plus hierarchical
+clustering via `scipy.cluster.hierarchy` (bukan `sklearn.AgglomerativeClustering`
+yang dipakai `correlation_matrix.py` lama — sesuai spesifikasi Architecture
+v2.0 §6.2.1 yang eksplisit menyebut scipy). Coexist dengan job
+`gold_correlation` lama (Layer 1-only) — Architecture v2.0 §5.1 menyebutnya
+"REPLACED" tapi retirement job lama adalah keputusan terpisah, di luar
+scope sesi ini. Skema output diklarifikasi: `cluster_id` tunggal per baris
+pair (ambigu di dokumen asli) dipecah jadi `cluster_id_a`/`cluster_id_b`.
+Job baru `gold_cross_asset_correlation`, mingguan. 15 test baru.
+
+**Modul #3 — LeadLagModule** (`gold/cross_asset/lead_lag_module.py`,
+Architecture v2.0 §6.3, direvisi Architecture Extension v1.0 ADR-001):
+Granger causality (`statsmodels.tsa.stattools.grangercausalitytests`,
+leader=Layer 2 anchor minus `exclude_from_lead_lag_leader` seperti SSEC,
+follower=Layer 1 `active_ohlcv`, lag 1-5 hari) dengan koreksi BH-FDR
+GLOBAL pada q=0.03 (ADR-001, bukan q=0.10 di Architecture v2.0 asli) —
+diterapkan lintas SEMUA triple (leader, follower, lag) sekaligus, sesuai
+framing "Total tests: 57.950" ADR-001 sendiri, bukan per-pair setelah
+lag optimal dipilih. `optimal_lag` per pair = lag dengan p-value RAW
+terkecil; p-value adjusted dan r_squared yang dilaporkan mengikuti lag
+tersebut. Bug versi statsmodels ditemukan empiris selama development:
+`verbose=False` di statsmodels 0.14.6 (versi ter-pin `poetry.lock`) TETAP
+mencetak output penuh ke stdout kecuali stdout di-redirect terpisah —
+ditangani via `contextlib.redirect_stdout` version-agnostic, bukan sekadar
+argumen `verbose`. Job baru `gold_lead_lag`, mingguan. 11 test baru.
+
+**Gate 1 CLOSED — `gold/cross_asset/broad_dollar.py`**: Ovi menjalankan
+`scripts/preflight/check_bis_eer_weights.py --extract-weights` untuk
+pertama kali secara nyata di M1 (12 Sep 2026) — lihat update RISK-16 di
+`KNOWN_RISKS.md` untuk detail lengkap. 13 bobot mata uang riil (vintage
+`2020_2022`, BIS Broad EER basket) di-renormalisasi supaya total 1.0
+(keputusan baru: bobot mentah hanya berjumlah ~68.6% dari 100 karena
+platform ini hanya punya data utnuk 13 dari ~64 ekonomi dalam basket asli
+BIS — tanpa renormalisasi, Broad Dollar akan secara sistematis
+understated ~31%). Konvensi tanda per mata uang diturunkan dari arah kuotasi
+pair riil (AUD/EUR/GBP: USD sebagai quote currency → dinegasikan; CAD/CHF/JPY
++ 7 mata uang `dollar_basket` Layer 2: USD sebagai base currency → apa
+adanya) — dikonfirmasi terhadap `instruments_taxonomy.yaml` LIVE, bukan
+diasumsikan. Ini MENGOREKSI (bukan sekadar mengganti) dict `BIS_WEIGHTS`
+hand-approximated di Architecture v2.0 §7.2 yang punya inkonsistensi tanda
+internal (USD_JPY/USD_CAD/USD_CHF diberi bobot positif padahal konvensi
+kuotasinya identik dengan USD_CNH/USD_KRW/USD_SGD yang diberi bobot
+negatif). Diverifikasi: skenario sintetis "USD menguat 1% merata terhadap
+semua 13 mata uang" menghasilkan `broad_dollar_return = +0.01` tepat.
+
+**Modul #4 — ForecastModule** (`gold/cross_asset/forecast_module.py`,
+Architecture v2.0 §6.4): PCA (`sklearn.decomposition.PCA`,
+`n_components=0.95`) atas `forecast_context()` Layer 2 (OHLCV-based only —
+seri rate FRED/BIS TIDAK diikutkan, skema berbeda total dari OHLCV,
+di-flag sebagai keterbatasan scope yang disengaja, bukan celah yang
+diam-diam terlewat) plus `broad_dollar_return` derived, lalu VAR
+(`statsmodels.tsa.vector_ar`) TERPISAH per ekuitas — bukan satu VAR
+raksasa gabungan semua ~190 ekuitas aktif seperti sketsa kode Architecture
+v2.0 §6.4.1 sendiri (yang secara statistik tidak teridentifikasi pada
+skala itu dengan hanya ~60 observasi). Lag dipilih via BIC
+(`ic='bic'`, menutup OD-1 yang sebelumnya "OPEN" tapi sudah condong ke
+BIC di teks dokumen). Edge case `k_ar==0` (BIC tidak menemukan struktur
+lag) ditangani eksplisit — `VARResults.forecast()`/`.is_stable()` STATSMODELS
+SENDIRI raise pada array koefisien kosong, dikonfirmasi empiris, bukan
+hipotetis. Forecast horizon 1-5 hari. Job baru `gold_forecast`, mingguan.
+12 test baru. Dua bug nyata ditemukan+diperbaiki selama development:
+array read-only dari `.to_numpy()` pada seleksi kolom Polars sempit (juga
+diperbaiki di `correlation_module.py` secara proaktif), dan short-circuit
+yang salah memblokir fallback path "Broad Dollar saja tanpa Layer 2
+context" sebelum sempat dicoba.
+
+**Integrasi `gold_screener`** (Architecture v2.0 §5.3, §9.1 Phase 5):
+tiga source baru — `global_regime_tbl` (broadcast LEFT JOIN ON TRUE,
+pola sama dengan fix GLD-SCR-001 untuk `regime_tbl`),
+`lead_lag_tbl` (pre-aggregated per symbol follower di Python),
+`forecast_tbl` (filter `horizon_days=1`) — menghasilkan kolom baru
+`global_risk_score`, `global_regime_label`, `dm_em_divergence`,
+`lead_lag_signal`, `lead_lag_top_leader`, `lead_lag_top_lag`,
+`forecast_return_1d`, `forecast_stable`. SEMUA murni informational —
+tidak ada satupun dipakai untuk filter atau ranking (Separation of
+Concerns GD §0.2/§0.3, perlakuan sama seperti `days_to_earnings`
+sebelumnya). Ketiga job baru SENGAJA tidak dimasukkan ke `depends_on`
+`gold_screener` — mengikuti preseden `silver_active_symbols` (juga bukan
+hard dependency meski dibaca query). 11 test baru.
+
+**Yang SENGAJA belum dikerjakan** (di-flag, bukan diam-diam terlewat):
+retirement `gold_correlation`/`correlation_matrix.py` lama; integrasi
+seri rate FRED/BIS ke input PCA ForecastModule; trigger regime-transition
+untuk re-run `gold_forecast` di luar jadwal mingguan (§6.4.3 — perlu
+level scheduler/runner.py); modul `signal_aggregation` (§5.3); validasi
+live terhadap data Silver produksi nyata — seluruh 4 modul + integrasi
+screener baru diuji terhadap fixture sintetis di sandbox, belum pernah
+dijalankan di M1.
+
+**Total: 69 test baru** (20+15+11+12+11) | **10 file baru, 3 file
+dimodifikasi** | **1710 passed / 0 failed / 0 error** (baseline 1641).
+`ast.parse` bersih di semua file baru/dimodifikasi. Tidak ada f-string SQL.
+
 ## v1.17.11 — Hapus Ticker Colgate-Palmolive (CL) dari Universe: Resolusi RISK-30 (September 2026)
 
 Keputusan Ovi atas temuan RISK-30 (sesi v1.17.10): daripada memperbaiki 5

@@ -1528,6 +1528,63 @@ open** — this moves the targeted extraction pass from "unblocked but not
 started" to "written and unit-tested," not to "values extracted."
 Running `--extract-weights` for real on the M1 is the next step.
 
+### Gate 1 CLOSED (12 Sep 2026) — real weights extracted, wired into `gold/cross_asset/broad_dollar.py`
+
+Ovi ran `--extract-weights` for real on the M1 during the same thread
+that built GMI Wave 1 Cycle 4 (CrossAssetEngine). Output (`2020_2022`
+vintage — still the most recent; no `2023_2025` sheet exists yet,
+re-confirmed this run):
+
+```
+Currency  REF_AREA  Weight in US Broad EER basket (%)
+  AUD       AU        0.326985
+  CAD       CA        8.054349
+  CHF       CH        2.885704
+  CNH       CN       22.579565
+  EUR       XM       16.048545
+  GBP       GB        2.939921
+  HKD       HK        0.026992
+  IDR       ID        0.929609
+  JPY       JP        5.897981
+  KRW       KR        4.183282
+  NOK       NO        0.168854
+  SGD       SG        1.341145
+  TWD       TW        3.216667
+Sum: 68.599597
+```
+
+Wired into `BIS_WEIGHTS` in the new `gold/cross_asset/broad_dollar.py` —
+NOT the `bronze_bis_rates` CSV-ingestion path this entry's "What this
+does NOT resolve" section below refers to (that remains genuinely
+unconfirmed live; unrelated to Broad Dollar). Two design decisions made
+closing this out, neither dictated anywhere in the design docs:
+
+- **Renormalized to sum 1.0** rather than used as raw ~68.6-of-100
+  values — this platform only has data for these 13 of BIS's ~64-economy
+  basket; using the raw values would understate Broad Dollar's magnitude
+  by ~31% even on a day USD moves uniformly against every one of the 13,
+  which would make the DXY-vs-Broad-Dollar divergence signal (Architecture
+  v2.0 §7.2) mechanically scale-driven rather than a genuine DM/EM
+  dispersion signal.
+- **Sign convention derived from real quotation direction**, not assumed:
+  AUD/EUR/GBP (`AUD_USD`/`EUR_USD`/`GBP_USD` — USD is the quote currency)
+  negated before weighting; CAD/CHF/JPY (`USD_CAD`/`USD_CHF`/`USD_JPY`)
+  and all 7 Layer 2 `dollar_basket` currencies (USD is base — confirmed
+  against every one of their `yfinance_symbol` values, e.g. `USDCNH=X`)
+  used as-is. This corrects an internal inconsistency in Architecture
+  v2.0 §7.2's own hand-approximated `BIS_WEIGHTS` sketch, which gave
+  `USD_JPY`/`USD_CAD`/`USD_CHF` positive weights while giving
+  `USD_CNH`/`USD_KRW`/`USD_SGD` NEGATIVE weights despite all six sharing
+  the identical USD-is-base quoting convention.
+
+Verified: a synthetic "USD strengthens 1% uniformly against all 13
+currencies" scenario produces `broad_dollar_return = +0.01` exactly.
+
+CrossAssetEngine's other three modules (GlobalIndexRegimeModule,
+CorrelationModule, LeadLagModule) do not depend on Gate 1 at all and were
+built independently of this closure — see the new CrossAssetEngine risk
+entry (RISK-31) for their own status.
+
 ### What this does NOT resolve
 
 Gate 1's exact per-currency weight *values* — the file's layout is now
@@ -2799,7 +2856,119 @@ broke.
 
 ---
 
-*Last updated: v1.17.11 — CL/Colgate-Palmolive removed to resolve RISK-30's
+## RISK-31 (NEW): GMI Wave 1 Cycle 4 (CrossAssetEngine) — 4 modules + gold_screener integration, built and unit-tested in sandbox, never run against live Silver data
+
+**Status:** 🟡 **OPEN (accepted, by design at this stage)** — 12-13 Sep
+2026. Not a bug; registered per this project's own standing rule that a
+component "written and unit-tested, not live-confirmed" needs an entry
+before further work builds on top of it (same discipline as RISK-16's
+Gate 1 before its live run, RISK-17's EIA APIv2 migration before live
+confirmation).
+
+**GD Reference:** Architecture v2.0 §6 (CrossAssetEngine 4-module
+design), Architecture Extension v1.0 §6 (BH-FDR q=0.03, taxonomy),
+ADR-001/002.
+
+### What was built
+
+Four new modules under `src/gold/cross_asset/`
+(`global_index_regime.py`, `correlation_module.py`, `lead_lag_module.py`,
+`forecast_module.py`, plus `broad_dollar.py` closing Gate 1 — see the
+update to RISK-16 above) and a `gold_screener` integration surfacing
+their outputs as informational columns. Full technical detail in
+`CHANGELOG.md` v1.18.0 and `dev-log/2026-09-13-gmi-wave1-cycle4-cross-asset-engine.md`.
+69 new tests, all against synthetic fixtures (`tmp_path`-isolated
+Parquet files shaped like real Silver/Gold output) — none against real
+production Silver data, since this sandbox has none and no route to
+generate any (same category of limitation as every Bronze-source
+preflight script before its first live run).
+
+### Specific first-pass decisions that need production validation, not just unit tests
+
+- **GlobalIndexRegimeModule's RISK_ON/RISK_OFF/MIXED thresholds (60/40
+  on `global_risk_score`)** are this module's own first-pass calibration
+  — Architecture v2.0 §6.5 never specified exact cutoffs. No live data
+  exists yet to check the label's actual duty-cycle (how often each
+  label fires, whether the 20-point neutral band is too wide/narrow).
+- **ForecastModule's PCA input excludes the FRED/BIS macro rate series**
+  (SOFR, DGS2/5/10/30, T10Y2Y, T10Y3M, and the 12 non-FED central bank
+  rates in `silver_global_rates.parquet`) — genuinely different Silver
+  schema (`series_id/observation_date/value`, forward-filled PIT series)
+  than the `symbol/timestamp/log_return` OHLCV schema every other input
+  here uses. Folding them in is real follow-up work, not a one-line fix
+  — flagged in the module's own docstring, not silently dropped.
+  Architecture v2.0 §6.4.2 Step 1 ("Layer 2 returns, 25 series") predates
+  the schema split that put rates on their own path entirely.
+- **ForecastModule fits one VAR per equity** (PCs + that equity's own
+  return, typically 4-6 variables) rather than Architecture v2.0
+  §6.4.1's own code sketch (one VAR across PCs + ALL ~190 active
+  equities simultaneously, a ~195-variable system on a ~60-observation
+  window) — the sketch's own approach is statistically unidentifiable at
+  that scale; per-equity VAR is the standard way to use shared factors
+  as context for many individual forecasts. A deliberate, documented
+  departure from the literal doc, not an oversight.
+- **Two correlation implementations now coexist**: `gold_correlation`
+  (`correlation_matrix.py`, Layer 1-only, raw Pearson, pre-Cycle-4) and
+  `gold_cross_asset_correlation` (`correlation_module.py`, merged Layer
+  1+2, Ledoit-Wolf shrinkage). Architecture v2.0 §5.1 marks the old one
+  "REPLACED," but actually retiring it — deregistering the job,
+  redirecting `gold_screener`'s existing `correlation_clusters.parquet`
+  read to the new store — is a separate, larger decision than building
+  Cycle 4, not made here.
+- **None of the four new jobs are in `gold_screener`'s `depends_on`**
+  (job_registry.py) — matches `silver_active_symbols`' own precedent
+  (feeds a screener join, not a hard dependency), so a missing or stale
+  weekly CrossAssetEngine output degrades the new columns to null/false
+  rather than blocking the screener. Intentional, not an oversight, but
+  means the new columns can be silently stale for up to a week with no
+  alerting — no freshness check equivalent to `silver_macro`'s
+  `stale_tolerance` pattern exists for these three yet.
+
+### Real bugs found and fixed during this thread's own testing (already closed, listed for completeness)
+
+- `statsmodels==0.14.6` (the version `poetry.lock` actually pins — this
+  sandbox's initially pip-installed 0.15.0 would have hidden this)
+  prints the full Granger test summary to stdout even with
+  `verbose=False` passed explicitly; only a separate `contextlib.
+  redirect_stdout` actually suppresses it. Would have flooded logs at
+  ~11,000 (leader, follower) pairs per weekly `gold_lead_lag` run in
+  production had it shipped unnoticed.
+- `VARResults.forecast()`/`.is_stable()` both raise (not return
+  gracefully) on an empty coefficient array when BIC selects `k_ar==0` —
+  confirmed empirically, not assumed; handled as an explicit
+  mean-return fallback in `forecast_module.py`.
+- `.to_numpy()` on a narrow Polars column selection can return a
+  read-only array, breaking in-place NaN-imputation in both
+  `correlation_module.py` and `forecast_module.py` — fixed with an
+  explicit `.copy()` in both places once found in one.
+- `forecast_module.py`'s `_build_pca_scores()` originally short-circuited
+  to `None` whenever `forecast_context()` was empty, before ever
+  attempting the FX/Broad-Dollar-only fallback path — meaning a real,
+  intended fallback path was unreachable code until a test written
+  specifically to exercise it caught the ordering bug.
+
+### Suggested next step
+
+Run all four new jobs for real against production Silver data on the
+M1 (`python runner.py --job gold_global_regime`, then the three weekly
+jobs) once enough Silver history exists, and compare actual output
+distributions (label duty-cycle, `bh_significant` count, VAR stability
+rate) against what the synthetic-fixture tests only checked for
+directional correctness. Decide the `gold_correlation` retirement
+question explicitly rather than leaving both running indefinitely.
+
+---
+
+*Last updated: v1.18.0 — GMI Wave 1 Cycle 4: CrossAssetEngine implemented
+in full (GlobalIndexRegimeModule, CorrelationModule, LeadLagModule,
+ForecastModule) plus gold_screener integration (12-13 Sep 2026). Gate 1
+(RISK-16 above) CLOSED — Ovi ran the real BIS weight extraction on the
+M1. New RISK-31 (OPEN, accepted) registers the whole Cycle 4 batch as
+sandbox-built/unit-tested-only, never run against live Silver data, plus
+five specific first-pass design decisions needing production validation.
+69 new tests, 1641 → 1710 passed, 0 regressions. Full detail: CHANGELOG.md
+v1.18.0, dev-log/2026-09-13-gmi-wave1-cycle4-cross-asset-engine.md.
+Prior entry: v1.17.11 — CL/Colgate-Palmolive removed to resolve RISK-30's
 cross-market ticker collision (Ovi, 9 Sep 2026): Ovi's instruction ("remove
 Colgate-Palmolive ticker from the universe... it's a fair trade-off") chose
 symbol removal over the 5-check market-aware-partitioning fix RISK-30

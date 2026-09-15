@@ -106,6 +106,10 @@ def _patch_all_optional_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(scr_mod, "GOLD_CORR_PATH", tmp_path / "corr.parquet")
     monkeypatch.setattr(scr_mod, "SILVER_ACTIVE_SYMBOLS_ROOT", tmp_path / "active_symbols")
     monkeypatch.setattr(scr_mod, "GOLD_SCREENER_PATH", tmp_path / "screener")
+    # ADD GMI Wave 1 Cycle 4 — CrossAssetEngine optional sources.
+    monkeypatch.setattr(scr_mod, "GLOBAL_REGIME_PATH", tmp_path / "cross_asset" / "global_regime.parquet")
+    monkeypatch.setattr(scr_mod, "LEAD_LAG_PATH", tmp_path / "cross_asset" / "lead_lag_matrix.parquet")
+    monkeypatch.setattr(scr_mod, "CROSS_ASSET_FORECAST_PATH", tmp_path / "cross_asset" / "cross_asset_forecast.parquet")
     return tmp_path / "mtf"
 
 
@@ -330,6 +334,198 @@ class TestBuildWatchlistEnrichment:
             result["mtf_score"].to_list(), reverse=True
         )
         assert result["symbol"].to_list()[0] == "SYM0"   # highest score (30)
+
+
+# ── ADD GMI Wave 1 Cycle 4 — CrossAssetEngine integration ────────────────────
+
+class TestCrossAssetEngineIntegration:
+    """global_regime_tbl / lead_lag_tbl / forecast_tbl — same graceful-
+    degrade contract as sector_tbl/active_tbl/regime_tbl above: missing or
+    partial CrossAssetEngine output must never shrink the watchlist or
+    raise, only leave the new columns null/False. See module docstring's
+    "ADD GMI Wave 1 Cycle 4" section for the full column list."""
+
+    def test_all_three_absent_watchlist_unaffected(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        result = build_watchlist(run_date)
+        row = result.row(0, named=True)
+        assert row["global_risk_score"] is None
+        assert row["global_regime_label"] is None
+        assert row["dm_em_divergence"] is None
+        assert row["lead_lag_signal"] is False
+        assert row["lead_lag_top_leader"] is None
+        assert row["lead_lag_top_lag"] is None
+        assert row["forecast_return_1d"] is None
+        assert row["forecast_stable"] is None
+
+    def test_global_regime_present_broadcasts_to_all_candidates(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [
+            _mtf_row("AAPL", 7, "A"), _mtf_row("MSFT", -6, "A"),
+        ])
+        scr_mod.GLOBAL_REGIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "date": [run_date], "global_risk_score": [71.4],
+            "global_regime_label": ["RISK_ON"], "dm_em_divergence": [12.5],
+        }).write_parquet(scr_mod.GLOBAL_REGIME_PATH)
+        result = build_watchlist(run_date)
+        assert result["global_risk_score"].to_list() == [pytest.approx(71.4)] * 2
+        assert result["global_regime_label"].to_list() == ["RISK_ON", "RISK_ON"]
+        assert result["dm_em_divergence"].to_list() == [pytest.approx(12.5)] * 2
+
+    def test_global_regime_file_exists_but_no_row_for_run_date(self, tmp_path, monkeypatch):
+        """Same GLD-SCR-001-class hazard as regime_tbl: a global_regime
+        store with no row for this exact run_date must not zero the
+        watchlist — LEFT JOIN ... ON TRUE, not CROSS JOIN."""
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.GLOBAL_REGIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "date": [date(2026, 5, 20)], "global_risk_score": [50.0],
+            "global_regime_label": ["MIXED"], "dm_em_divergence": [0.0],
+        }).write_parquet(scr_mod.GLOBAL_REGIME_PATH)
+        result = build_watchlist(run_date)
+        assert not result.is_empty(), (
+            "a global_regime file with no row for this run_date must not "
+            "zero out the watchlist"
+        )
+        assert result["global_risk_score"].to_list() == [None]
+
+    def test_corrupt_global_regime_file_degrades_to_null(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.GLOBAL_REGIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+        scr_mod.GLOBAL_REGIME_PATH.write_text("not a parquet file")
+        result = build_watchlist(run_date)
+        assert not result.is_empty()
+        assert result["global_risk_score"].to_list() == [None]
+
+    def test_lead_lag_significant_relationship_flagged(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.LEAD_LAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "leader":            ["DXY", "SPX"],
+            "follower":          ["AAPL", "AAPL"],
+            "optimal_lag":       [2, 1],
+            "p_value_raw":       [0.001, 0.02],
+            "p_value_adjusted":  [0.01, 0.028],
+            "r_squared":         [0.4, 0.2],
+            "bh_significant":    [True, True],
+            "max_cross_corr":    [0.5, 0.3],
+        }).write_parquet(scr_mod.LEAD_LAG_PATH)
+        result = build_watchlist(run_date)
+        row = result.row(0, named=True)
+        assert row["lead_lag_signal"] is True
+        # DXY has the smaller p_value_adjusted (0.01 < 0.028) -> "top".
+        assert row["lead_lag_top_leader"] == "DXY"
+        assert row["lead_lag_top_lag"] == 2
+
+    def test_lead_lag_no_significant_relationship_not_flagged(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.LEAD_LAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "leader": ["DXY"], "follower": ["AAPL"], "optimal_lag": [3],
+            "p_value_raw": [0.4], "p_value_adjusted": [0.6], "r_squared": [0.01],
+            "bh_significant": [False], "max_cross_corr": [0.05],
+        }).write_parquet(scr_mod.LEAD_LAG_PATH)
+        result = build_watchlist(run_date)
+        row = result.row(0, named=True)
+        assert row["lead_lag_signal"] is False
+        assert row["lead_lag_top_leader"] is None
+
+    def test_corrupt_lead_lag_file_degrades_to_not_flagged(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.LEAD_LAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        scr_mod.LEAD_LAG_PATH.write_text("not a parquet file")
+        result = build_watchlist(run_date)
+        assert not result.is_empty()
+        assert result.row(0, named=True)["lead_lag_signal"] is False
+
+    def test_forecast_horizon_one_populates_columns(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.CROSS_ASSET_FORECAST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "symbol":       ["AAPL", "AAPL"],
+            "horizon_days": [1, 2],
+            "forecast_return": [0.0123, 0.0200],
+            "stable":       [True, True],
+        }).write_parquet(scr_mod.CROSS_ASSET_FORECAST_PATH)
+        result = build_watchlist(run_date)
+        row = result.row(0, named=True)
+        assert row["forecast_return_1d"] == pytest.approx(0.0123)
+        assert row["forecast_stable"] is True
+
+    def test_forecast_missing_horizon_one_row_degrades_to_null(self, tmp_path, monkeypatch):
+        """A symbol with only horizon=2..5 rows (no horizon=1) must not
+        error and must simply leave forecast columns null for it."""
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.CROSS_ASSET_FORECAST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "symbol": ["AAPL"], "horizon_days": [2],
+            "forecast_return": [0.02], "stable": [False],
+        }).write_parquet(scr_mod.CROSS_ASSET_FORECAST_PATH)
+        result = build_watchlist(run_date)
+        assert not result.is_empty()
+        assert result.row(0, named=True)["forecast_return_1d"] is None
+
+    def test_corrupt_forecast_file_degrades_to_null(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.CROSS_ASSET_FORECAST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        scr_mod.CROSS_ASSET_FORECAST_PATH.write_text("not a parquet file")
+        result = build_watchlist(run_date)
+        assert not result.is_empty()
+        assert result.row(0, named=True)["forecast_return_1d"] is None
+
+    def test_all_three_present_together_no_row_count_change(self, tmp_path, monkeypatch):
+        """All three CrossAssetEngine sources present simultaneously must
+        not change the candidate count or MTF-driven ordering — purely
+        additive columns, never a filter."""
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [
+            _mtf_row("AAPL", 7, "A"), _mtf_row("MSFT", 6, "A"),
+        ])
+        scr_mod.GLOBAL_REGIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "date": [run_date], "global_risk_score": [64.3],
+            "global_regime_label": ["RISK_ON"], "dm_em_divergence": [8.0],
+        }).write_parquet(scr_mod.GLOBAL_REGIME_PATH)
+        pl.DataFrame({
+            "leader": ["DXY"], "follower": ["AAPL"], "optimal_lag": [1],
+            "p_value_raw": [0.001], "p_value_adjusted": [0.01], "r_squared": [0.3],
+            "bh_significant": [True], "max_cross_corr": [0.4],
+        }).write_parquet(scr_mod.LEAD_LAG_PATH)
+        pl.DataFrame({
+            "symbol": ["AAPL", "MSFT"], "horizon_days": [1, 1],
+            "forecast_return": [0.01, -0.005], "stable": [True, False],
+        }).write_parquet(scr_mod.CROSS_ASSET_FORECAST_PATH)
+
+        result = build_watchlist(run_date)
+        assert result["symbol"].to_list() == ["AAPL", "MSFT"]
+        assert result["mtf_score"].to_list() == [7, 6]
+        aapl = result.filter(pl.col("symbol") == "AAPL").row(0, named=True)
+        msft = result.filter(pl.col("symbol") == "MSFT").row(0, named=True)
+        assert aapl["lead_lag_signal"] is True
+        assert msft["lead_lag_signal"] is False
+        assert aapl["forecast_stable"] is True
+        assert msft["forecast_stable"] is False
 
 
 # ── FIX GLD-SCR-003 regression (correlation cluster dedup) ──────────────────

@@ -271,6 +271,44 @@ def _gold_correlation(run_date: date) -> None:
     corr_run(run_date)
 
 
+def _gold_global_regime(run_date: date) -> None:
+    """ADD GMI Wave 1 Cycle 4 — CrossAssetEngine's first module
+    (Architecture v2.0 §6.5). Independent of the gold_signals -> gold_mtf
+    -> gold_regime -> gold_sector -> gold_screener chain; reads Layer 2
+    equity-index Silver OHLCV only."""
+    from src.gold.cross_asset.global_index_regime import run as global_regime_run
+    global_regime_run(run_date)
+
+
+def _gold_cross_asset_correlation(run_date: date) -> None:
+    """ADD GMI Wave 1 Cycle 4 — CrossAssetEngine's second module
+    (Architecture v2.0 §6.2). Coexists with the pre-Cycle-4 gold_correlation
+    job (Layer 1-only, no Ledoit-Wolf) — see
+    src/gold/cross_asset/correlation_module.py module docstring for why
+    the old job is not being retired as part of this pass."""
+    from src.gold.cross_asset.correlation_module import run as cross_corr_run
+    cross_corr_run(run_date)
+
+
+def _gold_lead_lag(run_date: date) -> None:
+    """ADD GMI Wave 1 Cycle 4 — CrossAssetEngine's third module
+    (Architecture v2.0 §6.3, ADR-001 BH-FDR q=0.03). Layer 2 anchors as
+    leaders, Layer 1 active_ohlcv as followers, Granger causality +
+    global BH-FDR correction."""
+    from src.gold.cross_asset.lead_lag_module import run as lead_lag_run
+    lead_lag_run(run_date)
+
+
+def _gold_forecast(run_date: date) -> None:
+    """ADD GMI Wave 1 Cycle 4 — CrossAssetEngine's fourth and final module
+    (Architecture v2.0 §6.4). Gate 1 (BIS Broad Dollar weight extraction)
+    closed this session — see src/gold/cross_asset/broad_dollar.py.
+    PCA(Layer 2 forecast_context + Broad Dollar) -> per-equity VAR,
+    BIC lag selection, 1-5 day forecast."""
+    from src.gold.cross_asset.forecast_module import run as forecast_run
+    forecast_run(run_date)
+
+
 def _health_report(run_date: date) -> None:
     from src.utils.health_reporter import run as health_run
     health_run(run_date)
@@ -591,6 +629,59 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "est_minutes": 10,
     },
 
+    # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.2) — second CrossAssetEngine
+    # module. Weekly, like gold_correlation above — but merged Layer 1 +
+    # Layer 2 universe, Ledoit-Wolf shrinkage, scipy hierarchical clustering.
+    # depends_on both resolvers directly (not the old gold_correlation job)
+    # since it reads their persisted output itself, not gold_correlation's.
+    "gold_cross_asset_correlation": {
+        "description": "Ledoit-Wolf correlation + clustering — merged Layer 1+2 universe",
+        "fn":          _gold_cross_asset_correlation,
+        "depends_on":  ["silver_active_symbols", "silver_context_anchors"],
+        "layer":       "gold",
+        "est_minutes": 10,
+    },
+
+    # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.3, ADR-001) — third
+    # CrossAssetEngine module. depends_on gold_cross_asset_correlation for
+    # documented run-order only (does not read its output) — see
+    # lead_lag_module.py module docstring.
+    "gold_lead_lag": {
+        "description": "Granger causality lead-lag, Layer 2 anchors -> Layer 1 equities, BH-FDR q=0.03",
+        "fn":          _gold_lead_lag,
+        "depends_on":  ["silver_active_symbols", "silver_context_anchors", "gold_cross_asset_correlation"],
+        "layer":       "gold",
+        "est_minutes": 15,
+    },
+
+    # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.4) — fourth and final
+    # CrossAssetEngine module. Gate 1 closed this session (real BIS Broad
+    # Dollar weights) — see broad_dollar.py. depends_on gold_lead_lag for
+    # documented run-order only (does not read its output).
+    "gold_forecast": {
+        "description": "PCA(Layer 2 + Broad Dollar) -> per-equity VAR, 1-5 day forecast",
+        "fn":          _gold_forecast,
+        "depends_on":  ["silver_active_symbols", "silver_context_anchors", "gold_lead_lag"],
+        "layer":       "gold",
+        "est_minutes": 20,
+    },
+
+    # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.5) — first CrossAssetEngine
+    # module. depends_on=['silver_ohlcv_context'] (the Layer 2 OHLCV price
+    # job) — NOT 'silver_context_anchors' (pure config metadata, no price
+    # data; see src/silver/context_anchors.py docstring). Deliberately NOT
+    # yet in gold_screener's depends_on (Architecture v2.0 §6.5's own code
+    # snippet does this) — that wiring belongs to a later
+    # signal_aggregation/screener-integration pass (Architecture v2.0 §5.3,
+    # §9.1 Phase 5), out of scope for this module.
+    "gold_global_regime": {
+        "description": "Global equity-index breadth regime — 14 Layer 2 indices, daily",
+        "fn":          _gold_global_regime,
+        "depends_on":  ["silver_ohlcv_context"],
+        "layer":       "gold",
+        "est_minutes": 2,
+    },
+
     # ── UTILITIES ─────────────────────────────────────────────────────────────
 
     "health_report": {
@@ -642,6 +733,13 @@ DAILY_SEQUENCE: list[str] = [
 
     # silver_sentiment DIHAPUS — ADR-043 (Finnhub full retirement)
 
+    # ADD GMI Wave 1 Cycle 4: independent of the gold_signals -> gold_mtf ->
+    # gold_regime -> gold_sector -> gold_screener chain below (depends only
+    # on silver_ohlcv_context, already satisfied above) — positioned here
+    # for SOP readability, not because of a real ordering requirement with
+    # the jobs that follow it.
+    "gold_global_regime",
+
     # Gold — urutan KRITIS: regime -> sector -> screener
     "gold_signals",
     "gold_mtf",
@@ -670,6 +768,20 @@ WEEKLY_SEQUENCE: list[str] = [
 
     # Gold correlation — rolling 60D, weekly refresh
     "gold_correlation",
+
+    # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.2) — coexists with
+    # gold_correlation above (see job entry comment / correlation_module.py
+    # module docstring for why the old job isn't being retired here).
+    "gold_cross_asset_correlation",
+
+    # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.3, ADR-001) — Granger
+    # causality lead-lag, depends on gold_cross_asset_correlation above.
+    "gold_lead_lag",
+
+    # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.4) — PCA + per-equity
+    # VAR forecast, depends on gold_lead_lag above. Gate 1 closed this
+    # session — see broad_dollar.py.
+    "gold_forecast",
 
     # Lanjutkan dengan DAILY_SEQUENCE setelah ini (per SOP §14.4.2)
 ] + DAILY_SEQUENCE
