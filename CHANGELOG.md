@@ -1,5 +1,69 @@
 # CHANGELOG — Data Platform
 
+## v1.18.1 — FIX XAE-CAL-01: CrossAssetEngine history threshold observation-count native (September 2026)
+
+Bug produksi ditemukan Ovi setelah menjalankan keempat job CrossAssetEngine
+secara live (`gold_global_regime`, `gold_cross_asset_correlation`,
+`gold_lead_lag`, `gold_forecast`): dua job (`gold_cross_asset_correlation`,
+`gold_lead_lag`) mengembalikan warning "Only 1 symbols have enough history"
+dan "valid_leaders=0, valid_followers=0", lalu menulis nothing setiap kali —
+padahal universe ter-resolve normal (196 Layer 1 + 58 Layer 2 = 254 merged).
+`gold_forecast` sendiri "sukses" tapi hanya mencakup 1 simbol dari ~196
+active_ohlcv, tanpa warning apapun — silent degradation yang lebih berbahaya
+dari dua job yang eksplisit gagal.
+
+**Root cause (diverifikasi empiris via Filesystem MCP + DuckDB terhadap Silver
+Parquet live, bukan asumsi):** ketiga modul mingguan CrossAssetEngine
+(`correlation_module.py`, `lead_lag_module.py`, `forecast_module.py`) masing-
+masing secara independen mendefinisikan `MIN_HISTORY_RATIO = 0.8` dan
+menghitung `min_days = int(LOOKBACK_DAYS * MIN_HISTORY_RATIO)` = `int(65*0.8)`
+= 52 — dibandingkan terhadap jumlah baris dalam window 65 hari KALENDER.
+Window 65 hari kalender (66 hari inclusive dari `run_date`) hanya mengandung
+maksimum 48 hari kerja (Senin-Jumat) — mustahil dicapai oleh instrumen
+market manapun yang berdagang 5 hari/minggu (US stocks, IDX, forex,
+commodity), berapapun bagusnya kualitas datanya. Dikonfirmasi dengan
+menyalin parquet Silver 1D live via Filesystem MCP dan query DuckDB
+langsung: AAPL 45 obs valid, BBCA/idx 44, EUR_USD/forex 47, CL/commodity 47,
+SSEC/ctx 45, JKSE/ctx 43, DXY/ctx 47, IDR/ctx 48 — semua di bawah 52. Bug
+ini bahkan direproduksi persis: source lama (via `git stash`) diberi data
+weekday-only sintetis yang bersih (46 obs) menghasilkan pesan warning
+production yang IDENTIK ("Only 0 symbols have enough history"). Pola bug
+yang sama persis dengan temuan ADR-046 (`MIN_MTF_SCORE`,
+`GMI_Decision_Document_v11.docx` §1.5) — threshold hilir yang dikalibrasi
+terhadap asumsi kepadatan data hulu yang tidak pernah bisa dipenuhi.
+
+**Keputusan Ovi (eksplisit):** "switch from calendar-day window to
+trading-day-count. for cross-asset engine; do not use trading day
+literally, use observation count instead. cross-asset engine =
+observation-count native, calendar-aware."
+
+**Fix:** `MIN_HISTORY_RATIO` dihapus di ketiga modul, diganti
+`MIN_OBSERVATIONS = 40` — floor absolut jumlah baris (observation-count
+native), BUKAN rasio hari kalender. `LOOKBACK_DAYS = 65` tidak berubah
+(tetap membatasi window scan Silver agar pivot/join punya date index yang
+sama antar simbol — calendar-aware). Tidak ada trading calendar per-market
+yang dimodelkan secara eksplisit — jumlah baris Silver riil sudah
+merefleksikan kalender aktual tiap market (libur US, penutupan IDX termasuk
+Eid al-Fitr, gap weekend forex), sehingga menghitung observation langsung
+sudah calendar-aware by construction. Nilai 40 dikalibrasi dari distribusi
+live di atas — clear semua sampel dengan margin untuk minggu yang lebih
+buruk (mis. closure Eid al-Fitr jatuh di dalam window) sambil tetap
+mensyaratkan ~83% dari ceiling 48-hari-kerja.
+
+**Test:** 3 test regresi baru (`TestCalendarAwareness`, satu per modul) —
+fixture weekday-only realistis (skip Sabtu/Minggu), berbeda dari SEMUA
+fixture lain di ketiga file test yang memakai hari kalender berurutan
+7-hari/minggu (persis alasan bug lolos dari 1710 test yang passing).
+Diverifikasi dua arah: test baru FAIL terhadap source lama (via `git
+stash`, AttributeError pada `MIN_OBSERVATIONS` yang belum ada) dan PASS
+terhadap source yang sudah di-fix. `tests/COUNT_BASELINE.txt`: 1710 → 1713.
+Full suite: 1713 passed / 0 failed / 0 error.
+
+**File dimodifikasi:** `src/gold/cross_asset/correlation_module.py`,
+`lead_lag_module.py`, `forecast_module.py` (source) + ketiga file test
+pasangannya + `tests/COUNT_BASELINE.txt`. Tag traceability: `FIX
+XAE-CAL-01` di setiap baris berubah.
+
 ## v1.18.0 — GMI Wave 1 Cycle 4: CrossAssetEngine (4 modul) + Integrasi gold_screener (September 2026)
 
 Implementasi penuh CrossAssetEngine (Architecture v2.0 §6, Architecture

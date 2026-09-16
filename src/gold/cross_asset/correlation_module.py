@@ -91,8 +91,35 @@ REGIME_STORE_PATH     = Path("data/gold/macro/regime_store.parquet")
 GOLD_CROSS_ASSET_PATH = Path("data/gold/cross_asset")
 CROSS_ASSET_CORR_PATH = GOLD_CROSS_ASSET_PATH / "cross_asset_corr.parquet"
 
-LOOKBACK_DAYS      = 65   # Rolling window, matching gold_correlation's own convention
-MIN_HISTORY_RATIO  = 0.8  # A symbol needs >= 80% of LOOKBACK_DAYS rows to be included
+LOOKBACK_DAYS      = 65   # Calendar days — bounds the Silver scan window only (still
+                           # needed so correlation/pivot has a common date index across
+                           # symbols). Rolling window, matching gold_correlation's own
+                           # convention.
+MIN_OBSERVATIONS   = 40   # FIX XAE-CAL-01 (16 Sep 2026): absolute count of real
+                           # (is_clean, non-null) daily bars required within
+                           # LOOKBACK_DAYS — NOT a % of calendar days. The prior
+                           # MIN_HISTORY_RATIO=0.8 required int(65*0.8)=52 calendar-day
+                           # rows, but a 65-calendar-day window contains at most 48
+                           # weekdays (empirically verified against live Silver data,
+                           # 16 Sep 2026 session) — unreachable for any 5-day-week
+                           # market (equities, IDX, forex, commodities), so this
+                           # silently zeroed out CorrelationModule every week
+                           # regardless of data quality. "Observation-count native":
+                           # the threshold is a literal row count, not a calendar-
+                           # density ratio. "Calendar-aware": LOOKBACK_DAYS still
+                           # bounds recency, and no per-market trading calendar is
+                           # modeled — the real Silver row count already reflects
+                           # each market's actual calendar (US holidays, IDX closures
+                           # incl. Eid al-Fitr, FX weekend gaps), so counting
+                           # observations directly is calendar-aware by construction.
+                           # Calibrated against live Silver data across every market
+                           # type in the universe (valid obs in the current 65-day
+                           # window: AAPL 45, BBCA/idx 44, EUR_USD/forex 47,
+                           # CL/commodity 47, SSEC/ctx 45, JKSE/ctx 43, DXY/ctx 47,
+                           # IDR/ctx 48) — 40 clears all of them with margin for a
+                           # worse week (e.g. an Eid al-Fitr closure landing inside
+                           # the window) while still requiring ~83% of the 48-weekday
+                           # ceiling.
 N_CLUSTERS_TARGET  = 10
 MAX_PAIRS_RAM_WARN = 40_000  # ~283 symbols — informational only, Ledoit-Wolf does not
                               # share old correlation_matrix.py's RAM/instability
@@ -200,10 +227,10 @@ class CorrelationModule:
 
     @staticmethod
     def _pivot_returns(returns: pl.DataFrame) -> tuple[pl.DataFrame, list[str]]:
-        min_days = int(LOOKBACK_DAYS * MIN_HISTORY_RATIO)
+        # FIX XAE-CAL-01: observation-count native — see MIN_OBSERVATIONS above.
         sym_counts = (
-            returns.group_by("symbol").agg(pl.len().alias("n_days"))
-            .filter(pl.col("n_days") >= min_days)
+            returns.group_by("symbol").agg(pl.len().alias("n_obs"))
+            .filter(pl.col("n_obs") >= MIN_OBSERVATIONS)
         )
         valid_symbols = sorted(sym_counts["symbol"].to_list())
         if len(valid_symbols) < 2:

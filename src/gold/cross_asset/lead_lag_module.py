@@ -93,8 +93,18 @@ REGIME_STORE_PATH     = Path("data/gold/macro/regime_store.parquet")
 GOLD_CROSS_ASSET_PATH = Path("data/gold/cross_asset")
 LEAD_LAG_STORE_PATH   = GOLD_CROSS_ASSET_PATH / "lead_lag_matrix.parquet"
 
-LOOKBACK_DAYS     = 65    # Matches CorrelationModule's window
-MIN_HISTORY_RATIO = 0.8
+LOOKBACK_DAYS     = 65    # Calendar days — bounds the Silver scan window only.
+                          # Matches CorrelationModule's window.
+MIN_OBSERVATIONS  = 40    # FIX XAE-CAL-01 (16 Sep 2026): observation-count native,
+                          # calendar-aware — replaces the old MIN_HISTORY_RATIO=0.8
+                          # (int(65*0.8)=52), which was unreachable for any 5-day-week
+                          # market (max 48 weekdays in a 65-day window, empirically
+                          # verified against live Silver data, 16 Sep 2026 session).
+                          # See correlation_module.py's MIN_OBSERVATIONS comment for
+                          # the full rationale and calibration data — both modules
+                          # share this threshold by convention, not by import, per
+                          # each CrossAssetEngine module's independence (Architecture
+                          # v2.0 §6.1).
 MAX_LAG           = 5     # Architecture v2.0 §6.3.1
 BH_FDR_Q          = 0.03  # ADR-001 (Architecture Extension v1.0 §6.2), supersedes v2.0's q=0.10
 MIN_PAIR_OBS      = MAX_LAG + 10  # Minimum overlapping obs to attempt Granger at all
@@ -205,10 +215,10 @@ class LeadLagModule:
 
     @staticmethod
     def _pivot_returns(returns: pl.DataFrame) -> tuple[pl.DataFrame, set[str]]:
-        min_days = int(LOOKBACK_DAYS * MIN_HISTORY_RATIO)
+        # FIX XAE-CAL-01: observation-count native — see MIN_OBSERVATIONS above.
         sym_counts = (
-            returns.group_by("symbol").agg(pl.len().alias("n_days"))
-            .filter(pl.col("n_days") >= min_days)
+            returns.group_by("symbol").agg(pl.len().alias("n_obs"))
+            .filter(pl.col("n_obs") >= MIN_OBSERVATIONS)
         )
         candidate_symbols = sym_counts["symbol"].to_list()
         if len(candidate_symbols) < 2:

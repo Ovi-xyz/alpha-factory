@@ -1,7 +1,37 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.18.0"
-# FIX (chat thread, 7 Sep 2026): 3 bugs behind VIXCLS starvation, closed.
+version = "1.18.1"
+# FIX XAE-CAL-01 (chat thread, 16 Sep 2026): CrossAssetEngine's three
+# weekly modules (CorrelationModule, LeadLagModule, ForecastModule) each
+# independently defined MIN_HISTORY_RATIO=0.8 against a 65-CALENDAR-day
+# LOOKBACK_DAYS window, requiring int(65*0.8)=52 rows. A 65-calendar-day
+# window contains at most 48 weekdays -- unreachable for any 5-day-week
+# market (equities, IDX, forex, commodities), confirmed empirically via
+# live Silver data (AAPL 45, BBCA 44, EUR_USD 47, CL 47, SSEC 45, JKSE 43,
+# DXY 47, IDR 48 valid obs in the live window) and by reproducing the
+# exact production symptom ("Only 0 symbols have enough history") against
+# the pre-fix source using synthetic weekday-only data. This silently
+# zeroed out gold_cross_asset_correlation and gold_lead_lag every week
+# (both wrote nothing) and left gold_forecast covering ~1 of ~196 active
+# equities while still logging SUCCESS. Same bug shape as ADR-046's
+# MIN_MTF_SCORE finding (GMI_Decision_Document_v11.docx) -- a downstream
+# threshold calibrated against an assumption the upstream data can never
+# satisfy. Ovi's explicit repair-path decision: "switch from calendar-day
+# window to trading-day-count... do not use trading day literally, use
+# observation count instead. cross-asset engine = observation-count
+# native, calendar-aware." Fix: MIN_HISTORY_RATIO replaced by
+# MIN_OBSERVATIONS=40 (an absolute row-count floor, not a calendar-day
+# ratio) in all three modules; LOOKBACK_DAYS=65 unchanged (still bounds
+# the Silver scan window so pivot/join has a common date index). No
+# per-market trading calendar is modeled -- real Silver row counts
+# already reflect each market's actual calendar, so counting observations
+# directly is calendar-aware by construction. 3 new regression tests
+# (TestCalendarAwareness, one per module) use realistic weekday-only
+# fixtures -- every pre-existing fixture in this test suite used
+# artificial 7-day-a-week consecutive dates, which is exactly why the
+# original bug escaped 1710 passing tests. Verified the new tests fail
+# against the reverted pre-fix source (git stash) before confirming they
+# pass against the fix. tests/COUNT_BASELINE.txt: 1710 -> 1713.
 # Ovi's manual finding: data/bronze/macro/fred/volatility only had 2 files,
 # VIXCLS missing for 20260905. GMI-FRED-DAILY-01: 9 cadence:daily FRED
 # series (incl. regime inputs VIXCLS/DEXUSEU/BAMLH0A0HYM2) permanently

@@ -104,8 +104,18 @@ REGIME_STORE_PATH     = Path("data/gold/macro/regime_store.parquet")
 GOLD_CROSS_ASSET_PATH = Path("data/gold/cross_asset")
 FORECAST_STORE_PATH   = GOLD_CROSS_ASSET_PATH / "cross_asset_forecast.parquet"
 
-LOOKBACK_DAYS        = 65    # matches Correlation/LeadLag; §6.4.3 "60-day rolling window is the minimum"
-MIN_HISTORY_RATIO    = 0.8
+LOOKBACK_DAYS        = 65    # Calendar days — bounds the Silver scan window only.
+                              # matches Correlation/LeadLag; §6.4.3 "60-day rolling
+                              # window is the minimum"
+MIN_OBSERVATIONS     = 40    # FIX XAE-CAL-01 (16 Sep 2026): observation-count native,
+                              # calendar-aware — replaces MIN_HISTORY_RATIO=0.8, which
+                              # was unreachable for any 5-day-week market (max 48
+                              # weekdays in a 65-day window, empirically verified
+                              # against live Silver data, 16 Sep 2026 session). See
+                              # correlation_module.py's MIN_OBSERVATIONS comment for
+                              # full rationale/calibration. This threshold gates BOTH
+                              # the Layer 2 PCA input pivot and the Layer 1 equity
+                              # returns pivot (both go through _load_pivot below).
 PCA_VARIANCE_TARGET  = 0.95  # §6.4.2 Step 2
 MAX_VAR_LAG          = 5
 FORECAST_HORIZONS    = [1, 2, 3, 4, 5]
@@ -297,10 +307,10 @@ class ForecastModule:
         if returns.is_empty():
             return None
 
-        min_days = int(LOOKBACK_DAYS * MIN_HISTORY_RATIO)
+        # FIX XAE-CAL-01: observation-count native — see MIN_OBSERVATIONS above.
         sym_counts = (
-            returns.group_by("symbol").agg(pl.len().alias("n_days"))
-            .filter(pl.col("n_days") >= min_days)
+            returns.group_by("symbol").agg(pl.len().alias("n_obs"))
+            .filter(pl.col("n_obs") >= MIN_OBSERVATIONS)
         )
         valid = sym_counts["symbol"].to_list()
         if not valid:

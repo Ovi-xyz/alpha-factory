@@ -93,6 +93,28 @@ def _write_series(tmp_path: Path, symbol: str, market: str, series: np.ndarray, 
     }).write_parquet(path)
 
 
+def _weekday_dates_ending(end: date, lookback_days: int) -> list[date]:
+    """Realistic 5-day trading calendar: every Mon-Fri date in the
+    window ending at `end` — see test_correlation_module.py's identical
+    helper for full rationale (FIX XAE-CAL-01 regression guard)."""
+    start = end - timedelta(days=lookback_days)
+    span = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    return [d for d in span if d.weekday() < 5]
+
+
+def _write_series_at_dates(
+    tmp_path: Path, symbol: str, market: str, series: np.ndarray, dates: list[date]
+) -> None:
+    path = tmp_path / "silver" / "market_ohlcv" / market / f"symbol={symbol}" / f"{symbol}_1D_silver.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol":     [symbol] * len(dates),
+        "timestamp":  dates,
+        "log_return": series[: len(dates)],
+        "is_clean":   [True] * len(dates),
+    }).write_parquet(path)
+
+
 def _lagged_dependency(rng, n: int, lag: int, coef: float = 0.7, noise_scale: float = 0.003) -> tuple[np.ndarray, np.ndarray]:
     leader = rng.normal(0, 0.01, n)
     follower = np.zeros(n)
@@ -234,6 +256,34 @@ class TestDegenerateAndInsufficientData:
 
         result = LeadLagModule().compute(RUN_DATE)
         assert result is None or result.is_empty()
+
+
+class TestCalendarAwareness:
+    """FIX XAE-CAL-01 regression guard (16 Sep 2026) — see
+    test_correlation_module.py's identical class for full rationale. A
+    genuine, gap-free 5-day-week leader/follower pair (46 obs here, vs.
+    the old, unreachable 52-row threshold) must be detected, not
+    silently dropped as insufficient history."""
+
+    def test_weekday_only_leader_and_follower_not_excluded(self, paths, monkeypatch):
+        tmp_path, as_out = paths
+        weekday_dates = _weekday_dates_ending(RUN_DATE, llm.LOOKBACK_DAYS)
+        n = len(weekday_dates)
+        assert n < 52
+        assert n >= llm.MIN_OBSERVATIONS
+
+        rng = np.random.default_rng(42)
+        leader_vals, follower_vals = _lagged_dependency(rng, n, lag=1, coef=0.8, noise_scale=0.002)
+        _write_series_at_dates(tmp_path, "LEADER1", "context", leader_vals, weekday_dates)
+        _write_series_at_dates(tmp_path, "REAL_FOLLOWER", "us_stocks", follower_vals, weekday_dates)
+        _write_followers(as_out, ["REAL_FOLLOWER"])
+        _set_leaders(monkeypatch, [_FakeInstrument("LEADER1")])
+
+        result = LeadLagModule().compute(RUN_DATE)
+
+        assert result is not None and not result.is_empty()
+        row = result.filter(pl.col("follower") == "REAL_FOLLOWER").row(0, named=True)
+        assert row["bh_significant"] is True
 
 
 class TestRunEntryPoint:

@@ -86,6 +86,32 @@ def _write_l1_returns(
     }).write_parquet(path)
 
 
+def _weekday_dates_ending(end: date, lookback_days: int) -> list[date]:
+    """Realistic 5-day trading calendar: every Mon-Fri date in the
+    window ending at `end`, going back `lookback_days` calendar days —
+    what a genuine, gap-free equity/IDX/forex feed actually looks like
+    (never a row on Saturday/Sunday). Used by FIX XAE-CAL-01's
+    regression guard below; every other fixture in this file uses
+    artificial 7-day-a-week consecutive dates, which is exactly why the
+    original MIN_HISTORY_RATIO bug escaped this test suite."""
+    start = end - timedelta(days=lookback_days)
+    span = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    return [d for d in span if d.weekday() < 5]
+
+
+def _write_l1_returns_at_dates(
+    tmp_path: Path, symbol: str, log_returns: np.ndarray, dates: list[date]
+) -> None:
+    path = tmp_path / "silver" / "market_ohlcv" / "us_stocks" / f"symbol={symbol}" / f"{symbol}_1D_silver.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol":     [symbol] * len(dates),
+        "timestamp":  dates,
+        "log_return": log_returns[: len(dates)],
+        "is_clean":   [True] * len(dates),
+    }).write_parquet(path)
+
+
 def _write_l2_returns(tmp_path: Path, symbol: str, log_returns: np.ndarray) -> None:
     path = tmp_path / "silver" / "market_ohlcv" / "context" / f"symbol={symbol}" / f"{symbol}_1D_silver.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -254,7 +280,7 @@ class TestInsufficientHistory:
         _write_context_anchors(ca_out, [])
         _write_l1_returns(tmp_path, "FULL_A", rng.normal(0, 0.01, N_DAYS))
         _write_l1_returns(tmp_path, "FULL_B", rng.normal(0, 0.01, N_DAYS))
-        # Far below the 80%-of-65-day minimum.
+        # Far below the MIN_OBSERVATIONS=40 floor.
         _write_l1_returns(tmp_path, "SHORT", rng.normal(0, 0.01, 5), n_days=5)
 
         result = CorrelationModule().compute(RUN_DATE)
@@ -285,6 +311,38 @@ class TestIsCleanFiltering:
 
         # X is entirely dirty -> excluded entirely -> fewer than 2 valid symbols.
         assert CorrelationModule().compute(RUN_DATE) is None
+
+
+class TestCalendarAwareness:
+    """FIX XAE-CAL-01 regression guard (16 Sep 2026). A 65-calendar-day
+    window contains at most 48 weekdays — a genuine, gap-free 5-day-week
+    symbol must NOT be excluded as insufficient history. The prior
+    MIN_HISTORY_RATIO=0.8 threshold (int(65*0.8)=52) was unreachable for
+    any such symbol and silently zeroed out CorrelationModule every
+    week, regardless of data quality — see MIN_OBSERVATIONS' comment in
+    correlation_module.py for the empirical calibration."""
+
+    def test_weekday_only_symbols_not_excluded(self, paths):
+        tmp_path, as_out, ca_out = paths
+        weekday_dates = _weekday_dates_ending(RUN_DATE, cmod.LOOKBACK_DAYS)
+        n = len(weekday_dates)
+        # Fixture sanity, not a module assertion: confirms this test
+        # actually exercises the failure mode (below the old, unreachable
+        # threshold) and clears the new one.
+        assert n < 52
+        assert n >= cmod.MIN_OBSERVATIONS
+
+        rng = np.random.default_rng(21)
+        _write_active_ohlcv(as_out, ["WD_A", "WD_B"])
+        _write_context_anchors(ca_out, [])
+        _write_l1_returns_at_dates(tmp_path, "WD_A", rng.normal(0, 0.01, n), weekday_dates)
+        _write_l1_returns_at_dates(tmp_path, "WD_B", rng.normal(0, 0.01, n), weekday_dates)
+
+        result = CorrelationModule().compute(RUN_DATE)
+
+        assert result is not None
+        all_syms = set(result["symbol_a"].to_list()) | set(result["symbol_b"].to_list())
+        assert {"WD_A", "WD_B"}.issubset(all_syms)
 
 
 class TestRunEntryPoint:

@@ -96,6 +96,28 @@ def _write_series(tmp_path: Path, symbol: str, market: str, series: np.ndarray, 
     }).write_parquet(path)
 
 
+def _weekday_dates_ending(end: date, lookback_days: int) -> list[date]:
+    """Realistic 5-day trading calendar: every Mon-Fri date in the
+    window ending at `end` — see test_correlation_module.py's identical
+    helper for full rationale (FIX XAE-CAL-01 regression guard)."""
+    start = end - timedelta(days=lookback_days)
+    span = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    return [d for d in span if d.weekday() < 5]
+
+
+def _write_series_at_dates(
+    tmp_path: Path, symbol: str, market: str, series: np.ndarray, dates: list[date]
+) -> None:
+    path = tmp_path / "silver" / "market_ohlcv" / market / f"symbol={symbol}" / f"{symbol}_1D_silver.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol":     [symbol] * len(dates),
+        "timestamp":  dates,
+        "log_return": series[: len(dates)],
+        "is_clean":   [True] * len(dates),
+    }).write_parquet(path)
+
+
 class TestGracefulSkip:
     def test_returns_none_when_followers_not_resolved(self, paths, monkeypatch):
         _set_forecast_context(monkeypatch, ["DXY"])
@@ -265,6 +287,34 @@ class TestPCAInputFallbackPaths:
 
         assert result is not None and not result.is_empty()
         assert result.row(0, named=True)["n_pcs"] == 1
+
+
+class TestCalendarAwareness:
+    """FIX XAE-CAL-01 regression guard (16 Sep 2026) — see
+    test_correlation_module.py's identical class for full rationale. A
+    genuine, gap-free 5-day-week context symbol and follower (46 obs
+    here, vs. the old, unreachable 52-row threshold) must not be
+    excluded as insufficient history — this is exactly the scenario
+    that left gold_forecast covering ~1 of ~196 active equities in
+    production while still logging SUCCESS."""
+
+    def test_weekday_only_context_and_follower_not_excluded(self, paths, monkeypatch):
+        tmp_path, as_out = paths
+        weekday_dates = _weekday_dates_ending(RUN_DATE, fm.LOOKBACK_DAYS)
+        n = len(weekday_dates)
+        assert n < 52
+        assert n >= fm.MIN_OBSERVATIONS
+
+        rng = np.random.default_rng(43)
+        _write_series_at_dates(tmp_path, "DXY", "context", rng.normal(0, 0.01, n), weekday_dates)
+        _write_series_at_dates(tmp_path, "AAPL", "us_stocks", rng.normal(0, 0.01, n), weekday_dates)
+        _write_followers(as_out, ["AAPL"])
+        _set_forecast_context(monkeypatch, ["DXY"])
+
+        result = ForecastModule().compute(RUN_DATE)
+
+        assert result is not None and not result.is_empty()
+        assert set(result["symbol"].unique().to_list()) == {"AAPL"}
 
 
 class TestRunEntryPoint:
