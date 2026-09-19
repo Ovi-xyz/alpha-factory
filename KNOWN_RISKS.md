@@ -2957,6 +2957,126 @@ rate) against what the synthetic-fixture tests only checked for
 directional correctness. Decide the `gold_correlation` retirement
 question explicitly rather than leaving both running indefinitely.
 
+### Update — 19 Sep 2026
+
+The suggested next step above was executed for real. `gold_global_regime`,
+`gold_cross_asset_correlation`, and `gold_lead_lag` all ran successfully
+against live Silver data on 17 Sep 2026 (see
+`2026-09-17-cross-asset-engine-running-log.txt`). `gold_forecast` did
+not: 100% VAR fit failure across the active_ohlcv universe, identical
+error ("maxlags is too large for the number of observations and the
+number of equations") for every symbol regardless of ticker.
+
+Two real, distinct bugs surfaced by this first live run, both now fixed:
+
+- **FIX GMI-FORECAST-DIM-01 (17 Sep 2026)** — `forecast_context()` had
+  grown to ~40 instruments while the PCA input window stayed at the
+  shared 65-day `LOOKBACK_DAYS`, giving PCA a p~=41-vs-n~=47-48 fit it
+  could not concentrate into the assumed 3-5 components. Fixed via
+  subcategory aggregation (collapsing raw instruments into one composite
+  per `context_category`) plus a decoupled, wider `PCA_LOOKBACK_DAYS=180`
+  for the PCA input specifically.
+- **FIX GMI-FORECAST-DIM-02 (19 Sep 2026)** — DIM-01 shipped believing
+  the bug was closed; the 19 Sep production run reproduced the identical
+  100% failure, unchanged. Root cause: DIM-01's aggregated composites
+  (~13-14 of them) are economically near-orthogonal by construction, so
+  `PCA(n_components=PCA_VARIANCE_TARGET=0.95)` no longer compresses them
+  the way it compressed the original redundant raw columns — it now
+  retains close to all ~13-14 to hit 95% variance, reproducing the same
+  downstream `neqs`-vs-`n_totobs` VAR identification failure one level
+  down (retained PC count instead of raw feature count). Fixed via a
+  hard `MAX_PCS=4` component cap decoupled from the variance target,
+  plus raising `MIN_PAIR_OBS` from `MAX_VAR_LAG+15=20` to 40 (matching
+  `correlation_module.py`'s own `MIN_OBSERVATIONS` convention) — that
+  floor was letting merged samples through too small to identify even
+  the capped VAR. Both confirmed empirically against the real
+  `statsmodels` `VAR.fit()` (not asserted from the log text alone)
+  before being applied; new regression test
+  `TestForecastDimensionalityRegressionV2` reproduces the real
+  ~13-14-category/weekday-calendar shape and is confirmed to fail
+  against DIM-01-only source and pass against the DIM-02 fix.
+
+This risk's own "first-pass decisions that need production validation"
+list above is now partially validated: the per-equity VAR / PCA design
+direction is sound, but the variance-explained PCA selection criterion
+was the wrong operative control once aggregation removed the redundancy
+it was originally compressing. `GlobalIndexRegimeModule`'s threshold
+calibration and the `gold_correlation` retirement decision remain open,
+as does a full-scale live comparison of `bh_significant` counts and VAR
+stability rate now that `gold_forecast` actually produces output.
+
+---
+
+## RISK-32 (NEW): SIL-MACRO-DEDUP-01 remediation reset the macro Silver PIT revision chain — ACCEPTED (documented gap, not further fixable)
+
+**Status:** ✅ **ACCEPTED — documented gap (19 Sep 2026).** Direct, unavoidable
+consequence of SIL-MACRO-DEDUP-01's own remediation (see
+`macro_processor.py`'s module docstring and `pyproject.toml`'s 1.18.3
+version-bump comment for that fix's full empirical account) — recorded
+here per a routine post-fix live-data check (Filesystem MCP against
+`data/silver/macro_enriched/`, 19 Sep 2026), not a new bug of its own.
+
+**GD Reference:** GD §4.5 (Point-in-Time Integrity, `vintage_date`/
+`release_date`/`is_revision`/`revision_seq`); `macro_processor.py`
+`_detect_revisions()` / `_find_latest_silver()`.
+
+### What the risk is
+
+SIL-MACRO-DEDUP-01's remediation quarantined every fred/bls/bea/eia
+Silver file dated 2026-09-08 through 2026-09-17 into
+`data/silver/macro_enriched/_quarantine_sil_macro_dedup_01/` — correctly:
+those files carried the exponential self-join corruption (up to 9.22 MB
+/ tens of millions of rows for a single day's FRED output) and are not,
+as the docstring notes, self-healing. `_find_latest_silver()` globs only
+the flat, non-recursive `{source}_*_silver.parquet` pattern at the top of
+`SILVER_MACRO_PATH`, so it correctly does not see into the quarantine
+subdirectory — but that also means the 2026-09-19 `silver_macro` run
+found **no** prior vintage to diff against at all, took
+`_detect_revisions()`'s "initial release" branch, and wrote
+`is_revision=False`, `revision_seq=0` for **every** row across all four
+domains. Confirmed empirically (polars inspection of the live 2026-09-19
+parquet files): 180,817/404/126/8,606 rows for fred/bls/bea/eia
+respectively, zero duplicate `(series_id, observation_date)` keys, but
+`is_revision.sum() == 0` and `revision_seq.max() == 0` in all four files
+— not because nothing was revised, but because there was nothing clean
+to compare against.
+
+### Blast radius
+
+- Any PIT-aware consumer (principally the backtest engine's anti-
+  lookahead `pit_data.py` path, GD §12.4) that relies on `is_revision`/
+  `revision_seq` to reconstruct "what changed and when" will see a false
+  "nothing was ever revised" signal for the entire 2026-09-08 →
+  2026-09-19 window, even if BLS/BEA/FRED genuinely issued a revision
+  (e.g. a payrolls benchmark revision) inside it.
+- Does **not** affect the `value` column itself — every value in the
+  2026-09-19 files is the latest known-correct figure, PIT-filtered
+  (`release_date <= run_date`) and deduped exactly as designed. This is
+  purely a gap in the *revision audit trail*, not a data-quality defect
+  in the data used for signals today.
+- Self-resolving going forward: the 2026-09-20 run will correctly diff
+  against 2026-09-19's clean vintage, and the revision chain accumulates
+  normally from here on. The gap is permanently confined to the
+  2026-09-08–09-19 window.
+
+### Mitigation in place
+
+None retroactive, and none is possible — the quarantined files are the
+same corrupted data that necessitated quarantining them; diffing against
+them to "recover" revision history would just reintroduce the original
+compounding bug's inputs. Going forward, SIL-MACRO-DEDUP-01's own
+circuit breaker (`_join_with_guard()`, part 3 of that fix) prevents a
+similarly unusable `prev` from ever being produced again, which is the
+structural precondition for this exact gap recurring.
+
+### Operator playbook if this matters
+
+If a backtest or audit specifically needs accurate `is_revision`/
+`revision_seq` for the 2026-09-08–09-19 window: that information is
+genuinely unrecoverable. Treat the window as revision-agnostic (values
+are correct and usable; revision flags are not) rather than attempting
+to reconstruct it from the quarantined files.
+
 ---
 
 *Last updated: v1.18.0 — GMI Wave 1 Cycle 4: CrossAssetEngine implemented

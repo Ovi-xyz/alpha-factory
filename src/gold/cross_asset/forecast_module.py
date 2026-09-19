@@ -42,6 +42,71 @@ Lag selection: BIC, not AIC — resolves OD-1 (Architecture v2.0 §12,
 listed "OPEN" but with an explicit textual preference: "AIC tends to
 overfit — BIC preferred"). statsmodels VAR.fit(maxlags=5, ic='bic').
 
+FIX GMI-FORECAST-DIM-01 (17 Sep 2026) — subcategory aggregation before
+PCA + decoupled PCA lookback window. Confirmed empirically via
+2026-09-17-cross-asset-engine-running-log.txt: 100% VAR fit failure
+across the active_ohlcv universe ("maxlags is too large for the number
+of observations and the number of equations"), identical error for
+every equity regardless of ticker — the tell that the shared PCA output
+was the bottleneck, not any per-symbol data gap. Root cause: at the time
+forecast_context() had grown to 40 instruments (dollar_basket alone
+added 7 minor-currency legs across ADR-013/014/024/036/037) while
+LOOKBACK_DAYS stayed 65 calendar days (~47-48 trading-day observations,
+per correlation_module.py's own MIN_OBSERVATIONS calibration comment) —
+p~=41 features (incl. broad_dollar_return) against n~=47-48 rows is
+exactly the regime where PCA(n_components=0.95) on noisy daily return
+data has no concentrated factor structure to find and instead retains
+25-40+ components rather than the 3-5 Architecture v2.0 §6.4.1-6.4.3
+assumed, making every per-equity VAR(n_pcs+1, maxlags=5) unidentifiable
+regardless of which equity is being fit.
+
+Two independent fixes, not a parameter cap on n_components (which would
+discard information by fiat rather than address the p/n ratio itself):
+  1. _aggregate_by_subcategory() collapses the ~40 raw instrument columns
+     into one z-scored composite per context_category (the taxonomy's own
+     economic grouping in instruments_taxonomy.yaml — e.g. the 9
+     context_equity_dm indices become one composite instead of 9
+     collinear PCA columns), cutting p from ~41 to ~13-14 subcategories.
+  2. PCA_LOOKBACK_DAYS decouples the Layer 2/Broad-Dollar PCA input window
+     from LOOKBACK_DAYS (still 65, governing per-equity follower reads).
+     Widened to 180 calendar days (~125 trading days) specifically for
+     the PCA fit — ForecastModule has no CorrelationModule-style
+     regime-purity requirement forcing a short window (§6.2.1 wants
+     correlation matrices to reflect the CURRENT regime specifically;
+     nothing analogous is stated for the PCA factor-extraction step here),
+     so widening it is not a hidden trade-off against another documented
+     requirement. Result: p~=13-14 against n~=125 (ratio ~9x) is a
+     genuinely well-conditioned PCA fit, standard practice territory
+     (n > 5-10x p) rather than the prior p~=n knife-edge.
+Both changes are config-over-code against instruments_taxonomy.yaml's
+existing context_category field — no new schema, no new files. See
+_aggregate_by_subcategory()'s own docstring for the z-score-before-
+average mechanics and the backward-compatible fallback for callers
+(tests) that don't model context_category.
+
+FIX GMI-FORECAST-DIM-02 (19 Sep 2026) — hard PCA component cap (MAX_PCS),
+follow-up to DIM-01 above. Confirmed empirically via the 2026-09-19
+gold_forecast run: 100% VAR fit failure persisted UNCHANGED after DIM-01
+shipped, identical error message, every symbol. Root cause: DIM-01's
+subcategory aggregation collapses ~40 raw columns to ~13-14 composites,
+but those composites are economically near-orthogonal BY DESIGN (that is
+the entire point of the taxonomy grouping) — so PCA(n_components=
+PCA_VARIANCE_TARGET=0.95) no longer compresses them the way it compressed
+the original heavily-redundant raw columns; it now retains close to all
+~13-14 composites to reach 95% variance. DIM-01 fixed the PCA FIT's own
+p>n numerical problem but never touched the PCA OUTPUT size, so the
+identical downstream neqs-vs-n_totobs identification failure reappeared
+one level down (n_pcs instead of raw p). Fix: n_components is now a hard
+integer cap (MAX_PCS=4), decoupled from PCA_VARIANCE_TARGET, sized so
+neqs=n_pcs+1=5 stays identifiable at maxlags=5 against the realistic
+~40-48-observation per-equity window — confirmed against the real
+statsmodels VAR.fit() (neqs=14 replicates the production failure exactly
+at n_totobs=44; neqs=5 is identifiable from n_totobs>=36). MIN_PAIR_OBS
+raised from MAX_VAR_LAG+15=20 to 40 in lockstep (20 was insufficient even
+for the capped neqs=5 case), matching correlation_module.py's own
+MIN_OBSERVATIONS=40 (XAE-CAL-01) for the same 65-day window. See MAX_PCS
+and MIN_PAIR_OBS's own comments below for the full numeric derivation.
+
 k_ar == 0 edge case (real, not hypothetical — confirmed empirically):
 when BIC finds no lag structure at all (equity return shows no
 detectable dependence on the PC factors at lags 1-5), statsmodels'
@@ -104,9 +169,25 @@ REGIME_STORE_PATH     = Path("data/gold/macro/regime_store.parquet")
 GOLD_CROSS_ASSET_PATH = Path("data/gold/cross_asset")
 FORECAST_STORE_PATH   = GOLD_CROSS_ASSET_PATH / "cross_asset_forecast.parquet"
 
-LOOKBACK_DAYS        = 65    # Calendar days — bounds the Silver scan window only.
-                              # matches Correlation/LeadLag; §6.4.3 "60-day rolling
-                              # window is the minimum"
+LOOKBACK_DAYS        = 65    # Calendar days — bounds the PER-EQUITY (follower)
+                              # Silver scan window only. matches Correlation/LeadLag;
+                              # §6.4.3 "60-day rolling window is the minimum".
+                              # FIX GMI-FORECAST-DIM-01 (17 Sep 2026): no longer used
+                              # for the Layer 2/Broad-Dollar PCA input — see
+                              # PCA_LOOKBACK_DAYS below and the module docstring.
+PCA_LOOKBACK_DAYS    = 180   # FIX GMI-FORECAST-DIM-01 (17 Sep 2026): calendar days
+                              # for the Layer 2 forecast_context() + Broad Dollar PCA
+                              # input specifically — deliberately decoupled from
+                              # LOOKBACK_DAYS above. ~125 trading days vs. p~=13-14
+                              # subcategory composites (post-aggregation) is a
+                              # well-conditioned PCA fit (n > 5-10x p); the prior
+                              # shared 65-day window gave p~=41 raw instruments
+                              # against n~=47-48 rows — see module docstring for the
+                              # full empirical root-cause account. Not shared with
+                              # LOOKBACK_DAYS because ForecastModule's PCA step has no
+                              # CorrelationModule-style regime-purity requirement
+                              # forcing a short window (§6.2.1's rationale for a short
+                              # window is specific to that module).
 MIN_OBSERVATIONS     = 40    # FIX XAE-CAL-01 (16 Sep 2026): observation-count native,
                               # calendar-aware — replaces MIN_HISTORY_RATIO=0.8, which
                               # was unreachable for any 5-day-week market (max 48
@@ -116,11 +197,59 @@ MIN_OBSERVATIONS     = 40    # FIX XAE-CAL-01 (16 Sep 2026): observation-count n
                               # full rationale/calibration. This threshold gates BOTH
                               # the Layer 2 PCA input pivot and the Layer 1 equity
                               # returns pivot (both go through _load_pivot below).
-PCA_VARIANCE_TARGET  = 0.95  # §6.4.2 Step 2
+PCA_VARIANCE_TARGET  = 0.95  # §6.4.2 Step 2 — ORIGINAL spec target. FIX
+                              # GMI-FORECAST-DIM-02 (19 Sep 2026): no longer
+                              # drives component SELECTION (see MAX_PCS
+                              # below) — kept only as the nominal spec
+                              # citation; variance_explained is still
+                              # reported in the output schema against
+                              # whatever MAX_PCS components are actually
+                              # retained.
+MAX_PCS              = 4     # FIX GMI-FORECAST-DIM-02 (19 Sep 2026): hard
+                              # cap on retained PCA components, decoupled
+                              # from PCA_VARIANCE_TARGET. Root cause:
+                              # after GMI-FORECAST-DIM-01's subcategory
+                              # aggregation, the ~13-14 composite columns
+                              # are economically near-orthogonal BY
+                              # CONSTRUCTION (that's the taxonomy's whole
+                              # point — dollar vs equity_dm vs
+                              # commodity_energy etc. are meant to be
+                              # distinct signals), so PCA(n_components=0.95)
+                              # no longer compresses to 3-5 PCs the way it
+                              # did on ~40 raw, heavily redundant
+                              # instrument columns — it now retains close
+                              # to all ~13-14 composites to hit 95%
+                              # variance, reproducing the identical
+                              # "maxlags too large" 100% VAR failure via
+                              # neqs=n_pcs+1 instead of via raw p.
+                              # Confirmed empirically against the real
+                              # statsmodels VAR.fit(): neqs=14 at
+                              # n_totobs=44 fails identically to the
+                              # 17/19 Sep production logs; neqs=5 (i.e.
+                              # n_pcs=MAX_PCS=4) is identifiable from
+                              # n_totobs>=36 with margin. 4, not 5 (the
+                              # upper end of Architecture v2.0 §6.4.2's
+                              # "3-5 PCs" range), because n_pcs=5 only
+                              # becomes identifiable at n_totobs>=44 — too
+                              # tight against the ~43-48 typical
+                              # per-equity observation count in a 65-day
+                              # window (correlation_module.py's own
+                              # MIN_OBSERVATIONS calibration comment) to
+                              # survive a worse week.
 MAX_VAR_LAG          = 5
 FORECAST_HORIZONS    = [1, 2, 3, 4, 5]
-MIN_PAIR_OBS         = MAX_VAR_LAG + 15  # buffer beyond CorrelationModule/LeadLagModule's own minimums,
-                                          # since VAR needs extra obs beyond max lag to be identified at all
+MIN_PAIR_OBS         = 40    # FIX GMI-FORECAST-DIM-02 (19 Sep 2026): raised
+                              # from MAX_VAR_LAG+15=20 — that floor let
+                              # merged samples as small as 20 rows into a
+                              # VAR(neqs=5, maxlags=5) fit, which
+                              # statsmodels cannot identify until
+                              # n_totobs>=36 (confirmed empirically, see
+                              # MAX_PCS above). 40 matches
+                              # correlation_module.py's own
+                              # MIN_OBSERVATIONS (XAE-CAL-01) for the
+                              # identical 65-day window and gives the same
+                              # margin for a worse week (e.g. an Eid
+                              # al-Fitr closure landing inside the window).
 
 
 class ForecastModule:
@@ -186,19 +315,32 @@ class ForecastModule:
     def _build_pca_scores(
         self, run_date: date
     ) -> tuple[Optional[pl.DataFrame], int, float]:
-        layer2_symbols = [inst.symbol for inst in get_loader().forecast_context()]
+        # FIX GMI-FORECAST-DIM-01: layer2_instruments (not just symbols)
+        # kept around so _aggregate_by_subcategory can read context_category
+        # off each Instrument after the pivot is built.
+        layer2_instruments = get_loader().forecast_context()
+        layer2_symbols = [inst.symbol for inst in layer2_instruments]
         layer2_pivot: Optional[pl.DataFrame] = None
         if layer2_symbols:
+            # FIX GMI-FORECAST-DIM-01: PCA_LOOKBACK_DAYS (wider, decoupled
+            # from per-equity LOOKBACK_DAYS) — see module docstring + the
+            # constant's own comment for the full empirical rationale.
             layer2_pivot = self._load_pivot(
-                layer2_symbols, run_date, include_layer2=True, include_layer1=False
+                layer2_symbols, run_date, include_layer2=True, include_layer1=False,
+                lookback_days=PCA_LOOKBACK_DAYS,
             )
+            if layer2_pivot is not None:
+                layer2_pivot = self._aggregate_by_subcategory(layer2_pivot, layer2_instruments)
         else:
             logger.info(
                 "[gold_forecast] forecast_context() returned no eligible symbols — "
                 "continuing with Broad Dollar alone, if available"
             )
 
-        fx_returns = load_fx_returns(run_date, LOOKBACK_DAYS)
+        # FIX GMI-FORECAST-DIM-01: PCA_LOOKBACK_DAYS, matching layer2_pivot's
+        # window — load_fx_returns()'s own docstring: "Broad Dollar and PCA
+        # read from one consistent window" (still true, just a wider one now).
+        fx_returns = load_fx_returns(run_date, PCA_LOOKBACK_DAYS)
         broad_dollar = compute_broad_dollar(fx_returns) if fx_returns is not None else None
 
         if layer2_pivot is None and broad_dollar is None:
@@ -228,6 +370,68 @@ class ForecastModule:
         )
         return scores_df, n_pcs, variance_explained
 
+    # ── Subcategory aggregation (FIX GMI-FORECAST-DIM-01) ────────────────
+
+    @staticmethod
+    def _aggregate_by_subcategory(
+        pivot: pl.DataFrame, instruments: list
+    ) -> pl.DataFrame:
+        """
+        FIX GMI-FORECAST-DIM-01 (17 Sep 2026): collapse forecast_context()'s
+        ~40 individual instrument columns into one composite per
+        context_category BEFORE PCA — see module docstring for the full
+        empirical root-cause account (p~=41 vs n~=47-48 -> PCA retaining
+        25-40+ components instead of the assumed 3-5, 100% VAR fit failure).
+
+        Grouping uses instruments_taxonomy.yaml's own context_category field
+        (e.g. all 9 context_equity_dm indices -> one composite) — an
+        economic classification already maintained for domain-score
+        routing, not a new statistical threshold invented here.
+
+        Per-column z-score (nan-safe, ddof=0) before averaging within a
+        group, so unequal-volatility members (HKD's near-zero-variance peg
+        vs. NICKEL's structural-break-era swings) don't let the loudest
+        member dominate the composite — same z-score-before-combine
+        convention instruments_taxonomy.yaml's _meta.contributes_to
+        aggregation methods already use throughout (z_score_level,
+        z_score_momentum_20d, etc.). A flat/zero-variance column (std==0,
+        e.g. a currency peg with literally no observed movement in-window)
+        gets std=1.0 substituted rather than dividing by zero — its
+        z-score reduces to (x - mean), i.e. contributes its own noise
+        rather than exploding to inf/NaN.
+
+        Backward-compat fallback: an instrument with no context_category
+        attribute (or None — e.g. test doubles that only set .symbol)
+        becomes its own singleton group keyed by its symbol, reproducing
+        the pre-fix one-column-per-symbol behavior exactly. This means
+        every existing test built on a bare _FakeInstrument(symbol) is
+        unaffected — aggregation is a genuine no-op when category info
+        isn't modeled, not a behavior change disguised as backward-compat.
+        """
+        symbol_to_category: dict[str, str] = {}
+        for inst in instruments:
+            category = getattr(inst, "context_category", None) or inst.symbol
+            symbol_to_category[inst.symbol] = category
+
+        groups: dict[str, list[str]] = {}
+        for col in pivot.columns:
+            if col == "date":
+                continue
+            category = symbol_to_category.get(col, col)
+            groups.setdefault(category, []).append(col)
+
+        composite_cols: dict[str, np.ndarray] = {}
+        for category, cols in groups.items():
+            data = pivot.select(cols).to_numpy()
+            col_mean = np.nanmean(data, axis=0)
+            col_std = np.nanstd(data, axis=0)
+            col_std = np.where((col_std < 1e-12) | np.isnan(col_std), 1.0, col_std)
+            z = (data - col_mean) / col_std
+            composite_cols[category] = np.nanmean(z, axis=1)
+
+        result = pl.DataFrame(composite_cols)
+        return result.with_columns(pivot["date"])
+
     @staticmethod
     def _fit_pca(
         combined: pl.DataFrame, feature_cols: list[str]
@@ -252,8 +456,13 @@ class ForecastModule:
         scaler = StandardScaler()
         scaled = scaler.fit_transform(data)
 
-        n_components = min(PCA_VARIANCE_TARGET, data.shape[0] - 1, data.shape[1])
-        pca = PCA(n_components=n_components if isinstance(n_components, float) else int(n_components))
+        # FIX GMI-FORECAST-DIM-02 (19 Sep 2026): hard integer cap (MAX_PCS),
+        # not a variance-explained target — see MAX_PCS's own comment.
+        # PCA_VARIANCE_TARGET (0.95) was always the effective min() winner
+        # here for any realistic data.shape, so the float/int branch below
+        # never actually exercised its int path in production.
+        n_components = min(MAX_PCS, data.shape[0] - 1, data.shape[1])
+        pca = PCA(n_components=int(n_components))
         try:
             scores = pca.fit_transform(scaled)
         except Exception as e:
@@ -270,8 +479,13 @@ class ForecastModule:
         return self._load_pivot(symbols, run_date, include_layer2=False, include_layer1=True)
 
     def _load_pivot(
-        self, symbols: list[str], run_date: date, include_layer2: bool, include_layer1: bool
+        self, symbols: list[str], run_date: date, include_layer2: bool, include_layer1: bool,
+        lookback_days: int = LOOKBACK_DAYS,
     ) -> Optional[pl.DataFrame]:
+        # FIX GMI-FORECAST-DIM-01: lookback_days now an explicit parameter
+        # (default unchanged) so the Layer 2 PCA-input call can pass
+        # PCA_LOOKBACK_DAYS while the per-equity follower call keeps the
+        # original LOOKBACK_DAYS — see module docstring.
         globs: list[str] = []
         if include_layer1:
             globs += layer1_globs(SILVER_OHLCV_PATH, "*_1D_silver.parquet")
@@ -282,7 +496,7 @@ class ForecastModule:
         if not globs:
             return None
 
-        start = run_date - timedelta(days=LOOKBACK_DAYS)
+        start = run_date - timedelta(days=lookback_days)
         con = duckdb.connect()
         con.execute("SET memory_limit='3GB'; SET threads=4;")
         sym_df = pl.DataFrame({"symbol": symbols})

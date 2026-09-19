@@ -1,5 +1,220 @@
 # CHANGELOG — Data Platform
 
+## v1.18.4 — FIX GMI-FORECAST-DIM-02: ForecastModule PCA component count vs. observation count, round two (September 2026)
+
+Bug produksi ditemukan Ovi: re-run `gold_forecast --force` pada 2026-09-19,
+setelah FIX GMI-FORECAST-DIM-01 (v1.18.2) dianggap closed, mereproduksi
+kegagalan 100% VAR fit yang IDENTIK — pesan error sama persis ("maxlags is
+too large for the number of observations and the number of equations. The
+largest model cannot be estimated.") di setiap simbol, dari `AAPL` sampai
+`EUR_USD`, tidak berubah sama sekali dari log 17 Sep sebelum DIM-01 (lihat
+`2026-09-19-job-gold-forecast-running-log.txt`).
+
+**Root cause (diverifikasi empiris via Filesystem MCP terhadap source live +
+repro langsung terhadap `statsmodels.VAR.fit()` yang sesungguhnya, bukan
+asumsi dari teks log atau formula yang dihitung manual):** DIM-01
+mengumpulkan ~40 kolom instrumen mentah `forecast_context()` menjadi ~13-14
+komposit per `context_category`, secara benar menyelesaikan masalah p>n di
+tahap FIT PCA itu sendiri. Tapi komposit-komposit itu SECARA EKONOMI hampir
+saling ortogonal by construction — itu justru maksud taksonominya: `dollar`
+vs `equity_dm` vs `commodity_energy` dst. dirancang sebagai sinyal yang
+berbeda, bukan redundan. Akibatnya `PCA(n_components=PCA_VARIANCE_TARGET=
+0.95)` tidak lagi mengompresi mereka seperti waktu mengompresi ~40 kolom
+mentah yang sangat redundan — ia sekarang mempertahankan HAMPIR SEMUA ~13-14
+komposit untuk mencapai 95% variance. `n_pcs` yang tetap besar ini
+mereproduksi kegagalan identifikasi VAR yang sama persis satu level di
+bawah: dulu lewat `p` (raw feature count), sekarang lewat `n_pcs` (retained
+component count) — `neqs = n_pcs + 1` tetap sama-sama terlalu besar
+dibanding `n_totobs` (~40-48 observasi khas per-equity, `LOOKBACK_DAYS=65`,
+kalibrasi `MIN_OBSERVATIONS` `correlation_module.py`). Dikonfirmasi langsung
+terhadap `statsmodels.tsa.vector_ar.var_model.VAR.fit()` yang asli (bukan
+formula yang dihitung tangan): `neqs=14` pada `n_totobs=44` gagal dengan
+pesan IDENTIK dengan log produksi; `neqs=5` (`n_pcs=4`) baru teridentifikasi
+mulai `n_totobs>=36`.
+
+**Fix — mengganti kriteria seleksi komponen PCA, bukan menambal titik lain
+di hilir:**
+- `MAX_PCS = 4` (baru) — hard cap integer pada jumlah komponen PCA yang
+  dipertahankan, di-decouple dari `PCA_VARIANCE_TARGET`. `PCA_VARIANCE_TARGET
+  = 0.95` tetap ada sebagai dokumentasi target spec asli (§6.4.2), tapi
+  tidak lagi mengendalikan seleksi — `variance_explained` tetap dilaporkan
+  di output schema, sekarang mencerminkan berapa variance yang benar-benar
+  dijelaskan oleh 4 komponen tersebut, bukan target yang tidak pernah
+  tercapai secara implisit. 4 dipilih (bukan 5, ujung atas rentang "3-5 PCs"
+  Architecture v2.0 §6.4.2) karena `n_pcs=5` baru teridentifikasi pada
+  `n_totobs>=44` — terlalu mepet terhadap kisaran 43-48 observasi khas
+  per-equity untuk bertahan di minggu yang lebih buruk (mis. libur Idul
+  Fitri yang jatuh di dalam jendela).
+- `MIN_PAIR_OBS`: `MAX_VAR_LAG+15=20` → `40` — floor lama membiarkan sampel
+  gabungan sekecil 20 baris masuk ke fit VAR(neqs=5, maxlags=5) yang secara
+  matematis baru teridentifikasi mulai `n_totobs>=36` (dikonfirmasi empiris
+  di atas). 40 disamakan dengan `MIN_OBSERVATIONS` `correlation_module.py`
+  sendiri (FIX XAE-CAL-01) untuk jendela 65-hari yang identik.
+
+**Test:** `TestForecastDimensionalityRegressionV2` (baru) di
+`test_forecast_module.py` — mereproduksi bentuk asli produksi (13 kategori,
+kalender hari kerja saja, bukan 4 kategori/50 hari kalender termasuk akhir
+pekan seperti test regresi DIM-01 sendiri, yang scope-nya ternyata tidak
+cukup untuk menangkap bug round-two ini). Dikonfirmasi FAIL terhadap source
+DIM-01-saja (pesan error identik dengan log produksi, untuk `AAPL`) sebelum
+lolos terhadap fix DIM-02.
+
+Catatan lingkup verifikasi: dijalankan dari sesi chat (bukan Claude Code) —
+Filesystem MCP dipakai untuk baca/tulis langsung ke repo live, tapi TIDAK
+ADA akses eksekusi ke mesin live itu sendiri. Verifikasi test dilakukan di
+sandbox terpisah (clone GitHub `Ovi-xyz/alpha-factory` + override manual
+`forecast_module.py`/`test_forecast_module.py` dengan isi file live saat
+ini, karena mirror GitHub ternyata jauh tertinggal — bahkan belum
+mengandung DIM-01). Scoped ke `test_forecast_module.py` saja: 20/20 passed
+(19 lama + 1 baru). `tests/COUNT_BASELINE.txt`: 1725 → 1726. **Belum
+dikonfirmasi terhadap full live suite 1725/1726** — file yang dimirror
+sudah byte-verified identik dengan yang lolos test scoped ini, tapi
+`pytest tests/ -q` penuh di mesin live sebaiknya dijalankan ulang oleh Ovi
+untuk konfirmasi akhir sebelum dianggap fully closed.
+
+## v1.18.3 — FIX SIL-MACRO-DEDUP-01: silver_macro self-compounding revision join (September 2026)
+
+Bug produksi ditemukan Ovi: `silver_macro` OOM-killed (`zsh: killed`) pada
+2026-09-18, memblokir `silver_active_symbols` dan (downstream)
+`gold_forecast` — yang secara benar skip daripada crash
+("active_ohlcv not resolved for 2026-09-18. Run silver_active_symbols job
+first."), tapi tetap menandakan pipeline harian tidak bisa selesai.
+
+**Root cause (diverifikasi empiris via Filesystem MCP + DuckDB langsung
+terhadap `fred_2026-09-17_silver.parquet`, bukan asumsi dari pesan error):**
+file itu berisi **105.813.947 baris** untuk output SATU HARI FRED. 93% dari
+total (98.825.160 baris) terkonsentrasi di SATU kombinasi
+`(series_id, observation_date)`: `MORTGAGE30US` / `2026-09-03`. Kombinasi
+lain tepat **2²⁰ = 1.048.576** baris. 12 series tidak berhubungan
+(`CPIAUCSL`, `GDPC1`, `HOUST`, dst.) berbagi angka **248.832** identik pada
+tanggal masing-masing — tanda pertumbuhan EKSPONENSIAL (bukan akumulasi
+linear): series yang di-onboard bersamaan sudah melalui jumlah siklus
+compounding yang sama persis.
+
+Bronze diverifikasi bersih: `MORTGAGE30US` cuma 17 file kecil (~1,8KB),
+inkremental harian sejak 2026-08-20 — tidak pernah mendekati jutaan baris.
+Ledakan sepenuhnya ada di `macro_processor.py::_detect_revisions()`: LEFT
+JOIN `df` (hari ini) terhadap `prev` (output Silver KEMARIN) pada
+`(series_id, observation_date)` — jumlah baris output per key adalah
+`count(df match) × count(prev match)`. Karena `prev` sendiri adalah produk
+dari JOIN yang sama tanpa guard di hari sebelumnya (dan `prev`-nya lagi di
+hari sebelum itu), setiap hari **mengkuadratkan** korupsi, bukan menambah
+secara linear. Sumber duplikasi awal: overlap incremental-fetch Bronze
+(Supplementary Design G1, re-fetch 7-hari lookback) secara sah menulis
+`(series_id, observation_date)` yang sama ke beberapa file Bronze untuk
+~1 minggu tanggal terakhir; `_process_domain()`'s Bronze read (`SELECT *
+FROM read_parquet($glob, ...)`) tidak pernah dedup, jadi seluruh duplikat
+itu ikut terbawa ke `df` — lalu diperbesar oleh join. Path kode yang sama
+memengaruhi BLS/BEA/EIA juga (jejak ukuran file 09-17 vs 09-16: ~4×/4×/2,4×
+— multiplier EIA lebih kecil karena FIX EIA-6 baru mendarat 8/9 Sep,
+sehingga rantai compounding-nya lebih muda).
+
+**Fix — tiga bagian, mengatasi mekanisme compounding-nya sendiri, bukan
+cuma menambal satu titik:**
+1. `_process_domain()` dedup `df` pada `(series_id, observation_date)`
+   segera setelah Bronze read, menyimpan salinan `_ingested_at` paling
+   baru per key (fallback: baris terakhir yang terbaca, untuk fixture test
+   minimal tanpa `_ingested_at`). Ini yang membuat overlap incremental-fetch
+   idempotent, bukan duplikatif.
+2. `_detect_revisions()` menerapkan dedup identik ke `prev` sebelum join —
+   defense in depth, bukan fix utama: begitu (1) berlaku, file Silver baru
+   tidak akan pernah lagi punya duplicate key.
+3. Method statis baru `_join_with_guard()` — cek `len(joined) > len(df)`
+   segera setelah join. Secara matematis TIDAK TERCAPAI begitu (1)+(2)
+   berlaku (LEFT JOIN terhadap sisi kanan yang key-unik dijamin
+   row-count-preserving), tapi inilah yang menghentikan mekanisme
+   compounding itu SENDIRI agar tidak pernah terulang di bawah bug masa
+   depan yang tidak diantisipasi kedua dedup — bukan sekadar mengandalkan
+   keduanya tetap benar selamanya.
+
+**Remediasi data:** file Silver macro yang sudah korup di disk
+(`fred_2026-09-{08..17}`, `bls/bea_2026-09-{16,17}`, `eia_2026-09-{16,17}`)
+DIHAPUS sebagai bagian dari fix ini — tidak bisa self-healing, karena
+`df` yang sudah dideduplikasi dengan benar pun, jika di-join terhadap
+`prev` yang masih 98 juta baris, tetap meledak dari sisi `prev` saja.
+
+**Test:** 6 test regresi baru di `test_macro_processor.py`
+(`TestBronzeDedupBeforeRevisionJoin` ×3, `TestRevisionJoinCircuitBreaker`
+×3 — yang terakhir di-refactor untuk menguji `_join_with_guard()` secara
+terisolasi, karena begitu kedua dedup berlaku, jalur end-to-end
+`_detect_revisions()` secara struktural tidak bisa lagi memicu kondisi
+trip-nya). Seluruh 6 dikonfirmasi FAIL terhadap source lama (`git stash`)
+sebelum lolos terhadap source yang sudah di-fix. `tests/COUNT_BASELINE.txt`:
+1719 → 1725. Full suite: 1723 passed / 0 failed (2 kegagalan
+`test_check_poetry_env.py` tetap pre-existing environment artifact,
+dikonfirmasi ulang tidak berubah).
+
+## v1.18.2 — FIX GMI-FORECAST-DIM-01: ForecastModule PCA dimensionality vs. observation count (September 2026)
+
+Bug produksi ditemukan Ovi setelah menjalankan `gold_forecast` live pasca-FIX
+XAE-CAL-01 (`2026-09-17-cross-asset-engine-running-log.txt`): 100% VAR fit
+failure di seluruh universe `active_ohlcv` (~196 symbols) — setiap satu
+simbol, dari `AAPL` sampai `EUR_USD`, gagal dengan pesan identik "maxlags is
+too large for the number of observations and the number of equations. The
+largest model cannot be estimated." Job tetap menulis SUCCESS (0 baris,
+"Nothing written (no data)") — degradasi silent yang sama persis dengan pola
+XAE-CAL-01 sebelumnya, kali ini di modul yang berbeda.
+
+**Root cause (diverifikasi empiris via Filesystem MCP terhadap source live +
+`instruments_taxonomy.yaml`, bukan asumsi dari teks log):** error identik di
+setiap simbol adalah tanda bahwa bottleneck ada di input PCA yang dibagi
+bersama, bukan gap data per-simbol. Dihitung langsung dari
+`instruments_taxonomy.yaml`: `forecast_context()` (instrumen dengan
+`include_in_forecast=True AND context_available=True`) sudah bertumbuh
+menjadi **40 instrumen** (dollar 1 + dollar_basket 7 + equity_dm 9 +
+equity_em 5 + volatility 1 + commodity_energy 2 + commodity_metals 5 +
+commodity_agri 1 + commodity_coal 1 + etf_credit 1 + etf_commodity 1 +
+etf_international 5 + etf_thematic 1), plus `broad_dollar_return` turunan
+→ **p ≈ 41 fitur**. Sementara jendela observasi (`LOOKBACK_DAYS=65` hari
+kalender, dibagi dengan `CorrelationModule`/`LeadLagModule`) hanya
+menghasilkan **n ≈ 47–48 baris** per kalibrasi `MIN_OBSERVATIONS` FIX
+XAE-CAL-01. Pada rasio p/n ≈ 0.85 ini, `PCA(n_components=0.95)` pada data
+return harian yang noisy tidak punya struktur faktor yang cukup terkonsentrasi
+untuk dijelaskan oleh sedikit komponen — hampir pasti mempertahankan 25–40+
+komponen, jauh dari asumsi "3–5 PCs" Architecture v2.0 §6.4.1–6.4.3 (yang
+dihitung saat Layer 2 masih 25 instrumen, p/n ≈ 0.4). `n_pcs` yang membengkak
+ini dipakai bersama oleh SETIAP VAR per-simbol (`k = n_pcs + 1`,
+`maxlags=5`), menjelaskan mengapa kegagalannya seragam di seluruh universe.
+
+**Fix — mengurangi p pada sumbernya, bukan memotong n_components secara
+arbitrer (opsi yang dipertimbangkan dan ditolak karena membuang informasi
+tanpa mengetahui apa yang dibuang):**
+- `_aggregate_by_subcategory()` (baru) mengumpulkan ~40 kolom instrumen
+  mentah menjadi satu komposit per `context_category` sebelum PCA — memakai
+  klasifikasi ekonomi taxonomy yang sudah ada (mis. 9 index `context_equity_dm`
+  jadi satu komposit), bukan cutoff statistik baru. Setiap kolom di-z-score
+  (nan-safe, ddof=0) sebelum dirata-rata dalam grup — konvensi yang sama
+  dengan `_meta.contributes_to` di `instruments_taxonomy.yaml`
+  (`z_score_level`, `z_score_momentum_20d`, dst.) — supaya anggota
+  volatilitas-rendah (mis. HKD yang di-peg) tidak tenggelam oleh anggota
+  volatilitas-tinggi. Kolom flat (std≈0) mendapat std=1.0 sebagai pengganti
+  agar tidak divide-by-zero. Fallback backward-compat: instrumen tanpa
+  `context_category` (test double lama yang cuma set `.symbol`) jadi grup
+  singleton sendiri — no-op murni, seluruh 13 test lama tetap lolos tanpa
+  perubahan assertion apapun.
+- `PCA_LOOKBACK_DAYS = 180` (baru) — jendela PCA Layer 2/Broad Dollar
+  di-decouple dari `LOOKBACK_DAYS=65` yang tetap dipakai untuk pembacaan
+  return per-equity (follower). `ForecastModule` tidak punya syarat
+  regime-purity seperti `CorrelationModule` §6.2.1 yang memaksa jendela
+  pendek, jadi memperlebar jendela ini bukan trade-off tersembunyi.
+
+Hasil gabungan: p turun dari ~41 mentah menjadi ~13–14 komposit subcategory,
+n naik dari ~47–48 menjadi ~125 hari kerja — rasio n/p ≈ 9×, jauh lebih sehat
+dari p/n ≈ 0.85 sebelumnya.
+
+**Test:** 6 test regresi baru di `test_forecast_module.py`
+(`TestSubcategoryAggregation` ×4, `TestForecastDimensionalityRegression` ×2).
+Test kunci (`test_many_instruments_few_categories_var_still_fits`)
+mereproduksi bentuk persis kegagalan produksi — 20 instrumen sintetis di 4
+kategori, jendela 50 observasi — dan diverifikasi FAIL terhadap source lama
+(`git stash`: `AttributeError` pada `_aggregate_by_subcategory` dan
+`PCA_LOOKBACK_DAYS` yang belum ada, lalu VAR fit failure yang sama persis
+dengan log produksi) sebelum lolos terhadap source yang sudah di-fix.
+`tests/COUNT_BASELINE.txt`: 1713 → 1719. Full suite: 1717 passed / 0 failed
+(2 kegagalan `test_check_poetry_env.py` adalah artefak environment sandbox
+tanpa binary `poetry` — dikonfirmasi pre-existing di baseline sebelum
+perubahan ini, bukan regresi).
+
 ## v1.18.1 — FIX XAE-CAL-01: CrossAssetEngine history threshold observation-count native (September 2026)
 
 Bug produksi ditemukan Ovi setelah menjalankan keempat job CrossAssetEngine

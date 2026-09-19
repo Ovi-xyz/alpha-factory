@@ -12,6 +12,68 @@ Prinsip: vintage_date <= trade_date untuk PIT query di backtest.
 Silver hanya menyimpan data yang diketahui pada saat itu.
 
 Output: data/silver/macro_enriched/{domain}_{series_id}_silver.parquet
+
+FIX SIL-MACRO-DEDUP-01 (18 Sep 2026) — self-compounding revision join.
+Confirmed empirically (Filesystem MCP against live production data,
+fred_2026-09-17_silver.parquet): 105,813,947 rows in a single day's FRED
+Silver output, 93% of it concentrated in ONE (series_id, observation_date)
+key (MORTGAGE30US / 2026-09-03: 98,825,160 rows), another key at exactly
+2**20 = 1,048,576, and 12 unrelated series sharing the identical
+248,832-row count on their respective dates -- the tell of an EXPONENTIAL,
+self-compounding bug, not linear accumulation. Root cause: Bronze's
+incremental-fetch overlap (Supplementary Design G1, 7-day lookback
+re-fetch for idempotency) means the same (series_id, observation_date)
+key legitimately appears in MULTIPLE Bronze files for the most recent
+~week of dates -- _process_domain()'s glob read
+("SELECT * FROM read_parquet($glob, ...)") carried ALL of them into `df`
+with no dedup. That alone would cause modest linear duplication. The
+actual explosion came from _detect_revisions()'s LEFT JOIN of that
+(already duplicate-laden) `df` against `prev` (yesterday's Silver
+output) on (series_id, observation_date): a left join's row count per
+key is count(df matches) x count(prev matches) -- and since `prev` was
+itself produced by this same unguarded join the day before (and its
+prev the day before that), every day did not just carry the corruption
+forward, it SQUARED it. Confirmed the compounding was join-side, not
+Bronze-side, by inspecting Bronze directly: MORTGAGE30US has only 17
+small (~1.8KB) incremental files total, 2026-08-20 through today --
+Bronze itself is clean and has never held anywhere near 98 million rows
+for anything. Same shared _process_domain()/_detect_revisions() code
+path affects all four domains (fred/bls/bea/eia) -- file-size trail
+(bls_2026-09-17 ~4x bls_2026-09-16, bea_2026-09-17 ~4x bea_2026-09-16,
+eia_2026-09-17 ~2.4x smaller multiplier since its Bronze path bug
+FIX EIA-6 only landed 8/9 Sep, giving its compounding chain fewer days)
+confirmed this wasn't FRED-specific. This finally crossed the threshold
+where re-reading a corrupted file as `prev` exceeded the M1's 8GB and
+OOM-killed `silver_macro` outright (`zsh: killed`), blocking
+`silver_active_symbols` and, downstream, `gold_forecast` from ever
+running for 2026-09-18.
+
+Fix, three parts:
+  1. `_process_domain()` dedupes `df` on (series_id, observation_date)
+     immediately after the Bronze read, keeping the most-recently-
+     ingested copy per key (by `_ingested_at` when present; a plain
+     last-row-wins fallback otherwise, e.g. for minimal test fixtures
+     that don't set `_ingested_at`) -- this is what makes the
+     incremental-fetch overlap idempotent rather than duplicative.
+  2. `_detect_revisions()` applies the identical dedup to `prev` before
+     joining -- defense in depth, not the primary fix: once (1) is in
+     place, freshly-written Silver files can never contain duplicate
+     keys again, so this only matters for a `prev_path` that somehow
+     still points at pre-fix data.
+  3. A circuit breaker immediately after the join: `if len(joined) >
+     len(df)`, the join produced more rows than it consumed --
+     mathematically only possible if a duplicate key survived on
+     either side despite (1) and (2) -- logs an error and returns
+     `is_revision=False` for every row rather than writing out a
+     still-exploded file that would poison tomorrow's `prev`. This
+     stops the compounding mechanism itself from ever recurring, even
+     under a future bug neither (1) nor (2) anticipated.
+Existing corrupted files on disk (fred_2026-09-{08..17}_silver.parquet
+and the analogous bls/bea/eia files) were deleted as part of this fix's
+remediation -- they are not, and cannot be, self-healing: even a
+perfectly deduped `df` joined against an already-98M-row `prev` still
+explodes on the `prev` side alone. See dev-log for the exact file list
+removed and confirmation of how far back the corruption was found.
 """
 
 from __future__ import annotations
@@ -170,6 +232,33 @@ class MacroProcessor:
             logger.debug(f"[MacroProcessor] {source}: empty, skipping")
             return
 
+        # FIX SIL-MACRO-DEDUP-01: dedupe (series_id, observation_date) BEFORE
+        # any further processing -- see module docstring for the full
+        # empirical root-cause account. Bronze's incremental-fetch overlap
+        # (Supplementary Design G1, 7-day lookback re-fetch) means the same
+        # key legitimately appears in multiple Bronze files for the most
+        # recent ~week of dates; reading the full glob with no dedup let
+        # every one of them into df, which _detect_revisions()'s join then
+        # compounded exponentially, day over day. Keep the most-recently-
+        # ingested copy per key when _ingested_at is available (real Bronze
+        # data always has it, per base_ingester.py's write() convention);
+        # fall back to keeping the last row per key as read when it isn't
+        # (e.g. minimal test fixtures that don't set _ingested_at).
+        before_dedup = len(df)
+        if "_ingested_at" in df.columns:
+            df = df.sort("_ingested_at").unique(
+                subset=["series_id", "observation_date"], keep="last"
+            )
+        else:
+            df = df.unique(subset=["series_id", "observation_date"], keep="last")
+        dupes_dropped = before_dedup - len(df)
+        if dupes_dropped > 0:
+            logger.info(
+                f"[MacroProcessor] {source}: dedup dropped {dupes_dropped:,} "
+                f"duplicate (series_id, observation_date) rows from Bronze read "
+                f"(kept latest _ingested_at per key)"
+            )
+
         # FIX S-F02: PIT lookahead prevention
         # Gunakan release_date jika tersedia; fallback ke _ingested_at atau observation_date
         if "release_date" in df.columns:
@@ -217,6 +306,39 @@ class MacroProcessor:
             f"[MacroProcessor] {source}: {len(df):,} rows → {out_path.name}"
         )
 
+    @staticmethod
+    def _join_with_guard(
+        df: pl.DataFrame, prev: pl.DataFrame, source: str
+    ) -> Optional[pl.DataFrame]:
+        """
+        FIX SIL-MACRO-DEDUP-01: left-join df against prev (already
+        expected to be deduped by (series_id, observation_date) on both
+        sides by the caller), then verify the row-count invariant a
+        LEFT JOIN with a key-unique right side guarantees: exactly one
+        output row per input row, never more. Returns None (a tripped
+        circuit breaker) instead of an exploded DataFrame if that
+        invariant is ever violated -- which should be impossible given
+        both dedups upstream, but "should be impossible given other code
+        staying correct" is exactly the assumption that let this bug
+        compound for weeks undetected. Isolated as its own method (Rather
+        than inlined in _detect_revisions()) specifically so the guard
+        itself is unit-testable independent of whether the dedup calls
+        around it are currently correct -- see
+        test_macro_processor.py::TestRevisionJoinCircuitBreaker.
+        """
+        joined = df.join(prev, on=["series_id", "observation_date"], how="left")
+        if len(joined) > len(df):
+            logger.error(
+                f"[MacroProcessor] {source}: revision join produced "
+                f"{len(joined):,} rows from {len(df):,} input rows "
+                f"({len(prev):,} prev rows) -- duplicate keys survived "
+                f"dedup. Aborting revision detection for this run "
+                f"(is_revision=False for all rows) to prevent corruption "
+                f"compounding into tomorrow's prev."
+            )
+            return None
+        return joined
+
     def _detect_revisions(
         self,
         df: pl.DataFrame,
@@ -258,16 +380,30 @@ class MacroProcessor:
             # needs no suffix and the joined frame always has exactly the
             # columns this method expects, regardless of what `df` contains.
             # FIX SIL-RPQ-001: lazy scan for single Silver vintage file
-            prev = pl.scan_parquet(str(prev_path)).collect().select([
+            prev_raw = pl.scan_parquet(str(prev_path)).collect()
+            # FIX SIL-MACRO-DEDUP-01: defensive dedup on the prev side too --
+            # not the primary fix (that's the Bronze-read dedup above, which
+            # guarantees freshly-written Silver can never contain duplicate
+            # keys again), but a `prev_path` that somehow still points at
+            # pre-fix data must not be allowed to reintroduce the same
+            # exponential-join compounding this fix closes.
+            prev_raw = prev_raw.unique(
+                subset=["series_id", "observation_date"], keep="last"
+            )
+            prev = prev_raw.select([
                 "series_id", "observation_date", "value", "revision_seq"
             ]).rename({"value": "value_prev", "revision_seq": "revision_seq_prev"})
 
-            # Join on (series_id, observation_date) to detect value changes
-            joined = df.join(
-                prev,
-                on=["series_id", "observation_date"],
-                how="left",
-            )
+            joined = self._join_with_guard(df, prev, source)
+            if joined is None:
+                # Circuit breaker tripped -- see _join_with_guard()'s own
+                # docstring. Safe fallback, not a crash: every row gets
+                # is_revision=False rather than writing out a file that
+                # would poison tomorrow's prev.
+                return df.with_columns([
+                    pl.lit(False).alias("is_revision"),
+                    pl.lit(0).cast(pl.Int16).alias("revision_seq"),
+                ])
 
             # is_revision: value changed from previous vintage
             # FIX F-MP-02 [P2]: use REVISION_TOLERANCE instead of direct !=

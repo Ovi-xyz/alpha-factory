@@ -223,3 +223,206 @@ class TestRevisionTolerance:
         assert abs(0.003 - 0.0025) > REVISION_TOLERANCE, (
             "Test fixture sanity check: difference must exceed tolerance"
         )
+
+
+class TestBronzeDedupBeforeRevisionJoin:
+    """FIX SIL-MACRO-DEDUP-01 (18 Sep 2026) regression guard. Reproduces
+    the actual production mechanism: Bronze's incremental-fetch overlap
+    (Supplementary Design G1, 7-day lookback re-fetch) legitimately
+    writes the same (series_id, observation_date) key into multiple
+    Bronze files, and _detect_revisions()'s join against `prev` used to
+    compound that duplication exponentially, day over day -- confirmed
+    empirically against production data (fred_2026-09-17_silver.parquet:
+    105,813,947 rows, 93% of it in one key). See module docstring for
+    the full empirical account."""
+
+    def _bronze_dupes_df(self, series_id: str, observation_date: str,
+                          values_and_timestamps: list[tuple[float, str]],
+                          release_date: str) -> pl.DataFrame:
+        """Simulates Bronze's incremental-overlap duplication directly:
+        the SAME (series_id, observation_date) key appearing across
+        several Bronze files (rows here), each with its own
+        _ingested_at, exactly as read_parquet(glob) would concatenate
+        them before any dedup existed."""
+        n = len(values_and_timestamps)
+        return pl.DataFrame({
+            "series_id":        [series_id] * n,
+            "observation_date": [observation_date] * n,
+            "value":            [v for v, _ in values_and_timestamps],
+            "release_date":     [release_date] * n,
+            "_ingested_at":     [ts for _, ts in values_and_timestamps],
+        })
+
+    def test_duplicate_bronze_rows_collapse_to_one_per_key(self, tmp_path, monkeypatch):
+        """3 Bronze rows for the same key (simulating 3 overlapping
+        incremental fetches) must collapse to exactly 1 Silver row --
+        not 3, and critically not 3 x (whatever prev already had)."""
+        monkeypatch.chdir(tmp_path)
+        bronze_dir = tmp_path / "data" / "bronze" / "macro" / "fred"
+        bronze_dir.mkdir(parents=True)
+        self._bronze_dupes_df(
+            "MORTGAGE30US", "2026-09-03",
+            [(6.10, "2026-09-03T21:00:00"), (6.11, "2026-09-04T21:00:00"),
+             (6.12, "2026-09-05T21:00:00")],
+            release_date="2026-09-03",
+        ).write_parquet(bronze_dir / "mortgage_fixture.parquet")
+
+        MacroProcessor().process_fred(date(2026, 9, 6))
+
+        out = pl.read_parquet(
+            list((tmp_path / "data" / "silver" / "macro_enriched").glob("fred_*_silver.parquet"))[0]
+        )
+        assert out.height == 1, f"Expected 1 deduped row, got {out.height}"
+        # Latest _ingested_at (2026-09-05) must win, not the first or a merge.
+        assert out["value"][0] == 6.12
+
+    def test_join_does_not_compound_across_two_consecutive_runs(self, tmp_path, monkeypatch):
+        """The actual production mechanism: run process_fred() twice in a
+        row (day N, then day N+1), each time with Bronze overlap
+        duplication present, and confirm day N+1's output does NOT
+        multiply day N's row count -- reproducing, at small scale, the
+        exact daily-compounding pattern that reached 105.8M rows live."""
+        monkeypatch.chdir(tmp_path)
+        bronze_dir = tmp_path / "data" / "bronze" / "macro" / "fred"
+        bronze_dir.mkdir(parents=True)
+
+        # Day 1: 2 overlapping Bronze rows for the same key (simulates
+        # the incremental-fetch overlap that seeds the very first
+        # duplication) plus a handful of other clean keys.
+        self._bronze_dupes_df(
+            "MORTGAGE30US", "2026-09-01",
+            [(6.00, "2026-09-01T21:00:00"), (6.00, "2026-09-02T21:00:00")],
+            release_date="2026-09-01",
+        ).write_parquet(bronze_dir / "day1_dupe.parquet")
+        pl.DataFrame({
+            "series_id": ["DGS10"], "observation_date": ["2026-09-01"],
+            "value": [4.1], "release_date": ["2026-09-01"],
+            "_ingested_at": ["2026-09-01T21:00:00"],
+        }).write_parquet(bronze_dir / "day1_other.parquet")
+
+        MacroProcessor().process_fred(date(2026, 9, 2))
+        day1_out = pl.read_parquet(
+            sorted((tmp_path / "data" / "silver" / "macro_enriched").glob("fred_*_silver.parquet"))[-1]
+        )
+        assert day1_out.height == 2  # MORTGAGE30US (deduped to 1) + DGS10
+
+        # Day 2: Bronze overlap re-fetches the SAME MORTGAGE30US date
+        # again (exactly what the 7-day lookback does in production).
+        self._bronze_dupes_df(
+            "MORTGAGE30US", "2026-09-01",
+            [(6.00, "2026-09-01T21:00:00"), (6.00, "2026-09-02T21:00:00"),
+             (6.00, "2026-09-03T21:00:00")],
+            release_date="2026-09-01",
+        ).write_parquet(bronze_dir / "day2_dupe.parquet")
+
+        MacroProcessor().process_fred(date(2026, 9, 3))
+        day2_out = pl.read_parquet(
+            sorted((tmp_path / "data" / "silver" / "macro_enriched").glob("fred_*_silver.parquet"))[-1]
+        )
+        # Pre-fix, this join would have multiplied day1's (already
+        # duplicate-containing) prev by day2's duplicate-containing df.
+        # Post-fix: still exactly 1 row for MORTGAGE30US, not 2 or 6.
+        mortgage_rows = day2_out.filter(pl.col("series_id") == "MORTGAGE30US")
+        assert mortgage_rows.height == 1, (
+            f"Compounding regression: expected 1 row, got {mortgage_rows.height} "
+            f"-- the join is multiplying duplicate keys across runs again"
+        )
+
+    def test_dedup_keeps_latest_ingested_value_not_arbitrary(self, tmp_path, monkeypatch):
+        """When Bronze overlap carries genuinely different values for the
+        same key across ingestion runs (e.g. a value corrected between
+        fetches), the LATEST _ingested_at must win -- not the first row
+        DuckDB happens to read, which is what a naive .unique() without
+        an explicit sort would do."""
+        monkeypatch.chdir(tmp_path)
+        bronze_dir = tmp_path / "data" / "bronze" / "macro" / "fred"
+        bronze_dir.mkdir(parents=True)
+        # Write with the LATEST _ingested_at row FIRST in the file, to
+        # make sure the fix isn't accidentally relying on file/row order.
+        self._bronze_dupes_df(
+            "DFF", "2026-09-01",
+            [(5.50, "2026-09-05T09:00:00"), (5.25, "2026-09-01T09:00:00")],
+            release_date="2026-09-01",
+        ).write_parquet(bronze_dir / "dff_fixture.parquet")
+
+        MacroProcessor().process_fred(date(2026, 9, 6))
+
+        out = pl.read_parquet(
+            list((tmp_path / "data" / "silver" / "macro_enriched").glob("fred_*_silver.parquet"))[0]
+        )
+        assert out.height == 1
+        assert out["value"][0] == 5.50  # latest _ingested_at, not first row read
+
+
+class TestRevisionJoinCircuitBreaker:
+    """FIX SIL-MACRO-DEDUP-01: _join_with_guard() is deliberately
+    extracted as its own method (see its docstring) so this circuit
+    breaker is unit-testable on its own terms, independent of whether
+    the dedup calls around it in _detect_revisions() are currently
+    correct -- calling _detect_revisions() end-to-end can no longer
+    exercise the trip condition at all once both dedups are in place
+    (a LEFT JOIN against a key-unique right side is *structurally*
+    guaranteed to never produce more rows than its left input), which
+    is exactly the point of the dedups -- but the guard exists for the
+    case where that structural guarantee is ever broken by a future
+    change to code around it, and that case needs its own direct test."""
+
+    def test_duplicate_key_in_prev_trips_the_breaker(self):
+        """A prev with a genuine duplicate key (i.e. the exact
+        pre-dedup production shape) must trip the breaker -- called
+        directly, deliberately bypassing _detect_revisions()'s own
+        prev-dedup to isolate the guard itself."""
+        df = pl.DataFrame({
+            "series_id": ["DFF"], "observation_date": ["2026-09-01"],
+            "value": [5.30],
+        })
+        undeduped_prev = pl.DataFrame({
+            "series_id": ["DFF", "DFF"], "observation_date": ["2026-09-01", "2026-09-01"],
+            "value_prev": [5.25, 5.25], "revision_seq_prev": [0, 0],
+        })
+
+        result = MacroProcessor._join_with_guard(df, undeduped_prev, "fred")
+
+        assert result is None, "Breaker must trip (return None) when joined > input"
+
+    def test_clean_unique_prev_does_not_trip_the_breaker(self):
+        """The normal, correct case: a key-unique prev must produce a
+        normal joined DataFrame, not a tripped breaker."""
+        df = pl.DataFrame({
+            "series_id": ["DFF"], "observation_date": ["2026-09-01"],
+            "value": [5.30],
+        })
+        clean_prev = pl.DataFrame({
+            "series_id": ["DFF"], "observation_date": ["2026-09-01"],
+            "value_prev": [5.25], "revision_seq_prev": [0],
+        })
+
+        result = MacroProcessor._join_with_guard(df, clean_prev, "fred")
+
+        assert result is not None
+        assert result.height == 1
+
+    def test_end_to_end_pre_dedup_shaped_prev_no_longer_reaches_the_join_duplicated(self, tmp_path, monkeypatch):
+        """Full _detect_revisions() path: even when the on-disk prev
+        file has the exact pre-fix duplicate shape, _detect_revisions()'s
+        own defensive dedup absorbs it before the join runs -- the
+        breaker doesn't need to trip here because the dedup already
+        did its job, and the genuine revision (5.30 vs 5.25) is still
+        correctly detected rather than being masked."""
+        monkeypatch.setattr("src.silver.macro_processor.SILVER_MACRO_PATH", tmp_path)
+        prior = pl.DataFrame({
+            "series_id": ["DFF", "DFF"], "observation_date": ["2026-09-01", "2026-09-01"],
+            "value": [5.25, 5.25], "revision_seq": [0, 0],
+        })
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        prior.write_parquet(tmp_path / "fred_2026-09-05_silver.parquet")
+
+        df = pl.DataFrame({
+            "series_id": ["DFF"], "observation_date": ["2026-09-01"],
+            "value": [5.30],
+        })
+
+        result = MacroProcessor()._detect_revisions(df, "fred", date(2026, 9, 6))
+
+        assert result.height == 1  # not multiplied by prev's duplicate rows
+        assert result["is_revision"][0] == True  # genuine revision, correctly detected

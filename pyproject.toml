@@ -1,6 +1,101 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.18.1"
+version = "1.18.4"
+# FIX GMI-FORECAST-DIM-02 (chat thread, 19 Sep 2026): gold_forecast --force
+# re-run post-DIM-01 reproduced the identical 100% VAR fit failure, same
+# error message, every symbol -- DIM-01 fixed PCA's own p>n fit problem but
+# never touched PCA's OUTPUT size. Root cause: DIM-01's ~13-14 subcategory
+# composites are economically near-orthogonal by construction (that's the
+# whole point of the taxonomy grouping), so PCA(n_components=
+# PCA_VARIANCE_TARGET=0.95) no longer compresses them the way it compressed
+# the original ~40 heavily-redundant raw columns -- it retains close to all
+# ~13-14 composites to hit 95% variance, reproducing the same neqs-vs-
+# n_totobs VAR identification failure one level down (n_pcs instead of raw
+# p). Confirmed against the real statsmodels.VAR.fit() (not a hand-computed
+# formula): neqs=14 at n_totobs=44 fails identically to production;
+# neqs=5 (n_pcs=4) is identifiable from n_totobs>=36. Fix: MAX_PCS=4 hard
+# integer cap, decoupled from PCA_VARIANCE_TARGET (kept as the nominal spec
+# citation only); MIN_PAIR_OBS raised MAX_VAR_LAG+15=20 -> 40, matching
+# correlation_module.py's own MIN_OBSERVATIONS (FIX XAE-CAL-01) for the
+# identical 65-day window. New regression test
+# TestForecastDimensionalityRegressionV2 reproduces the real ~13-14-
+# category/weekday-calendar shape (DIM-01's own regression test used only
+# 4 categories on a 50-calendar-day incl.-weekends window -- too generous
+# on both counts to catch this) and is confirmed to fail against DIM-01-
+# only source, with the identical production error message, before passing
+# against this fix. tests/COUNT_BASELINE.txt: 1725 -> 1726. Verified from a
+# claude.ai chat session (Filesystem MCP read/write to this live repo, no
+# execution access on this machine) -- test verification was scoped to
+# test_forecast_module.py (20/20 passed) in a separate sandbox (this
+# module's file content mirrored in; the sandbox's own GitHub clone was
+# stale and missing DIM-01 entirely), byte-verified identical to what's
+# live here. Full live suite not re-run from that session -- confirm
+# 1726/1726 here before treating this as fully closed.
+# FIX SIL-MACRO-DEDUP-01 (chat thread, 18 Sep 2026): silver_macro OOM-killed
+# (zsh: killed) on 2026-09-18, blocking silver_active_symbols and, downstream,
+# gold_forecast (which correctly skipped rather than crashing -- "active_ohlcv
+# not resolved"). Traced to fred_2026-09-17_silver.parquet: 105,813,947 rows
+# for one day's FRED output, 93% of it in ONE (series_id, observation_date)
+# key (MORTGAGE30US / 2026-09-03: 98,825,160 rows), another key at exactly
+# 2**20 = 1,048,576 -- the signature of EXPONENTIAL compounding, not linear
+# accumulation. Confirmed Bronze itself is clean (MORTGAGE30US: 17 small
+# incremental files, ~1.8KB each) -- the explosion is entirely inside
+# macro_processor.py's _detect_revisions(): a LEFT JOIN of today's df against
+# yesterday's Silver output (`prev`) on (series_id, observation_date)
+# multiplies duplicate-count(df) x duplicate-count(prev) per key, and since
+# `prev` was itself produced by this same unguarded join the day before (and
+# its prev the day before that), every day SQUARED the corruption rather than
+# adding to it. Root duplication source: Bronze's incremental-fetch overlap
+# (Supplementary Design G1, 7-day lookback re-fetch) legitimately writes the
+# same key into multiple Bronze files for the most recent ~week of dates;
+# _process_domain()'s glob read had no dedup, so df carried all of them in
+# raw. Same shared code path affects bls/bea/eia too (file-size trail: 09-17
+# vs 09-16 roughly 4x/4x/2.4x respectively, smaller EIA multiplier because
+# FIX EIA-6 only landed 8/9 Sep, giving that chain fewer days to compound).
+# Fix, three parts: (1) _process_domain() dedupes df on (series_id,
+# observation_date) right after the Bronze read, keeping latest _ingested_at
+# per key -- this is what makes the incremental overlap idempotent instead of
+# duplicative; (2) _detect_revisions() applies the same dedup to prev before
+# joining -- defense in depth, not the primary fix; (3) new _join_with_guard()
+# static method checks len(joined) > len(df) immediately after the join --
+# mathematically unreachable once (1)+(2) hold (a LEFT JOIN against a
+# key-unique right side is row-count-preserving by construction), but stops
+# the compounding mechanism itself from ever recurring under a future bug
+# neither dedup anticipated, rather than trusting both to stay correct
+# forever. Existing corrupted files on disk (fred_2026-09-{08..17},
+# bls/bea_2026-09-{16,17}, eia_2026-09-{16,17}) deleted as part of this fix's
+# remediation -- not self-healing, since even a correctly-deduped df joined
+# against an already-98M-row prev still explodes on the prev side alone.
+# 6 new regression tests (3 dedup, 3 circuit-breaker-as-isolated-unit),
+# confirmed to fail against the pre-fix source before passing against the fix.
+# FIX GMI-FORECAST-DIM-01 (chat thread, 17 Sep 2026): gold_forecast logged
+# SUCCESS but wrote nothing -- 100% VAR fit failure across the entire
+# active_ohlcv universe (~196 symbols, identical statsmodels error for
+# every single one, "maxlags is too large for the number of observations
+# and the number of equations"). Identical failure regardless of symbol is
+# the tell that the shared PCA input was the bottleneck, not a per-symbol
+# data gap. Confirmed empirically via Filesystem MCP against
+# instruments_taxonomy.yaml: forecast_context() had grown to 40 raw
+# instruments (dollar_basket alone added 7 minor-currency legs across
+# several ADRs) while LOOKBACK_DAYS stayed 65 calendar days (~47-48
+# trading-day observations per FIX XAE-CAL-01's own calibration) -- p~=41
+# features against n~=47-48 rows, a p/n ratio where PCA(n_components=0.95)
+# on noisy daily returns has no concentrated factor structure to find and
+# retains 25-40+ components instead of the 3-5 Architecture v2.0
+# SS6.4.1-6.4.3 assumed (calculated when Layer 2 was 25 series, p/n~=0.4).
+# That inflated n_pcs fed every per-equity VAR identically, explaining the
+# universe-wide failure. Fix reduces p at its source rather than capping
+# n_components by fiat (which would discard unknown amounts of information):
+# _aggregate_by_subcategory() collapses the ~40 raw columns into ~13-14
+# z-scored composites per instruments_taxonomy.yaml's own context_category
+# grouping (economic classification, not a new statistical threshold), and
+# PCA_LOOKBACK_DAYS=180 decouples the PCA input window from LOOKBACK_DAYS=65
+# (which still governs per-equity follower reads) -- ForecastModule has no
+# CorrelationModule-style regime-purity requirement forcing a short window.
+# Result: p~=13-14 against n~=125, ratio ~9x, vs. ~0.85x before. 6 new
+# regression tests, one (test_many_instruments_few_categories_var_still_fits)
+# reproducing the exact failure shape and confirmed to fail against the
+# pre-fix source before passing against the fix.
 # FIX XAE-CAL-01 (chat thread, 16 Sep 2026): CrossAssetEngine's three
 # weekly modules (CorrelationModule, LeadLagModule, ForecastModule) each
 # independently defined MIN_HISTORY_RATIO=0.8 against a 65-CALENDAR-day
