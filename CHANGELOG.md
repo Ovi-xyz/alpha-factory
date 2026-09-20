@@ -1,5 +1,57 @@
 # CHANGELOG — Data Platform
 
+## v1.18.5 — FIX GMI-FORECAST-DIM-03: suppress + properly log the "Mean of empty slice" RuntimeWarning in _aggregate_by_subcategory (September 2026)
+
+Ovi melaporkan `gold_forecast` (setelah FIX GMI-FORECAST-DIM-02, v1.18.4,
+yang membuatnya akhirnya bisa menulis output) selesai dengan
+`RuntimeWarning: Mean of empty slice` di stderr. Diminta untuk
+diperiksa dulu sebelum diputuskan apakah ini bug atau bukan.
+
+**Diagnosis (diverifikasi empiris terhadap data Silver live via Filesystem
+MCP, bukan hanya dari teks warning):** `_aggregate_by_subcategory()`
+membangun composite per `context_category` dari `pivot`, yang date axis-
+nya adalah FULL OUTER JOIN lintas semua kolom Layer-2 — gabungan
+instrumen dengan kalender trading yang berbeda-beda ke satu date axis
+yang sama. 8 kategori context punya persis 1 anggota (`DXY`, `VIX`,
+`HYG`, `DBA`, `ARKK`, `CPO`, `COAL_NEWC`, `THB`), jadi begitu satu-
+satunya anggota itu kosong di satu tanggal, SELURUH kategori jadi
+full-NaN untuk baris itu — `np.nanmean` di atas slice yang seluruhnya
+NaN memicu warning. Ditarik data Silver 180-hari yang sesungguhnya untuk
+DXY: 28 dari 153 tanggal union hilang, 25 di antaranya hari Minggu, 2
+Sabtu, dan HANYA 1 hari kerja sungguhan (2026-05-25, US Memorial Day).
+Sumber kontaminasi hari Minggu ditelusuri sampai ke 3 simbol yang secara
+SAH mencatat bar hari Minggu UTC untuk sesi pertama minggu mereka:
+`COAL_NEWC` (WHC.AX/ASX, buka ~jam 22:00 UTC hari sebelumnya per catatan
+timing ASX di Architecture v2.0 §3.4), `CPO` (Bursa Malaysia, UTC+8 —
+Senin pagi waktu lokal masih Minggu malam UTC), dan `THB` (konvensi FX
+standar, minggu trading dibuka Minggu 21:00 UTC). Bukan data yang salah
+— DXY/VIX/ETF AS memang benar tidak punya bar hari Minggu; masalahnya
+full outer join menaruh bar Minggu yang sah dari pasar yang buka lebih
+awal itu di axis yang sama dengan kalender yang tidak pernah trading hari
+Minggu. Sudah tidak berbahaya di hilir — `_fit_pca()`'s column-mean
+imputation yang sudah ada sejak awal menutup lubang yang sama — tapi
+warning mentahnya bypass loguru/PipelineLogger sepenuhnya, tidak
+konsisten dengan konvensi kode "tidak ada print(), loguru saja".
+
+**Fix:** `warnings.catch_warnings()` + `simplefilter("ignore",
+category=RuntimeWarning)` di-scope ketat ke blok komputasi per-kategori
+saja (bukan seluruh fungsi atau file). Jumlah NaN dideteksi langsung dari
+hasil (`np.isnan(...).sum()`), bukan dari parsing teks warning — tetap
+benar berapa pun versi numpy-nya. Jika ada kategori yang terkena, satu
+`logger.debug` ringkasan per pemanggilan (bukan satu per baris/tanggal)
+melaporkan kategori mana dan berapa baris yang terpengaruh. TIDAK ada
+perubahan nilai apa pun — murni kebersihan logging.
+
+**Test:** `TestSubcategoryAggregation::
+test_single_member_category_all_missing_row_does_not_warn` (baru) —
+dikonfirmasi FAIL terhadap source pre-fix (menangkap persis
+`RuntimeWarning: Mean of empty slice`) sebelum lolos terhadap fix ini.
+Full suite `test_forecast_module.py`: 21/21 passed (20 lama + 1 baru).
+`tests/COUNT_BASELINE.txt`: 1726 → 1727. Lingkup verifikasi sama seperti
+v1.18.4: sandbox terpisah (GitHub clone + override manual dengan isi file
+live), bukan full live suite — `pytest tests/ -q` penuh di mesin live
+sebaiknya tetap dikonfirmasi ulang oleh Ovi.
+
 ## v1.18.4 — FIX GMI-FORECAST-DIM-02: ForecastModule PCA component count vs. observation count, round two (September 2026)
 
 Bug produksi ditemukan Ovi: re-run `gold_forecast --force` pada 2026-09-19,

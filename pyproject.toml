@@ -1,6 +1,37 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.18.4"
+version = "1.18.5"
+# FIX GMI-FORECAST-DIM-03 (chat thread, 20 Sep 2026): gold_forecast (post
+# DIM-02, v1.18.4) completed successfully but with `RuntimeWarning: Mean
+# of empty slice` at stderr, from _aggregate_by_subcategory(). Root cause
+# (confirmed against real Silver data via Filesystem MCP, not log text):
+# 8 single-member context categories (DXY, VIX, HYG, DBA, ARKK, CPO,
+# COAL_NEWC, THB) go fully NaN on any date their one member has no bar,
+# since pivot's date axis is a full outer join across every Layer-2
+# column -- calendars that never trade Sunday get "holes" on dates where
+# an early-opening market's legitimate Sunday-UTC bar (COAL_NEWC/WHC.AX
+# on ASX, CPO on Bursa Malaysia UTC+8, THB's standard FX week-open) is
+# the only contributor to the union axis. Empirically: 28/153 union dates
+# missing for DXY over the real 180-day window, 25 Sunday + 2 Saturday +
+# only 1 genuine weekday (2026-05-25, US Memorial Day). Not a data defect
+# -- US-market-hours-only categories correctly have no Sunday bar -- and
+# already harmless downstream (_fit_pca's pre-existing column-mean
+# imputation fills the same holes), but the bare RuntimeWarning bypassed
+# loguru/PipelineLogger entirely, inconsistent with this repo's "no
+# print(), loguru only" convention. Fix: warnings.catch_warnings() +
+# simplefilter("ignore", RuntimeWarning) scoped tightly to the per-
+# category computation block; affected-row count read back from
+# np.isnan(...).sum() on the result (not warning-text parsing, so it's
+# numpy-version-agnostic); one consolidated logger.debug per call
+# (category -> count) if anything was affected. No value change -- pure
+# logging hygiene. New test
+# TestSubcategoryAggregation::test_single_member_category_all_missing_row_does_not_warn
+# confirmed to fail against pre-fix source (catches the exact
+# RuntimeWarning) before passing against this fix.
+# tests/COUNT_BASELINE.txt: 1726 -> 1727. Same verification-scope caveat
+# as DIM-02: tested in a separate sandbox (GitHub clone + this repo's own
+# live file content overlaid), not the full live suite here -- confirm
+# 1727/1727 on this machine before treating as fully closed.
 # FIX GMI-FORECAST-DIM-02 (chat thread, 19 Sep 2026): gold_forecast --force
 # re-run post-DIM-01 reproduced the identical 100% VAR fit failure, same
 # error message, every symbol -- DIM-01 fixed PCA's own p>n fit problem but

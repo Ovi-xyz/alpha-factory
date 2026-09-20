@@ -152,6 +152,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
+import warnings
 
 import duckdb
 import numpy as np
@@ -407,6 +408,29 @@ class ForecastModule:
         every existing test built on a bare _FakeInstrument(symbol) is
         unaffected — aggregation is a genuine no-op when category info
         isn't modeled, not a behavior change disguised as backward-compat.
+
+        FIX GMI-FORECAST-DIM-03 (20 Sep 2026): an all-NaN row within one
+        category (every member missing on that date) makes np.nanmean()
+        raise a bare "Mean of empty slice" RuntimeWarning per occurrence —
+        confirmed empirically (real 180-day Silver window) to be expected,
+        not a data defect: single-member categories (DXY, VIX, HYG, DBA,
+        ARKK, CPO, COAL_NEWC) go fully NaN whenever the OUTER-JOINED date
+        axis includes a date their one member's own market was closed on.
+        ~89% of these are Sunday-UTC: COAL_NEWC (WHC.AX/ASX) and CPO (Bursa
+        Malaysia) both open Monday-morning-local, which is still Sunday
+        evening UTC for a UTC+8/+10 market; THB carries the standard FX
+        Sunday-21:00-UTC week-open. US-market-hours-only categories
+        correctly have no Sunday bar at all, so they read as "empty" on
+        exactly those dates — not because data is missing, but because
+        the full outer join puts an early-opening market's legitimate
+        Sunday bar on the same axis as calendars that never trade Sunday.
+        Already harmless by the time it reaches PCA (_fit_pca's own
+        column-mean imputation fills these same holes), but the bare
+        RuntimeWarning bypassed loguru/PipelineLogger entirely. Now
+        suppressed at the source and replaced with one consolidated
+        logger.debug per call (category -> affected-row count) so this is
+        visible when actually debugging without leaking to stderr on every
+        normal run.
         """
         symbol_to_category: dict[str, str] = {}
         for inst in instruments:
@@ -421,13 +445,36 @@ class ForecastModule:
             groups.setdefault(category, []).append(col)
 
         composite_cols: dict[str, np.ndarray] = {}
+        empty_slice_counts: dict[str, int] = {}
         for category, cols in groups.items():
             data = pivot.select(cols).to_numpy()
-            col_mean = np.nanmean(data, axis=0)
-            col_std = np.nanstd(data, axis=0)
-            col_std = np.where((col_std < 1e-12) | np.isnan(col_std), 1.0, col_std)
-            z = (data - col_mean) / col_std
-            composite_cols[category] = np.nanmean(z, axis=1)
+            # FIX GMI-FORECAST-DIM-03 (20 Sep 2026): suppress the raw
+            # RuntimeWarning at its source (see docstring above) -- the
+            # NaN count is recovered directly from the result below, not
+            # from parsing warning text, so this stays correct regardless
+            # of numpy's exact wording across versions.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                col_mean = np.nanmean(data, axis=0)
+                col_std = np.nanstd(data, axis=0)
+                col_std = np.where((col_std < 1e-12) | np.isnan(col_std), 1.0, col_std)
+                z = (data - col_mean) / col_std
+                composite_cols[category] = np.nanmean(z, axis=1)
+            n_empty = int(np.isnan(composite_cols[category]).sum())
+            if n_empty:
+                empty_slice_counts[category] = n_empty
+
+        if empty_slice_counts:
+            logger.debug(
+                "[gold_forecast] _aggregate_by_subcategory: all-member-NaN "
+                f"rows on some dates for {len(empty_slice_counts)} "
+                f"categor{'y' if len(empty_slice_counts) == 1 else 'ies'} "
+                "(expected -- full-outer-join date axis mixes calendars, "
+                "e.g. ASX/Bursa Malaysia/FX Sunday-UTC week-opens vs. "
+                "US-market-hours-only single-member categories; imputed "
+                "downstream by _fit_pca's column-mean fill): "
+                f"{dict(sorted(empty_slice_counts.items(), key=lambda kv: -kv[1]))}"
+            )
 
         result = pl.DataFrame(composite_cols)
         return result.with_columns(pivot["date"])

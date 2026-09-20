@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
+import warnings
 
 import numpy as np
 import polars as pl
@@ -425,6 +426,38 @@ class TestSubcategoryAggregation:
         result = ForecastModule._aggregate_by_subcategory(pivot, instruments)
         vals = result["grp"].to_numpy()
         assert np.isfinite(vals[2])  # the row where M1 was null
+
+    def test_single_member_category_all_missing_row_does_not_warn(self):
+        """FIX GMI-FORECAST-DIM-03 (20 Sep 2026) regression guard. A
+        single-member category (e.g. DXY, VIX, HYG in production) whose
+        one member is null on a date -- confirmed empirically against real
+        Silver data to be a routine occurrence, ~89% of it Sunday-UTC bars
+        from early-opening markets (ASX/Bursa Malaysia/standard FX week-
+        open) landing on the full-outer-join date axis that US-market-
+        hours-only categories never trade on -- must not leak a bare
+        numpy RuntimeWarning ("Mean of empty slice"). The composite value
+        for that date is still correctly NaN (this is a logging/hygiene
+        fix, not a value change); only dates where the member actually has
+        data must stay finite.
+        """
+        dates = DATES[:5]
+        pivot = pl.DataFrame({
+            "date": dates,
+            "SOLO": [0.01, 0.02, None, 0.01, 0.03],
+        })
+        instruments = [_FakeInstrumentWithCategory("SOLO", context_category="lonely")]
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = ForecastModule._aggregate_by_subcategory(pivot, instruments)
+
+        runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+        assert not runtime_warnings, (
+            f"expected no RuntimeWarning, got: {[str(w.message) for w in runtime_warnings]}"
+        )
+        vals = result["lonely"].to_numpy()
+        assert np.isnan(vals[2])  # the one genuinely-missing row stays NaN
+        assert np.all(np.isfinite(np.delete(vals, 2)))  # every other row unaffected
 
 
 class TestForecastDimensionalityRegression:
