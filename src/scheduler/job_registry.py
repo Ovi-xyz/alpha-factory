@@ -266,11 +266,6 @@ def _gold_screener(run_date: date) -> None:
     screener_run(run_date)
 
 
-def _gold_correlation(run_date: date) -> None:
-    from src.gold.correlation_matrix import run as corr_run
-    corr_run(run_date)
-
-
 def _gold_global_regime(run_date: date) -> None:
     """ADD GMI Wave 1 Cycle 4 — CrossAssetEngine's first module
     (Architecture v2.0 §6.5). Independent of the gold_signals -> gold_mtf
@@ -282,10 +277,12 @@ def _gold_global_regime(run_date: date) -> None:
 
 def _gold_cross_asset_correlation(run_date: date) -> None:
     """ADD GMI Wave 1 Cycle 4 — CrossAssetEngine's second module
-    (Architecture v2.0 §6.2). Coexists with the pre-Cycle-4 gold_correlation
-    job (Layer 1-only, no Ledoit-Wolf) — see
-    src/gold/cross_asset/correlation_module.py module docstring for why
-    the old job is not being retired as part of this pass."""
+    (Architecture v2.0 §6.2). FIX GMI-CORR-RETIRE-01 (RISK-31, 20 Sep
+    2026): the pre-Cycle-4 gold_correlation job (Layer 1-only, no
+    Ledoit-Wolf) is retired — this job's own run() now also writes
+    gold_correlation's legacy consumer-facing output as a compatibility
+    bridge; see src/gold/cross_asset/correlation_module.py and
+    legacy_correlation_bridge.py module docstrings."""
     from src.gold.cross_asset.correlation_module import run as cross_corr_run
     cross_corr_run(run_date)
 
@@ -621,19 +618,19 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "est_minutes": 5,
     },
 
-    "gold_correlation": {
-        "description": "Rolling 60D correlation matrix — active symbols only (~200)",
-        "fn":          _gold_correlation,
-        "depends_on":  ["silver_ohlcv", "silver_active_symbols"],
-        "layer":       "gold",
-        "est_minutes": 10,
-    },
-
-    # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.2) — second CrossAssetEngine
-    # module. Weekly, like gold_correlation above — but merged Layer 1 +
-    # Layer 2 universe, Ledoit-Wolf shrinkage, scipy hierarchical clustering.
-    # depends_on both resolvers directly (not the old gold_correlation job)
-    # since it reads their persisted output itself, not gold_correlation's.
+    # FIX GMI-CORR-RETIRE-01 (RISK-31, 20 Sep 2026): pre-Cycle-4
+    # "gold_correlation" entry (Layer 1-only, raw Pearson via
+    # correlation_matrix.py) removed entirely — retired, not just excluded
+    # from a sequence. Module archived to
+    # archive/gold_correlation_retirement_2026_09/ (local filesystem only,
+    # untracked — see ADR-043 precedent for why archived retirements are
+    # kept out of git rather than under a tracked archive/ path).
+    # gold_cross_asset_correlation below is its replacement: merged Layer
+    # 1 + Layer 2 universe, Ledoit-Wolf shrinkage, scipy hierarchical
+    # clustering — and its own run() now also derives gold_correlation's
+    # legacy output shape as a compatibility bridge (see
+    # legacy_correlation_bridge.py), so screener.py and views.py's
+    # v_correlation needed zero changes.
     "gold_cross_asset_correlation": {
         "description": "Ledoit-Wolf correlation + clustering — merged Layer 1+2 universe",
         "fn":          _gold_cross_asset_correlation,
@@ -724,7 +721,8 @@ DAILY_SEQUENCE: list[str] = [
     "silver_validate",
 
     # Silver Phase 2 — active symbols (IDD §7 + GD-F04: setelah silver_validate)
-    # silver_active_symbols tetap ada: dibutuhkan gold_signals, gold_correlation, gold_screener
+    # silver_active_symbols tetap ada: dibutuhkan gold_signals,
+    # gold_cross_asset_correlation, gold_screener
     "silver_active_symbols",
     # ADD GMI-CTX-001: Layer 2, depends_on=[] — position here is for SOP
     # readability only (grouped with the other "active universe" job), not
@@ -750,7 +748,8 @@ DAILY_SEQUENCE: list[str] = [
     # Util
     "health_report",
 
-    # gold_correlation: Minggu — ada di WEEKLY_SEQUENCE, tidak di sini
+    # gold_correlation RETIRED (FIX GMI-CORR-RETIRE-01, RISK-31) — successor
+    # gold_cross_asset_correlation ada di WEEKLY_SEQUENCE, tidak di sini
 ]
 
 WEEKLY_SEQUENCE: list[str] = [
@@ -766,12 +765,13 @@ WEEKLY_SEQUENCE: list[str] = [
     # silver_fundamental line DIHAPUS — ADR-043 (Finnhub full retirement);
     # bronze_finnhub, silver_fundamental no longer exist in JOB_REGISTRY.
 
-    # Gold correlation — rolling 60D, weekly refresh
-    "gold_correlation",
+    # gold_correlation RETIRED (FIX GMI-CORR-RETIRE-01, RISK-31, 20 Sep 2026)
+    # — see JOB_REGISTRY entry comment above gold_cross_asset_correlation.
 
-    # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.2) — coexists with
-    # gold_correlation above (see job entry comment / correlation_module.py
-    # module docstring for why the old job isn't being retired here).
+    # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.2) — Ledoit-Wolf
+    # correlation + clustering, merged Layer 1+2 universe. Now
+    # gold_correlation's sole replacement (retired above), not a
+    # coexisting parallel job.
     "gold_cross_asset_correlation",
 
     # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.3, ADR-001) — Granger

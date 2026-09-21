@@ -154,7 +154,8 @@ class TestGLD003NoFStringSQLIntegration:
         "src/gold/technical_signals.py",
         "src/gold/mtf_alignment.py",
         "src/gold/screener.py",
-        "src/gold/correlation_matrix.py",
+        # correlation_matrix.py retired (FIX GMI-CORR-RETIRE-01, RISK-31,
+        # 20 Sep 2026) — archived to archive/gold_correlation_retirement_2026_09/.
         "src/gold/hmm_regime.py",
         "src/gold/macro_regime.py",
     ]
@@ -183,7 +184,8 @@ class TestGLD004AtomicWriteIntegration:
         "src/gold/technical_signals.py",
         "src/gold/mtf_alignment.py",
         "src/gold/screener.py",
-        "src/gold/correlation_matrix.py",
+        # correlation_matrix.py retired (FIX GMI-CORR-RETIRE-01, RISK-31,
+        # 20 Sep 2026) — archived to archive/gold_correlation_retirement_2026_09/.
         "src/gold/sector_rotation.py",
     ]
 

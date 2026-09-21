@@ -1,5 +1,96 @@
 # CHANGELOG — Data Platform
 
+## v1.18.6 — FIX GMI-CORR-RETIRE-01: Retirement gold_correlation, Resolusi RISK-31 (September 2026)
+
+Keputusan retirement `gold_correlation` (job pre-Cycle-4,
+`src/gold/correlation_matrix.py` — Layer 1-only, raw Pearson via Polars
+`.corr()`, sklearn `AgglomerativeClustering`) yang sejak GMI Wave 1 Cycle 4
+(v1.18.0) tercatat "open" di `KNOWN_RISKS.md` RISK-31, kini diselesaikan.
+
+**Temuan empiris sebelum eksekusi:** `data/gold/correlation/` tidak pernah
+ada di filesystem live — `gold_correlation` belum pernah menghasilkan
+output nyata di repo ini, berbeda dengan `data/gold/cross_asset/cross_asset_corr.parquet`
+(302KB) yang terkonfirmasi live dari run 17 Sep 2026. Kemungkinan penyebab
+(tidak diverifikasi lebih lanjut karena modul diretire regardless):
+`correlation_matrix.py` memiliki history filter
+`n_days >= min_history_days * 0.8` = `int(65*0.8)` = 52 baris kalender —
+pola bug yang persis sama dengan XAE-CAL-01 (v1.18.1) yang sudah
+diperbaiki di tiga modul CrossAssetEngine lainnya, tidak pernah diperiksa
+independen di modul lama ini.
+
+**Dua consumer nyata** dari `correlation_clusters.parquet` (skema lama:
+`symbol, cluster_id, correlation_avg, n_cluster_members, computed_date`):
+`screener.py::_deduplicate_by_cluster()` (GD §15.1 max-2-per-cluster
+guard) dan `views.py`'s `v_correlation` (Trading Engine Interface
+Contract, GD §0.4 — konsumer eksternal yang tidak bisa dikoordinasikan).
+
+**Keputusan (bridge, bukan hard-cutover):** dibanding menulis ulang kedua
+consumer terhadap skema pairwise CorrelationModule (`symbol_a, symbol_b,
+correlation, regime, computation_date, cluster_id_a, cluster_id_b`) — yang
+mengubah kontrak Interface eksternal — `src/gold/cross_asset/legacy_correlation_bridge.py`
+(baru) menurunkan skema lama tersebut dari output pairwise CorrelationModule
+dan menulisnya ke path yang SAMA. `screener.py` dan `views.py` tidak perlu
+diubah sama sekali; keduanya kini mulai menerima data nyata untuk pertama
+kalinya, bersumber dari Ledoit-Wolf shrinkage atas universe gabungan
+Layer 1+2, bukan raw Pearson Layer 1-only. `correlation_avg`
+mempertahankan semantik lama persis (`mean(abs(correlation))` atas semua
+pair suatu simbol). Simbol Layer 2 (VIX, DXY, indeks global, ETF) yang
+muncul di file turunan tidak berbahaya — join dedup `screener.py` dikunci
+ke tabel MTF yang hanya berisi kandidat Layer 1 (`active_ohlcv`).
+
+**Fix:**
+- `src/gold/cross_asset/legacy_correlation_bridge.py` (BARU):
+  `derive_legacy_correlation_clusters()` + `write_legacy_correlation_clusters()`,
+  best-effort (exception ditangkap, tidak pernah menggagalkan job induk).
+- `correlation_module.py`: `run()` memanggil
+  `write_legacy_correlation_clusters()` setelah menulis
+  `cross_asset_corr.parquet`; docstring diperbarui (retired, bukan
+  "coexist").
+- `job_registry.py`: `_gold_correlation` wrapper + entry
+  `JOB_REGISTRY["gold_correlation"]` + entry `WEEKLY_SEQUENCE` dihapus
+  seluruhnya. Diverifikasi: tidak ada job lain yang `depends_on`
+  `"gold_correlation"`; semua count assertion di test suite berbentuk
+  floor (`>=`), bukan exact — tidak ada yang break secara struktural.
+- `pipeline_scheduler.py` (jalur APScheduler dorman, GD §14.5): entry cron
+  `gold_correlation` dihapus — akan `KeyError` saat diaktifkan jika
+  dibiarkan (kelas bug sama yang diperbaiki ADR-043 untuk finnhub).
+  Ditandai, TIDAK diperbaiki: keempat job Cycle 4 (`gold_global_regime`,
+  `gold_cross_asset_correlation`, `gold_lead_lag`, `gold_forecast`) juga
+  belum pernah ditambahkan ke file dorman ini — gap terpisah, lebih besar,
+  di luar scope fix ini.
+- `cross_asset/__init__.py`, `active_symbols.py`: docstring
+  konsumen/status yang sudah basi diperbarui.
+- `src/gold/correlation_matrix.py`, `tests/unit/test_correlation_matrix_glob_scope.py`
+  (4 test): DIARSIPKAN ke `archive/gold_correlation_retirement_2026_09/`
+  (filesystem lokal, TIDAK di-git-track — mengikuti preseden ADR-043,
+  bukan preseden `scripts/archive/` yang di-git-track lalu dihapus Ovi
+  6-7 Agustus 2026 / RISK-11).
+- `test_gold_audit_integration.py`: `correlation_matrix.py` dihapus dari
+  `GOLD_FILES` dan `GOLD_WRITE_FILES` (parametrize −3 test instance, sudah
+  ter-guard via `exists()` sebelumnya jadi bukan regresi, murni
+  pembersihan vacuous-pass).
+- `test_fstring_sql_absence.py`: `test_correlation_matrix_no_fstring_sql`
+  (vacuous pass) dan class `TestSymbolInjectionFixed` (satu test, sudah
+  self-skip) diretire — preseden sama dengan RISK-11.
+
+**Test:** 15 test baru (`test_legacy_correlation_bridge.py`) — derivasi
+skema, `correlation_avg` pakai `abs()`, konsistensi `cluster_id` lintas
+sisi pair, `n_cluster_members` yang benar, empty/malformed input, write
+path, drift-guard yang menegaskan path constant sama persis dengan yang
+di-hardcode di `screener.py` DAN `views.py`, exception di write path
+tidak pernah bocor ke job induk. `tests/COUNT_BASELINE.txt`: 1727 → 1733
+(net: −9 dihapus/diarsipkan, +15 baru; diverifikasi empiris via `git
+stash` sebelum/sesudah, bukan estimasi). Full suite: 1733 passed / 0
+failed / 0 error.
+
+**File dimodifikasi:** `correlation_module.py`, `job_registry.py`,
+`pipeline_scheduler.py`, `cross_asset/__init__.py`, `active_symbols.py`,
+`test_gold_audit_integration.py`, `test_fstring_sql_absence.py`,
+`tests/COUNT_BASELINE.txt` (source/test) + `legacy_correlation_bridge.py`,
+`test_legacy_correlation_bridge.py` (baru) + `correlation_matrix.py`,
+`test_correlation_matrix_glob_scope.py` (diarsipkan, dihapus dari git
+tree). Tag traceability: `FIX GMI-CORR-RETIRE-01` di setiap baris berubah.
+
 ## v1.18.5 — FIX GMI-FORECAST-DIM-03: suppress + properly log the "Mean of empty slice" RuntimeWarning in _aggregate_by_subcategory (September 2026)
 
 Ovi melaporkan `gold_forecast` (setelah FIX GMI-FORECAST-DIM-02, v1.18.4,

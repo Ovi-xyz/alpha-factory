@@ -28,7 +28,6 @@ Cron schedule (WIB — Asia/Jakarta):
 
     Weekly (Sunday):
     02:00  bronze_macro_weekly   (15m)
-    08:00  gold_correlation      (10m)
 
     Wednesday only:
     03:00  bronze_eia            (2m)
@@ -38,6 +37,19 @@ Cron schedule (WIB — Asia/Jakarta):
     (sentiment: 403 plan-tier gate on every symbol; earnings/quotes: never
     activated, NotImplementedError stub). Neither job exists in
     JOB_REGISTRY any more.
+
+    FIX GMI-CORR-RETIRE-01 (RISK-31, 20 Sep 2026): gold_correlation
+    removed from this schedule — retired in full, no longer in
+    JOB_REGISTRY. Its successor, gold_cross_asset_correlation (and the
+    other three GMI Wave 1 Cycle 4 CrossAssetEngine jobs —
+    gold_global_regime, gold_lead_lag, gold_forecast), were never added
+    to this dormant scheduler in the first place; this pass fixes the
+    now-dangling reference to a removed job but does not attempt to bring
+    this file's coverage up to date with everything JOB_REGISTRY has
+    gained since Cycle 4 — a materially bigger, separate piece of work,
+    flagged here rather than silently left inconsistent without comment.
+    Activating this scheduler today would run a smaller job set than
+    JOB_REGISTRY/runner.py's manual `--job all` actually executes.
 """
 
 from __future__ import annotations
@@ -135,11 +147,12 @@ def create_scheduler():
         CronTrigger(day_of_week="sun", hour=2, minute=0, timezone=WIB),
         id="bronze_macro_weekly",
     )
-    sched.add_job(
-        _make_job("gold_correlation", guard),
-        CronTrigger(day_of_week="sun", hour=8, minute=0, timezone=WIB),
-        id="gold_correlation",
-    )
+    # FIX GMI-CORR-RETIRE-01: gold_correlation add_job removed — job no
+    # longer exists in JOB_REGISTRY (would KeyError on activation, same
+    # class of bug ADR-043 fixed for bronze_finnhub/silver_sentiment
+    # here). Not replaced with gold_cross_asset_correlation — see module
+    # docstring above for why this file's Cycle 4 coverage gap is
+    # deliberately left as-is in this pass.
 
     # ── Wednesday only (EIA) ──────────────────────────────────────────────────
     sched.add_job(

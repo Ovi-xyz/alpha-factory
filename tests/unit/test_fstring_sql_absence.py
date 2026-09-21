@@ -235,17 +235,13 @@ class TestNoFStringSQLInSourceCode:
             + "\n".join(f"  :{ln} → {s!r}" for _, ln, s in scr_violations)
         )
 
-    def test_correlation_matrix_no_fstring_sql(self):
-        """Spot check: correlation_matrix.py (1 violation + symbol injection pre-fix)."""
-        violations = _scan_fstring_sql_violations(SRC_ROOT / "gold")
-        corr_violations = [
-            (p, ln, s) for p, ln, s in violations
-            if "correlation_matrix" in str(p)
-        ]
-        assert len(corr_violations) == 0, (
-            f"GLD-003: correlation_matrix.py masih mengandung f-string SQL:\n"
-            + "\n".join(f"  :{ln} → {s!r}" for _, ln, s in corr_violations)
-        )
+    # test_correlation_matrix_no_fstring_sql RETIRED (FIX GMI-CORR-RETIRE-01,
+    # RISK-31, 20 Sep 2026): correlation_matrix.py is archived to
+    # archive/gold_correlation_retirement_2026_09/ — the spot check would
+    # now vacuously pass (file absent from SRC_ROOT/"gold", zero matching
+    # violations by construction) rather than test anything real. Same
+    # precedent as RISK-11's retirement of tests whose entire premise no
+    # longer held once their target was archived.
 
     def test_hmm_regime_no_fstring_sql(self):
         """Spot check: hmm_regime.py (1 violation pre-fix)."""
@@ -260,30 +256,12 @@ class TestNoFStringSQLInSourceCode:
         )
 
 
-class TestSymbolInjectionFixed:
-    """
-    GLD-003 extended: correlation_matrix.py juga melakukan symbol list
-    injection via f"symbol IN ({', '.join(f\"'{s}'\" for s in active_symbols)})".
-    Verifikasi bahwa pattern ini juga tidak ada (diganti register Arrow table).
-    """
-
-    def test_no_symbol_string_injection_in_correlation_matrix(self):
-        """f-string SQL injection via symbol list tidak boleh ada."""
-        corr_file = SRC_ROOT / "gold" / "correlation_matrix.py"
-        if not corr_file.exists():
-            pytest.skip("correlation_matrix.py tidak ditemukan")
-
-        src = corr_file.read_text(encoding="utf-8")
-
-        # Pattern lama: "symbol IN ({symbols_sql})"  atau  "IN ({...'}" (injection)
-        injection_pattern = re.compile(
-            r"IN\s*\(\s*\{.*?symbols.*?\}\s*\)",
-            re.DOTALL | re.IGNORECASE,
-        )
-        assert not injection_pattern.search(src), (
-            "GLD-003: symbol list injection pattern masih ada di correlation_matrix.py. "
-            "Gunakan Arrow table registration: con.register('active_symbols_tbl', df)"
-        )
+# TestSymbolInjectionFixed RETIRED (FIX GMI-CORR-RETIRE-01, RISK-31, 20 Sep
+# 2026): its sole test (test_no_symbol_string_injection_in_correlation_matrix)
+# already self-skipped once correlation_matrix.py was archived to
+# archive/gold_correlation_retirement_2026_09/ (it had its own
+# `if not corr_file.exists(): pytest.skip(...)` guard) — retired outright
+# here rather than left as a permanent skip, same precedent as RISK-11.
 
 
 class TestNoFStringSQLAnywhereInSrc:

@@ -3005,6 +3005,56 @@ calibration and the `gold_correlation` retirement decision remain open,
 as does a full-scale live comparison of `bh_significant` counts and VAR
 stability rate now that `gold_forecast` actually produces output.
 
+### Update — 20 Sep 2026: gold_correlation retirement — RESOLVED
+
+The `gold_correlation` retirement sub-item is closed (the other two items
+in the 19 Sep update above — `GlobalIndexRegimeModule` threshold
+calibration, full-scale live `bh_significant`/VAR-stability comparison —
+remain open; this entry's overall status stays 🟡 OPEN on those).
+
+Empirical check before deciding anything: `data/gold/correlation/` did
+not exist on the live filesystem at all — `gold_correlation` had never
+produced real output on this repo, unlike `cross_asset_corr.parquet`
+(302KB, confirmed live from the 17 Sep run above). Plausible cause, not
+investigated further since the module is retired regardless:
+`correlation_matrix.py`'s own history filter was
+`n_days >= min_history_days * 0.8` = `int(65*0.8)` = 52 calendar-day
+rows against a 65-day window — the exact same threshold-bug shape as
+XAE-CAL-01 (v1.18.1), never independently checked in this older module.
+
+**Decision:** bridge, not hard cutover. `gold_correlation`'s two real
+consumers — `screener.py::_deduplicate_by_cluster()` and `views.py`'s
+`v_correlation` (the documented Trading Engine Interface Contract, GD
+§0.4 — an external consumer this project can't coordinate with) — were
+left untouched. A new `legacy_correlation_bridge.py` derives
+`gold_correlation`'s legacy per-symbol output shape
+(`symbol, cluster_id, correlation_avg, n_cluster_members,
+computed_date`) directly from `gold_cross_asset_correlation`'s pairwise
+`cross_asset_corr.parquet`, and `gold_cross_asset_correlation`'s own
+`run()` now writes it to the exact same path gold_correlation used to.
+Rejected alternative: rewrite both consumers against the pairwise
+schema directly — same end computation, but touches two files instead
+of zero and changes the Interface Contract's promised shape for a
+system this project cannot verify the blast radius on.
+
+**Fix:** `gold_correlation` fully deregistered (`JOB_REGISTRY`,
+`WEEKLY_SEQUENCE`, and the dangling reference in the dormant
+`pipeline_scheduler.py` APScheduler path — would have `KeyError`'d on
+activation, same bug class ADR-043 fixed for `bronze_finnhub`).
+`correlation_matrix.py` and its narrow glob-scope test archived to
+`archive/gold_correlation_retirement_2026_09/` (local filesystem only,
+untracked — ADR-043's precedent, not `scripts/archive/`'s — see RISK-11
+above for why a git-tracked archive directory was abandoned). Full
+detail, file list, and test accounting in `CHANGELOG.md` v1.18.6.
+`tests/COUNT_BASELINE.txt`: 1727 → 1733. Full suite: 1733 passed / 0
+failed / 0 error.
+
+Flagged, not fixed: none of Cycle 4's four CrossAssetEngine jobs were
+ever added to `pipeline_scheduler.py`'s dormant cron table in the first
+place — a materially bigger, separate gap than the one dangling
+reference this fix removed, noted in that file's own docstring rather
+than silently left inconsistent.
+
 ---
 
 ## RISK-32 (NEW): SIL-MACRO-DEDUP-01 remediation reset the macro Silver PIT revision chain — ACCEPTED (documented gap, not further fixable)

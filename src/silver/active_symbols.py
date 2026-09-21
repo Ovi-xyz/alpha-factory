@@ -59,7 +59,7 @@ Output:
   Layer 2 output (data/silver/context_anchors/context_anchors_{date}.parquet)
   moved to src/silver/context_anchors.py — see that module, not this one.
 
-Dikonsumsi oleh: gold_signals, silver_sentiment, gold_correlation,
+Dikonsumsi oleh: gold_signals, silver_sentiment, gold_cross_asset_correlation,
                  signal_aggregation, gold_global_regime
 """
 

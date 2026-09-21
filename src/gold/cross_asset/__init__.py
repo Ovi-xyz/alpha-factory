@@ -12,8 +12,11 @@ All four modules named in Architecture v2.0 §6.1 are implemented here:
 None of the four are wired into gold_screener's ranking/filtering logic —
 their outputs are surfaced there as purely informational columns (see
 src/gold/screener.py's own "ADD GMI Wave 1 Cycle 4" docstring section).
-See CHANGELOG.md v1.18.0 and KNOWN_RISKS.md RISK-31 for full status,
-including what was deliberately left out of this pass (FRED/BIS rate
-series in ForecastModule's PCA input, retirement of the pre-Cycle-4
-gold_correlation job, live validation against real Silver data).
+See CHANGELOG.md v1.18.0 and KNOWN_RISKS.md RISK-31 for full status.
+Live validation against real Silver data and the pre-Cycle-4
+gold_correlation retirement (both originally left open by this pass) are
+now resolved — see correlation_module.py and legacy_correlation_bridge.py
+for the retirement, and RISK-31's dated updates for the live-run history.
+FRED/BIS rate series remaining out of ForecastModule's PCA input is still
+open.
 """
