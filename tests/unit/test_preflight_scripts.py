@@ -183,14 +183,33 @@ class TestCheckBisEerWeights:
         """Ovi (this thread): HKD/TWD/NOK were explicitly flagged as a
         known gap on 28 Jul ("Ovi's instruction was specifically
         MXN->IDR") rather than guessed at, then explicitly requested this
-        thread. Locks in all 13 currencies of the *current*
+        thread. Locks in the 13 non-NZD currencies of the *original*
         context_dollar_basket design (instruments_taxonomy.yaml) so the
-        gap can't silently reopen."""
+        gap can't silently reopen -- NZD added separately by ADR-049, see
+        test_nzd_extends_broad_dollar_basket_adr049 below."""
         import check_bis_eer_weights as mod
         assert mod.BROAD_DOLLAR_REF_AREAS["HKD"] == "HK"
         assert mod.BROAD_DOLLAR_REF_AREAS["TWD"] == "TW"
         assert mod.BROAD_DOLLAR_REF_AREAS["NOK"] == "NO"
-        assert len(mod.BROAD_DOLLAR_REF_AREAS) == 13
+        # UPD ADR-049 (22 Sep 2026): 13 -> 14, NZD added -- see the
+        # dedicated test below rather than folding it into this one.
+        assert len(mod.BROAD_DOLLAR_REF_AREAS) == 14
+
+    def test_nzd_extends_broad_dollar_basket_adr049(self):
+        """ADR-049 (chat thread, 5 Sep 2026): the Layer-1-reuse currency
+        set (EUR/JPY/GBP/CAD/CHF/AUD, reused directly from Layer 1 forex
+        rather than duplicated into context.dollar_basket) extends to 7
+        with NZD_USD -- see instruments_taxonomy.yaml's own ADR-049
+        comment above context.dollar. This dict was never updated to
+        match at the time ADR-049 was decided: Ovi's report that
+        --extract-weights left NZD unextracted traced directly to NZD
+        never being a target currency here at all, not to a genuine
+        MISSING-in-the-US-row result. Locks in the fix so the gap can't
+        silently reopen -- REF_AREA "NZ" matches RBNZ's existing BIS
+        mapping in context.rates.dm_cb.ref_area_codes."""
+        import check_bis_eer_weights as mod
+        assert mod.BROAD_DOLLAR_REF_AREAS["NZD"] == "NZ"
+        assert len(mod.BROAD_DOLLAR_REF_AREAS) == 14
 
     def test_endpoint_uses_correct_dataflow_id(self):
         """Regression guard for the dataflow-ID root-cause fix (FIX BIS-1,
@@ -362,9 +381,10 @@ class TestCheckBisEerWeights:
         return buf.getvalue()
 
     def test_extract_us_weights_from_sheet_happy_path(self):
-        """All 13 BROAD_DOLLAR_REF_AREAS currencies present as header
-        columns, US row present -- every value should be extracted
-        correctly, keyed by currency code (not REF_AREA code)."""
+        """All 14 BROAD_DOLLAR_REF_AREAS currencies (13 + NZD, ADR-049)
+        present as header columns, US row present -- every value should
+        be extracted correctly, keyed by currency code (not REF_AREA
+        code)."""
         import check_bis_eer_weights as mod
         from io import BytesIO
         from openpyxl import Workbook, load_workbook
@@ -403,8 +423,8 @@ class TestCheckBisEerWeights:
         wbr.close()
 
     def test_extract_us_weights_from_sheet_partial_when_currency_column_missing(self):
-        """Only 2 of the 13 target currencies appear as header columns in
-        this sheet -- the other 11 should come back None individually,
+        """Only 2 of the 14 target currencies appear as header columns in
+        this sheet -- the other 12 should come back None individually,
         not turn the whole extraction into a failure. Partial results are
         surfaced, not hidden (module docstring)."""
         import check_bis_eer_weights as mod

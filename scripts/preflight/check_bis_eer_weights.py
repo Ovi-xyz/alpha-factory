@@ -116,6 +116,24 @@ a SYNTHETIC in-memory workbook only -- no sandbox on this project has a
 route to bis.org, so this has not yet been run against the real
 weightsb.xlsx file. That is the next step on real hardware.
 
+UPD (ADR-049, chat thread 5 Sep 2026; this dict updated 22 Sep 2026):
+Ovi's ADR-049 decision extends the Layer-1-reuse currency set from 6 to
+7 (adds NZD_USD, reused directly from Layer 1 forex the same way
+AUD_USD already is -- see instruments_taxonomy.yaml's own ADR-049
+comment above the context.dollar block). This dict was never updated to
+match at the time -- confirmed the direct cause of Ovi running
+--extract-weights and finding NZD absent from the output: NZD was never
+one of the 13 target currencies here, so it was never looked up at all
+(not a "MISSING in the US row" result, which would imply a
+present-but-empty column). BROAD_DOLLAR_REF_AREAS now carries 14
+entries. Gate 1's actual NZD weight VALUE is still open, same as the
+original 13 were before 12 Sep 2026 -- re-running --extract-weights for
+real on the M1 (the only place with a route to bis.org) is the next
+step; once Ovi reports the output, gold/cross_asset/broad_dollar.py's
+_RAW_BIS_WEIGHTS_PCT/_CURRENCY_SYMBOL_MAP gain a 14th entry the same way
+the original 13 were wired in (KNOWN_RISKS.md RISK-16, "Gate 1 CLOSED,
+12 Sep 2026" subsection).
+
 TYPE decision (Ovi, this thread -- was previously left wildcarded,
 pending): NOMINAL, not Real. Two independent reasons converged: (1) DXY
 itself -- the index this platform's Broad Dollar Index is explicitly
@@ -230,6 +248,18 @@ BROAD_DOLLAR_REF_AREAS: dict[str, str] = {
     "CAD": "CA",
     "CHF": "CH",
     "AUD": "AU",
+    # NEW ADR-049 (chat thread, 5 Sep 2026 decision; added to this dict 22
+    # Sep 2026): New Zealand, reused directly from Layer 1 NZD_USD -- same
+    # Layer-1-reuse treatment AUD_USD already has above, per ADR-049's own
+    # text in config/instruments_taxonomy.yaml (comment above context.
+    # dollar). REF_AREA "NZ" matches RBNZ's existing BIS mapping in that
+    # same file's context.rates.dm_cb.ref_area_codes. This dict was never
+    # updated when ADR-049 was decided -- confirmed the direct cause of
+    # Ovi's report that --extract-weights left NZD unextracted: NZD was
+    # never a target currency here to begin with, not a genuine
+    # MISSING-in-the-US-row result (which would imply a present-but-empty
+    # column instead of no column at all).
+    "NZD": "NZ",
     "IDR": "ID",  # UPD: replaces MXN -- Indonesia, already covered via context_rates_em_cb (BI)
     "CNH": "CN",  # onshore CNY EER is BIS's only option; CNH itself isn't a BIS REF_AREA
     "KRW": "KR",
@@ -330,7 +360,7 @@ def extract_us_weights_from_sheet(
     tell the true header row apart from an ordinary data row (whose own
     column-2 country code can itself count as a single incidental hit).
     Not a real constraint in practice -- every actual caller passes the
-    full 13-currency BROAD_DOLLAR_REF_AREAS -- but relevant if this is
+    full 14-currency BROAD_DOLLAR_REF_AREAS (13 + NZD, ADR-049) -- but relevant if this is
     ever called with a single-currency filter.
     """
     if ref_areas is None:
@@ -511,7 +541,7 @@ def _extract_weights(sheet: str | None = None, us_ref_area: str = US_REF_AREA) -
     sheet (defaults to the most recent -- max(sheetnames), which resolves
     to '2020_2022' given the 4 Aug 2026 discovery run's confirmed sheet
     set and the "YYYY_YYYY" naming already sorting correctly by year),
-    and print each of the 13 BROAD_DOLLAR_REF_AREAS currencies' weight in
+    and print each of the BROAD_DOLLAR_REF_AREAS currencies' weight in
     the United States' own Broad EER basket -- the empirical replacement
     for Architecture v2.0 §7.2's hand-approximated 10-pair BIS_WEIGHTS
     dict.
@@ -574,7 +604,7 @@ def _extract_weights(sheet: str | None = None, us_ref_area: str = US_REF_AREA) -
         return 1
 
     total = sum(v for v in weights.values() if v is not None)
-    print(f"\nSum of these 13 target-currency weights: {total:.6f}")
+    print(f"\nSum of these {len(BROAD_DOLLAR_REF_AREAS)} target-currency weights: {total:.6f}")
     print("(Out of the US row's full basket, which spans ~64 economies -- this sum")
     print("being well under 100 is expected, not a sign of a parsing error.)")
     print(f"\nAll {len(BROAD_DOLLAR_REF_AREAS)} target-currency weights extracted successfully.")
@@ -596,8 +626,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--extract-weights", action="store_true",
-        help="Download weightsb.xlsx and extract the 13 target currencies' weights "
-             "in the US Broad EER basket (Gate 1 -- targeted extraction)",
+        help=f"Download weightsb.xlsx and extract the {len(BROAD_DOLLAR_REF_AREAS)} target "
+             f"currencies' weights in the US Broad EER basket (Gate 1 -- targeted extraction)",
     )
     parser.add_argument(
         "--sheet", default=None,

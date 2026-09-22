@@ -1,5 +1,140 @@
 # CHANGELOG — Data Platform
 
+## v1.18.8 — Gate 1 CLOSED: bobot NZD nyata diekstrak dan di-wire ke broad_dollar.py (September 2026)
+
+Menutup ADR-049 (chat thread, 5 Sep 2026) untuk mata uang ke-14 Broad
+Dollar basket. Ovi menjalankan ulang `--extract-weights` dengan script
+yang sudah diperbaiki (patch v1.18.7, sesi yang sama) dan melaporkan
+bobot NZD yang sesungguhnya: **0.069725%** di US Broad EER basket
+(vintage `2020_2022`, REF_AREA `NZ`). Seluruh 13 mata uang yang sudah ada
+dikonfirmasi identik digit demi digit dengan ekstraksi 12 Sep 2026 asli
+(sheet vintage statis yang sama) — hanya NZD yang baru. Baris ringkasan
+yang dicetak sendiri oleh script membaca "14" (bukan literal "13" yang
+usang), mengkonfirmasi secara empiris bahwa dua fix hardcode-"13" di
+patch sebelumnya berperilaku benar pada run nyata, bukan cuma di test
+sandbox terisolasi.
+
+**Fix:** `gold/cross_asset/broad_dollar.py` —
+`_RAW_BIS_WEIGHTS_PCT["NZD"] = 0.069725`;
+`_CURRENCY_SYMBOL_MAP["NZD"] = ("NZD_USD", True)` (NZD_USD quote USD
+sebagai quote currency, sama seperti AUD_USD/EUR_USD/GBP_USD, sehingga
+dinegasikan sebelum weighting — dikonfirmasi terhadap Layer 1 forex block
+milik `instruments_taxonomy.yaml`, bukan diasumsikan). Renormalisasi
+`BIS_WEIGHTS` sepenuhnya otomatis (menurunkan ulang `_RAW_WEIGHT_SUM`
+dari kunci apa pun yang dimiliki `_RAW_BIS_WEIGHTS_PCT`), sehingga tidak
+ada baris lain di modul itu yang perlu diubah. `GATE_1_EXTRACTION_DATE`
+dipindah dari `"2026-09-12"` ke `"2026-09-22"`, karena run ini sekarang
+adalah sumber 14-mata-uang yang lengkap; `BIS_WEIGHTS_VINTAGE` tidak
+berubah (`"2020_2022"`, sheet yang sama di kedua run). Docstring modul
+mendapat paragraf "RESOLVED" baru (akretif, bersanding dengan paragraf
+"PENDING" sebelumnya, bukan menggantikannya) berisi output ekstraksi
+lengkap verbatim. Komentar ADR-049 milik `config/instruments_taxonomy.yaml`
+dan `KNOWN_RISKS.md` RISK-16 turut diperbarui dengan catatan penutupan
+yang selaras.
+
+**Test file baru:** `tests/unit/test_broad_dollar.py` (12 test) — modul
+ini sebelumnya tidak punya unit test sendiri sama sekali, hanya coverage
+tidak langsung lewat `test_forecast_module.py`/`test_correlation_module.py`.
+Mengunci: jumlah 14 mata uang, bobot NZD yang persis sama dengan hasil
+ekstraksi nyata, seluruh 13 nilai lama tidak berubah, split
+negated/non-negated 4/10, invariant renormalisasi magnitude-1.0, set
+kunci 14-simbol lengkap, dan `GATE_1_EXTRACTION_DATE` yang sudah
+diperbarui.
+
+**Koreksi tambahan sesi ini:** beberapa label tanggal "21 Sep 2026" dari
+patch v1.18.7 (sesi yang sama) ternyata salah — seluruh thread ini (fix
+script maupun penutupan ini) terjadi pada 22 Sep 2026, dikonfirmasi lewat
+tanggal sistem dan lewat nama file output ekstraksi yang diberikan Ovi
+sendiri. Diperbaiki di `check_bis_eer_weights.py`,
+`test_preflight_scripts.py`, `broad_dollar.py`,
+`config/instruments_taxonomy.yaml`, `KNOWN_RISKS.md`, dan `pyproject.toml`
+— murni teks komentar/docstring, nol perubahan fungsional dari koreksi
+tanggal itu sendiri.
+
+PATCH bump: menutup celah yang sudah ada dengan nilai numerik nyata,
+tanpa perubahan Interface Contract atau skema Silver/Gold.
+`tests/COUNT_BASELINE.txt`: 1734 → 1746 (+12, test file baru).
+Diverifikasi di sandbox terisolasi yang sama dengan patch sebelumnya
+(clone GitHub, dikonfirmasi byte-identical dengan live sebelum diedit):
+full suite passed dengan 2 failure pre-existing yang sama-sama murni
+environment (binary `poetry` tidak ada di sandbox ini) baik sebelum
+maupun sesudah, 0 regresi. Setiap file yang disentuh di-mirror ke repo
+live via Filesystem MCP connector dan byte-verified segera setelah
+setiap penulisan — termasuk menangkap dan memperbaiki ulang satu
+penulisan (`KNOWN_RISKS.md`) yang diam-diam gagal landing pada percobaan
+pertamanya di patch sebelumnya, baru terverifikasi di akhir patch itu,
+bukan segera; proses diperbaiki pada patch ini.
+
+---
+
+## v1.18.7 — FIX ADR-049: NZD ditambahkan ke Broad Dollar basket, celah check_bis_eer_weights.py ditutup (September 2026)
+
+Melanjutkan ADR-049 (chat thread, 5 Sep 2026): set mata uang
+Layer-1-reuse untuk Broad Dollar basket (EUR/JPY/GBP/CAD/CHF/AUD, dipakai
+langsung dari Layer 1 forex, bukan diduplikasi ke `context.dollar_basket`)
+diputuskan diperluas menjadi 7 dengan NZD_USD, dengan perlakuan yang sama
+persis seperti AUD_USD — lihat komentar ADR-049 milik
+`config/instruments_taxonomy.yaml` di atas `context.dollar`. Keputusan itu
+mendahului penutupan Gate 1 pada 12 Sep 2026 (`KNOWN_RISKS.md` RISK-16,
+"Gate 1 CLOSED") satu minggu lebih awal, tetapi dict
+`BROAD_DOLLAR_REF_AREAS` milik `check_bis_eer_weights.py` tidak pernah
+diperbarui untuk memasukkan NZD saat ADR-049 diputuskan, dan run ekstraksi
+12 Sep hanya mencakup 13 mata uang awal.
+
+Ovi menjalankan `--extract-weights` lagi pada thread ini untuk menutup
+celah tersebut dan melaporkan NZD tidak muncul di output. Penyebab
+konkret dikonfirmasi secara empiris, bukan diasumsikan: NZD memang belum
+pernah menjadi salah satu dari 13 mata uang target di
+`BROAD_DOLLAR_REF_AREAS`, sehingga `extract_us_weights_from_sheet()` sama
+sekali tidak pernah mencari kolomnya — berbeda dari hasil "MISSING" milik
+fungsi tersebut (mata uang target yang kolomnya ada tapi tidak ditemukan,
+atau sel baris US-nya kosong), yang memang sudah ditangani dan dilaporkan
+secara eksplisit.
+
+**Fix:** `"NZD": "NZ"` ditambahkan ke `BROAD_DOLLAR_REF_AREAS` (REF_AREA
+`NZ` sama dengan mapping RBNZ yang sudah ada di file yang sama, pada
+`context.rates.dm_cb.ref_area_codes`) — dict ini sekarang berisi 14 entri.
+Dua titik hardcode "13" lain di output script yang sama (baris ringkasan
+`--extract-weights` dan help text argparse-nya) turut diperbaiki agar
+menurunkan angkanya dari `len(BROAD_DOLLAR_REF_AREAS)` secara dinamis,
+bukan literal — kelas drift yang sama persis dengan yang sudah dicegah
+FIX BIS-1 untuk `BIS_EER_ENDPOINT`. `gold/cross_asset/broad_dollar.py`
+mendapat catatan "PENDING" (docstring saja, tanpa perubahan perilaku)
+yang merujuk balik ke `KNOWN_RISKS.md` RISK-16 — `_RAW_BIS_WEIGHTS_PCT`/
+`_CURRENCY_SYMBOL_MAP`/`BIS_WEIGHTS` di modul itu masih mencakup 13 mata
+uang awal saja; tidak ada nilai numerik yang ditebak atau diinterpolasi
+untuk NZD. Komentar ADR-049 milik `config/instruments_taxonomy.yaml`
+mendapat catatan UPD akretif yang merekonsiliasi fakta bahwa
+`compute_broad_dollar()` sebenarnya sudah dibangun di Cycle 4
+(13 Sep 2026) — bertentangan dengan baris "remains unbuilt" pada komentar
+aslinya.
+
+**Belum diselesaikan oleh fix ini:** nilai bobot NZD yang sesungguhnya di
+Gate 1 — status masih sama terbukanya seperti 13 mata uang awal sebelum
+12 Sep 2026. Menjalankan ulang `--extract-weights` secara nyata di M1
+(satu-satunya mesin dengan akses jaringan ke bis.org) adalah langkah
+berikutnya; begitu Ovi melaporkan hasilnya,
+`broad_dollar.py`'s `_RAW_BIS_WEIGHTS_PCT` akan mendapat entri ke-14 dan
+`_CURRENCY_SYMBOL_MAP["NZD"] = ("NZD_USD", True)` (NZD_USD adalah pair
+dengan USD sebagai quote, sama seperti AUD_USD/EUR_USD/GBP_USD) —
+renormalisasi `BIS_WEIGHTS` otomatis dari sana, tidak ada baris lain di
+modul itu yang perlu diubah.
+
+Test baru:
+`tests/unit/test_preflight_scripts.py::TestCheckBisEerWeights::test_nzd_extends_broad_dollar_basket_adr049`.
+Assersi panjang milik `test_hkd_twd_nok_completes_dollar_basket` diperbarui
+di tempat dari 13 ke 14 (assersi khusus HKD/TWD/NOK-nya tidak terpengaruh).
+PATCH bump: penutupan celah pada script/modul yang sudah ada, tanpa
+perubahan Interface Contract atau skema Silver/Gold. `tests/COUNT_BASELINE.txt`:
+1733 → 1734. Diverifikasi di sandbox terisolasi (clone GitHub, dikonfirmasi
+byte-identical dengan live sebelum diedit) sebelum di-mirror ke repo live
+via Filesystem MCP connector, byte-verified file demi file setelah setiap
+penulisan — 1732 passed, 2 failure pre-existing yang murni environment
+(binary `poetry` tidak ada di sandbox ini, tidak terkait fix ini, juga ada
+di baseline), 0 regresi.
+
+---
+
 ## v1.18.6 — FIX GMI-CORR-RETIRE-01: Retirement gold_correlation, Resolusi RISK-31 (September 2026)
 
 Keputusan retirement `gold_correlation` (job pre-Cycle-4,

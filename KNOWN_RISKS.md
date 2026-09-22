@@ -1595,6 +1595,132 @@ end-to-end against a real BIS response — only the preflight scripts'
 lighter-weight parsing has been confirmed live; the two are different
 code paths.
 
+### Gate 1 — 14th currency (NZD) gap found and the extraction script fixed, value obtained same session (22 Sep 2026)
+
+Continuing ADR-049 (chat thread, 5 Sep 2026): the Layer-1-reuse currency
+set for the Broad Dollar basket (EUR/JPY/GBP/CAD/CHF/AUD, reused
+directly from Layer 1 forex rather than duplicated into
+`context.dollar_basket`) was decided to extend to 7 with NZD_USD, on the
+same terms as AUD_USD's existing treatment — see
+`config/instruments_taxonomy.yaml`'s own ADR-049 comment above
+`context.dollar`. That decision predates the 12 Sep 2026 Gate 1 closure
+above by a week, but `check_bis_eer_weights.py`'s
+`BROAD_DOLLAR_REF_AREAS` dict was never updated to include NZD when
+ADR-049 was decided, and the 12 Sep extraction run covered only the
+original 13 currencies.
+
+Ovi ran `--extract-weights` again this thread to close that gap and
+reported NZD absent from the output. Confirmed the concrete cause
+empirically, not assumed: NZD was never one of the 13 target currencies
+in `BROAD_DOLLAR_REF_AREAS` at all, so `extract_us_weights_from_sheet()`
+never looked for its column in the first place — a different, simpler
+failure than the function's own "MISSING" result (a target currency
+whose column exists but wasn't found, or whose US-row cell was empty),
+which the function already handles and reports explicitly. NZD was
+never in that surfaced-missing set either, since it was never a target
+key to report on.
+
+**Fix:** `"NZD": "NZ"` added to `BROAD_DOLLAR_REF_AREAS` (REF_AREA `NZ`
+matches RBNZ's existing mapping in this same file's
+`context.rates.dm_cb.ref_area_codes`) — the dict now carries 14 entries.
+`BIS_EER_ENDPOINT`'s key is built from `BROAD_DOLLAR_REF_AREAS.values()`
+(FIX BIS-1's own drift-proofing, above), so NZ is picked up there
+automatically, no separate key edit needed. `gold/cross_asset/
+broad_dollar.py` gained a docstring-only "PENDING" note cross-referencing
+this entry — its `_RAW_BIS_WEIGHTS_PCT`/`_CURRENCY_SYMBOL_MAP`/
+`BIS_WEIGHTS` still cover only the original 13 currencies; no numeric
+value was guessed or interpolated for NZD.
+
+### What this does NOT resolve (NZD)
+
+Gate 1's actual NZD weight value — same open status the original 13 had
+before 12 Sep 2026. Re-running `--extract-weights` for real on the M1
+(the only place with a route to bis.org) is the next step; once Ovi
+reports the output, `broad_dollar.py`'s `_RAW_BIS_WEIGHTS_PCT` gains a
+14th entry and `_CURRENCY_SYMBOL_MAP["NZD"] = ("NZD_USD", True)`
+(NZD_USD is a USD-is-quote pair, same convention as AUD_USD/EUR_USD/
+GBP_USD) — `BIS_WEIGHTS`'s renormalization is automatic from there, no
+other line in that module needs to change.
+
+### Verification (NZD)
+
+`tests/unit/test_preflight_scripts.py::TestCheckBisEerWeights::
+test_nzd_extends_broad_dollar_basket_adr049` (new) locks in
+`BROAD_DOLLAR_REF_AREAS["NZD"] == "NZ"` and the 14-entry total.
+`test_hkd_twd_nok_completes_dollar_basket`'s own length assertion
+updated 13 → 14 in place (its HKD/TWD/NOK-specific assertions are
+unaffected). Full suite re-run clean in an isolated sandbox (GitHub
+clone, confirmed byte-identical to live before editing) before
+mirroring to the live repo via the Filesystem MCP connector — same
+pre-existing 2 environment-only failures both before and after
+(`poetry` binary absent from this sandbox, unrelated to this fix), 0
+regressions.
+
+### Gate 1 CLOSED (22 Sep 2026) — NZD's real weight extracted, wired into `broad_dollar.py`
+
+Ovi ran `--extract-weights` again with the fixed script, same session.
+Output (`2020_2022` vintage — unchanged):
+
+```
+Currency  REF_AREA  Weight in US Broad EER basket (%)
+  AUD       AU        0.326985
+  CAD       CA        8.054349
+  CHF       CH        2.885704
+  CNH       CN       22.579565
+  EUR       XM       16.048545
+  GBP       GB        2.939921
+  HKD       HK        0.026992
+  IDR       ID        0.929609
+  JPY       JP        5.897981
+  KRW       KR        4.183282
+  NOK       NO        0.168854
+  NZD       NZ        0.069725
+  SGD       SG        1.341145
+  TWD       TW        3.216667
+Sum: 68.669322
+```
+
+All 13 pre-existing values confirmed digit-for-digit identical to the
+12 Sep 2026 run (same static vintage sheet) — only NZD is new. The
+printed line itself read "Sum of these **14** target-currency weights"
+rather than a stale literal "13", and the total equals the prior
+68.599597 plus exactly NZD's 0.069725 — both are empirical confirmation
+that this session's two hardcoded-"13" fixes to the script's own output
+(the summary line, the `--extract-weights` help text) are correct in a
+real run, not just in the isolated sandbox test.
+
+Wired into `gold/cross_asset/broad_dollar.py` the same way the original
+13 were on 12 Sep: `_RAW_BIS_WEIGHTS_PCT["NZD"] = 0.069725`;
+`_CURRENCY_SYMBOL_MAP["NZD"] = ("NZD_USD", True)` (NZD_USD quotes USD as
+the quote currency — same convention as AUD_USD/EUR_USD/GBP_USD, so
+negated before weighting, confirmed against
+`instruments_taxonomy.yaml`'s own Layer 1 forex block, not assumed);
+`BIS_WEIGHTS`'s renormalization is fully automatic (re-derives
+`_RAW_WEIGHT_SUM` from whatever keys `_RAW_BIS_WEIGHTS_PCT` holds), so
+no other line in that module needed to change. `GATE_1_EXTRACTION_DATE`
+moved from `"2026-09-12"` to `"2026-09-22"`, since the latter is now the
+complete 14-currency source; `BIS_WEIGHTS_VINTAGE` unchanged
+(`"2020_2022"`, same sheet both times).
+
+**New dedicated test file** — `tests/unit/test_broad_dollar.py` (12
+tests) — this module had no unit tests of its own before this session,
+only indirect coverage via `test_forecast_module.py`/
+`test_correlation_module.py`. Locks in: the 14-currency count, NZD's raw
+weight matching the live extraction exactly, all 13 pre-existing values
+unchanged, NZD's negated sign, the 4/10 negated/non-negated split,
+`BIS_WEIGHTS`'s magnitude-1.0 renormalization invariant, the full
+14-symbol key set, and the updated `GATE_1_EXTRACTION_DATE`.
+
+**Verified:** full suite in the isolated sandbox, same 2 pre-existing
+environment-only failures, 0 regressions, +12 new tests.
+`tests/COUNT_BASELINE.txt`: 1734 → 1746. Every touched file
+byte-verified against live via the Filesystem MCP connector
+(`copy_file_user_to_claude` + `diff`) immediately after each write.
+
+CrossAssetEngine's other three modules (GlobalIndexRegimeModule,
+CorrelationModule, LeadLagModule — RISK-31) are unaffected; this closure
+is scoped entirely to `broad_dollar.py` and its own extraction script.
+
 ### Verification
 
 7 regression-guard tests locking in the corrected dataflow IDs/key

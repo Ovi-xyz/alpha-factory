@@ -1,6 +1,121 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.18.6"
+version = "1.18.8"
+# FIX (chat thread, 22 Sep 2026): Gate 1 CLOSED for the 14th Broad Dollar
+# currency -- ADR-049's NZD_USD addition (5 Sep 2026 decision) is now
+# fully wired. Ovi re-ran scripts/preflight/check_bis_eer_weights.py
+# --extract-weights with the fixed script (previous patch, same session)
+# and reported NZD's real weight: 0.069725% in the US Broad EER basket
+# (2020_2022 vintage, REF_AREA NZ). All 13 pre-existing currencies
+# confirmed digit-for-digit unchanged against the original 12 Sep 2026
+# extraction; the printed summary line itself read "14" rather than a
+# stale "13", empirically confirming the previous patch's dynamic-count
+# fix behaves correctly against a real run, not just the sandbox test.
+#
+# gold/cross_asset/broad_dollar.py: _RAW_BIS_WEIGHTS_PCT["NZD"] = 0.069725;
+# _CURRENCY_SYMBOL_MAP["NZD"] = ("NZD_USD", True) (NZD_USD quotes USD as
+# the quote currency, same convention as AUD_USD/EUR_USD/GBP_USD, so
+# negated before weighting -- confirmed against instruments_taxonomy.yaml's
+# Layer 1 forex block, not assumed). BIS_WEIGHTS's renormalization is
+# fully automatic (re-derives _RAW_WEIGHT_SUM from whatever keys
+# _RAW_BIS_WEIGHTS_PCT holds), so no other line in that module needed to
+# change. GATE_1_EXTRACTION_DATE moved "2026-09-12" -> "2026-09-22" (now
+# the complete 14-currency source); BIS_WEIGHTS_VINTAGE unchanged
+# ("2020_2022", same sheet both times). Module docstring gained a
+# "RESOLVED" paragraph (accretive, alongside the prior "PENDING"
+# paragraph rather than replacing it) with the full verbatim extraction
+# output. config/instruments_taxonomy.yaml's ADR-049 comment and
+# KNOWN_RISKS.md RISK-16 both updated with matching closure notes.
+#
+# New test file: tests/unit/test_broad_dollar.py (12 tests) -- this
+# module had no dedicated unit tests before this session, only indirect
+# coverage via test_forecast_module.py/test_correlation_module.py. Locks
+# in the 14-currency count, NZD's exact weight, all 13 pre-existing
+# values unchanged, the negated/non-negated 4/10 split, the
+# magnitude-1.0 renormalization invariant, the full 14-symbol key set,
+# and the updated GATE_1_EXTRACTION_DATE.
+#
+# Also corrected this same session: several "21 Sep 2026" date labels
+# from the immediately-prior patch were wrong -- this whole thread (the
+# script fix AND this closure) happened on 22 Sep 2026, confirmed via
+# system date and via the extraction output's own date-stamped filename
+# Ovi supplied. Fixed across check_bis_eer_weights.py,
+# test_preflight_scripts.py, broad_dollar.py, instruments_taxonomy.yaml,
+# and KNOWN_RISKS.md -- comment/docstring text only, zero functional
+# change from the date correction itself.
+#
+# PATCH bump: closes an existing gap with a real numeric value, no
+# Interface Contract or Silver/Gold schema change. tests/COUNT_BASELINE.txt:
+# 1734 -> 1746 (+12, the new test file). Verified in the same isolated
+# sandbox as the immediately-prior patch (GitHub clone, confirmed byte-
+# identical to live before editing): full suite passed with the same 2
+# pre-existing environment-only failures (poetry binary absent from this
+# sandbox) both before and after, 0 regressions. Every touched file
+# mirrored to the live repo via the Filesystem MCP connector and
+# byte-verified immediately after each write -- including catching and
+# re-fixing one write (KNOWN_RISKS.md) that silently failed to land on
+# its first attempt, verified only at the end of that patch instead of
+# immediately; corrected process this time.
+# FIX (chat thread, 22 Sep 2026): ADR-049 (5 Sep 2026 decision) extends
+# the Broad Dollar basket's Layer-1-reuse currency set from 6 to 7,
+# adding NZD_USD the same way AUD_USD is already reused directly from
+# Layer 1 forex rather than duplicated into context.dollar_basket -- see
+# config/instruments_taxonomy.yaml's own ADR-049 comment above
+# context.dollar. That decision predates the 12 Sep 2026 Gate 1 closure
+# (KNOWN_RISKS.md RISK-16, "Gate 1 CLOSED") by a week, but
+# scripts/preflight/check_bis_eer_weights.py's BROAD_DOLLAR_REF_AREAS
+# dict was never updated to include NZD when ADR-049 was decided, and
+# the 12 Sep extraction run covered only the original 13 currencies.
+# Ovi ran --extract-weights again this thread to close that gap and
+# reported NZD absent from the output. Confirmed the concrete cause
+# empirically, not assumed: NZD was never one of the 13 target
+# currencies in BROAD_DOLLAR_REF_AREAS at all, so
+# extract_us_weights_from_sheet() never looked for its column in the
+# first place -- a different, simpler failure than the function's own
+# "MISSING" result (a target currency whose column exists but wasn't
+# found, or whose US-row cell was empty), which the function already
+# handles and reports explicitly.
+#
+# Fix: "NZD": "NZ" added to BROAD_DOLLAR_REF_AREAS (REF_AREA "NZ"
+# matches RBNZ's existing mapping in this same file's
+# context.rates.dm_cb.ref_area_codes) -- the dict now carries 14
+# entries. Two hardcoded-"13" spots in the same script's own output
+# (the --extract-weights summary line and the --extract-weights
+# argparse help text) were also fixed to derive from
+# len(BROAD_DOLLAR_REF_AREAS) dynamically rather than a literal, so this
+# exact class of drift can't recur a third time (BIS_EER_ENDPOINT's key
+# was already drift-proofed this way by FIX BIS-1). gold/cross_asset/
+# broad_dollar.py gained a docstring-only "PENDING" note cross-
+# referencing KNOWN_RISKS.md RISK-16 -- its _RAW_BIS_WEIGHTS_PCT/
+# _CURRENCY_SYMBOL_MAP/BIS_WEIGHTS still cover only the original 13
+# currencies; no numeric value was guessed or interpolated for NZD.
+# config/instruments_taxonomy.yaml's own ADR-049 comment gained an
+# accretive UPD note reconciling it with the fact that
+# compute_broad_dollar() was actually built in Cycle 4 (13 Sep 2026),
+# contradicting that comment's original "remains unbuilt" line.
+#
+# NOT resolved by this fix: Gate 1's actual NZD weight value -- same
+# open status the original 13 had before 12 Sep 2026. Re-running
+# --extract-weights for real on the M1 (the only place with a route to
+# bis.org) is the next step; once Ovi reports the output,
+# broad_dollar.py's _RAW_BIS_WEIGHTS_PCT gains a 14th entry and
+# _CURRENCY_SYMBOL_MAP["NZD"] = ("NZD_USD", True) (NZD_USD is a
+# USD-is-quote pair, same convention as AUD_USD/EUR_USD/GBP_USD) --
+# BIS_WEIGHTS's renormalization is automatic from there, no other line
+# in that module needs to change.
+#
+# New test: tests/unit/test_preflight_scripts.py::TestCheckBisEerWeights::
+# test_nzd_extends_broad_dollar_basket_adr049. test_hkd_twd_nok_completes_
+# dollar_basket's own length assertion updated 13 -> 14 in place (its
+# HKD/TWD/NOK-specific assertions are unaffected). PATCH bump: gap-
+# closure work on an existing script/module, no Interface Contract or
+# Silver/Gold schema change. tests/COUNT_BASELINE.txt: 1733 -> 1734.
+# Verified in an isolated sandbox (GitHub clone, confirmed byte-
+# identical to live before editing): 1732 passed, 2 pre-existing
+# environment-only failures (poetry binary absent from this sandbox,
+# unrelated to this fix, present in baseline too), 0 regressions --
+# mirrored to the live repo via the Filesystem MCP connector and
+# byte-verified identical, file by file, after each write.
 # FIX GMI-FORECAST-DIM-03 (chat thread, 20 Sep 2026): gold_forecast (post
 # DIM-02, v1.18.4) completed successfully but with `RuntimeWarning: Mean
 # of empty slice` at stderr, from _aggregate_by_subcategory(). Root cause

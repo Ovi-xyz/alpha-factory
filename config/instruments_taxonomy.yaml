@@ -695,6 +695,22 @@ context:
   # this is a scoping decision for that future implementation, not a code
   # change today. NZD_USD's numeric basket weight is a Gate 1 concern,
   # same as the existing 6/7 legs.
+  # UPD (chat thread, 22 Sep 2026): compute_broad_dollar() was in fact
+  # built during CrossAssetEngine Cycle 4 (13 Sep 2026, v1.18.0) -- the
+  # "remains unbuilt" line above is now stale w.r.t. the function's
+  # existence, though still accurate about NZD_USD specifically: the real
+  # Gate 1 extraction Ovi ran 12 Sep 2026 (KNOWN_RISKS.md RISK-16, "Gate 1
+  # CLOSED") predates this ADR-049 note by a week and covered only the
+  # original 13 currencies, so gold/cross_asset/broad_dollar.py's
+  # BIS_WEIGHTS did not yet include NZD. scripts/preflight/
+  # check_bis_eer_weights.py's BROAD_DOLLAR_REF_AREAS dict was ALSO never
+  # updated for this ADR-049 decision -- confirmed the concrete cause of
+  # Ovi's report that --extract-weights left NZD unextracted (NZD was
+  # never a target currency there, not a genuine MISSING-in-the-US-row
+  # result). Both gaps closed the same session (22 Sep 2026): script
+  # fixed, Ovi re-ran --extract-weights for real, NZD's weight (0.069725%)
+  # wired into broad_dollar.py -- see KNOWN_RISKS.md RISK-16 "Gate 1
+  # CLOSED (22 Sep 2026)" for full detail.
   dollar_basket:
     _meta:
       subcategory_id: context_dollar_basket
