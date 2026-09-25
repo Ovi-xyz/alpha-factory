@@ -3255,6 +3255,90 @@ to reconstruct it from the quarantined files.
 
 ---
 
+## RISK-33 (NEW): signal_aggregation (Architecture v2.0 §5.2.7) — built and unit-tested in sandbox, never run against live Silver data
+
+**Status:** 🟡 **OPEN (accepted, by design at this stage)** — 24 Sep
+2026. Same standing rule as RISK-31/RISK-16: a component "written and
+unit-tested, not live-confirmed" gets an entry before further work
+builds on top of it.
+
+**GD Reference:** Architecture v2.0 §5.2.7/§5.3 (signal_aggregation
+spec — names four indicator inputs, never a formula or weighting
+scheme), §6.6 (dependency-graph sketch — see "first-pass decisions"
+below for where this implementation deliberately departs from it).
+
+### What was built
+
+New module `src/gold/signal_aggregation.py` — per-symbol
+`composite_score` (RSI/MACD/ADX/relative_volume, each independently
+bounded to roughly [-1, 1], equal-weighted within a timeframe and
+equal-weighted again across the 5 `TIMEFRAMES`) and `composite_grade`
+(A/B/C/D bucket), plus per-sector `sector_breadth_pct` (% active_ohlcv
+symbols above EMA-50) and `sector_momentum` (~5-trading-day change,
+found by scanning this module's own prior daily outputs), plus
+`breadth_divergence` (`mtf_score/5 − composite_score`, a soft join —
+null, not 0.0, when `mtf_alignment` is unavailable). New job
+`signal_aggregation` in `DAILY_SEQUENCE` (positioned after `gold_mtf`,
+depends_on `gold_signals` + `silver_active_symbols` only).
+`gold_screener` integration: 5 new informational columns via a new
+`signal_agg_tbl` soft source — same has_X/try-except/`_empty_*_df()`/
+LEFT JOIN idiom RISK-31 already established for
+`global_regime_tbl`/`lead_lag_tbl`/`forecast_tbl`. Fulfils the TODO
+`gold_global_regime`'s own `job_registry.py` entry has carried since
+Cycle 4 ("that wiring belongs to a later signal_aggregation/screener-
+integration pass") and the reference already sitting in
+`active_symbols.py`'s own module docstring. 43 new tests (38
+module-level + 5 screener-integration), all against synthetic
+`tmp_path`-isolated fixtures — none against real production Silver/Gold
+data, same limitation as RISK-31's Cycle 4 batch.
+
+### Specific first-pass decisions that need production validation, not just unit tests
+
+- **composite_score's four component formulas and their weighting**
+  (equal-weighted within a TF, equal-weighted again across the 5
+  `TIMEFRAMES`) are this module's own first-pass design — Architecture
+  v2.0 §5.3 names RSI/MACD/ADX/relative_volume as inputs but never gives
+  a formula or a weighting scheme. No live data exists yet to check
+  whether the resulting distribution is well-behaved (not saturating
+  near ±1 for most symbols, or clustering near 0 for effectively all of
+  them).
+- **composite_grade thresholds** (A ≥ 0.60, B ≥ 0.35, C ≥ 0.15) are
+  likewise this module's own choice, uncalibrated against any real
+  `composite_score` distribution.
+- **Neither `signal_aggregation` nor `gold_global_regime` were added to
+  `gold_screener`'s `depends_on`** (job_registry.py) — a deliberate
+  departure from Architecture v2.0 §6.6's own dependency-graph sketch
+  (which lists both as screener prerequisites), extending the same
+  soft-dependency tradeoff RISK-31 already accepted for the three
+  CrossAssetEngine sources: the new columns can go silently stale with
+  no dedicated freshness check, in exchange for a stale/missing daily
+  run never blocking the watchlist for what Section 0.2/0.3 treats as
+  purely informational DATA fields. Full rationale in
+  `signal_aggregation.py`'s own module docstring and the updated
+  comment on `gold_global_regime`'s `job_registry.py` entry.
+- **`sector_momentum`'s lookback window** (target 7 calendar days /
+  ~5 trading days, searched within a [4, 10]-day window against this
+  module's own prior daily output files) is only tested against a
+  synthetic 6-day-offset fixture — untested against a real weekend- or
+  holiday-shaped gap in production.
+- **Sector labels are read from `sector_regime_weights.parquet`**
+  (`gold_sector`'s own published column, not recomputed), falling back
+  to `InstrumentLoader` directly only if that file is missing — reuses
+  an existing definition rather than introducing a second one, but has
+  not been checked against a live day where `gold_sector` legitimately
+  has no row yet (e.g. a `--force` run ahead of it).
+
+### Suggested next step
+
+Run `python runner.py --job signal_aggregation` for real once enough
+Silver/Gold history exists on the M1, and compare actual
+`composite_score`/`sector_breadth_pct` distributions against what the
+synthetic-fixture tests only checked for directional correctness and
+bounds — the same live-vs-synthetic gap RISK-31's "Update — 19 Sep
+2026" closed for `gold_forecast`.
+
+---
+
 *Last updated: v1.18.0 — GMI Wave 1 Cycle 4: CrossAssetEngine implemented
 in full (GlobalIndexRegimeModule, CorrelationModule, LeadLagModule,
 ForecastModule) plus gold_screener integration (12-13 Sep 2026). Gate 1

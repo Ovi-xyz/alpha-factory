@@ -110,6 +110,8 @@ def _patch_all_optional_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(scr_mod, "GLOBAL_REGIME_PATH", tmp_path / "cross_asset" / "global_regime.parquet")
     monkeypatch.setattr(scr_mod, "LEAD_LAG_PATH", tmp_path / "cross_asset" / "lead_lag_matrix.parquet")
     monkeypatch.setattr(scr_mod, "CROSS_ASSET_FORECAST_PATH", tmp_path / "cross_asset" / "cross_asset_forecast.parquet")
+    # ADD GMI-SIGAGG-001 — optional source, directory of per-date files.
+    monkeypatch.setattr(scr_mod, "SIGNAL_AGG_PATH", tmp_path / "signal_aggregation")
     return tmp_path / "mtf"
 
 
@@ -526,6 +528,96 @@ class TestCrossAssetEngineIntegration:
         assert msft["lead_lag_signal"] is False
         assert aapl["forecast_stable"] is True
         assert msft["forecast_stable"] is False
+
+
+class TestSignalAggregationIntegration:
+    """signal_agg_tbl — same graceful-degrade contract as the three
+    CrossAssetEngine sources above (ADD GMI-SIGAGG-001, see module
+    docstring). Per-symbol LEFT JOIN (not a broadcast-single-row LEFT
+    JOIN ... ON TRUE like regime_tbl/global_regime_tbl), same shape as
+    forecast_tbl."""
+
+    def test_absent_degrades_to_null_not_dropped(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        result = build_watchlist(run_date)
+        assert not result.is_empty()
+        row = result.row(0, named=True)
+        assert row["composite_score"] is None
+        assert row["composite_grade"] is None
+        assert row["sector_breadth_pct"] is None
+        assert row["sector_momentum"] is None
+        assert row["breadth_divergence"] is None
+
+    def test_present_populates_columns_per_symbol(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [
+            _mtf_row("AAPL", 7, "A"), _mtf_row("MSFT", -6, "A"),
+        ])
+        scr_mod.SIGNAL_AGG_PATH.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "symbol":              ["AAPL", "MSFT"],
+            "composite_score":     [0.62, -0.41],
+            "composite_grade":     ["A", "B"],
+            "sector_breadth_pct":  [80.0, 80.0],
+            "sector_momentum":     [5.0, 5.0],
+            "breadth_divergence":  [0.18, -0.19],
+        }).write_parquet(scr_mod.SIGNAL_AGG_PATH / f"signal_aggregation_{run_date.isoformat()}.parquet")
+
+        result = build_watchlist(run_date)
+        aapl = result.filter(pl.col("symbol") == "AAPL").row(0, named=True)
+        msft = result.filter(pl.col("symbol") == "MSFT").row(0, named=True)
+        assert aapl["composite_score"] == pytest.approx(0.62)
+        assert aapl["composite_grade"] == "A"
+        assert msft["composite_score"] == pytest.approx(-0.41)
+        assert msft["composite_grade"] == "B"
+        assert aapl["sector_breadth_pct"] == pytest.approx(80.0)
+
+    def test_symbol_not_in_signal_agg_output_degrades_to_null(self, tmp_path, monkeypatch):
+        """A watchlist candidate absent from signal_aggregation's own
+        output (e.g. not in the active_ohlcv universe that day) must not
+        be dropped from the watchlist — only its new columns go null."""
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.SIGNAL_AGG_PATH.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "symbol": ["MSFT"], "composite_score": [0.1], "composite_grade": ["D"],
+            "sector_breadth_pct": [50.0], "sector_momentum": [0.0], "breadth_divergence": [0.0],
+        }).write_parquet(scr_mod.SIGNAL_AGG_PATH / f"signal_aggregation_{run_date.isoformat()}.parquet")
+
+        result = build_watchlist(run_date)
+        assert result["symbol"].to_list() == ["AAPL"]
+        assert result.row(0, named=True)["composite_score"] is None
+
+    def test_wrong_date_file_absent_degrades_to_null(self, tmp_path, monkeypatch):
+        """Only signal_aggregation_{run_date}.parquet is read — a file for
+        a different date must not leak in."""
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.SIGNAL_AGG_PATH.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "symbol": ["AAPL"], "composite_score": [0.9], "composite_grade": ["A"],
+            "sector_breadth_pct": [90.0], "sector_momentum": [1.0], "breadth_divergence": [0.1],
+        }).write_parquet(scr_mod.SIGNAL_AGG_PATH / f"signal_aggregation_{date(2026, 5, 31).isoformat()}.parquet")
+
+        result = build_watchlist(run_date)
+        assert result.row(0, named=True)["composite_score"] is None
+
+    def test_corrupt_signal_agg_file_degrades_to_null(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.SIGNAL_AGG_PATH.mkdir(parents=True, exist_ok=True)
+        (scr_mod.SIGNAL_AGG_PATH / f"signal_aggregation_{run_date.isoformat()}.parquet").write_text(
+            "not a parquet file"
+        )
+        result = build_watchlist(run_date)
+        assert not result.is_empty()
+        assert result.row(0, named=True)["composite_score"] is None
 
 
 # ── FIX GLD-SCR-003 regression (correlation cluster dedup) ──────────────────

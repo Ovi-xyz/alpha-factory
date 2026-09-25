@@ -1,5 +1,109 @@
 # CHANGELOG — Data Platform
 
+## v1.19.0 — signal_aggregation (Architecture v2.0 §5.2.7): composite indicator score + sector breadth, integrasi gold_screener (September 2026)
+
+Implementasi `src/gold/signal_aggregation.py` — modul Gold layer baru
+yang menutup TODO yang sudah tersimpan sejak GMI Wave 1 Cycle 4 (v1.18.0):
+komentar `gold_global_regime` di `job_registry.py` secara eksplisit
+menyebut "that wiring belongs to a later signal_aggregation/screener-
+integration pass", dan docstring `active_symbols.py` sudah lebih dulu
+mendaftarkan `signal_aggregation` sebagai konsumen `ActiveSymbolsResolver`.
+Dikerjakan sandbox-first atas instruksi eksplisit Ovi ("continue with
+signal_aggregation", lalu "continue the project work" berulang tanpa
+rekap tambahan per sesi ini).
+
+**Formula (keputusan desain modul ini sendiri — Architecture v2.0 §5.3
+hanya menyebut empat input, tidak pernah memberi formula atau skema
+bobot):** per timeframe (bar terakhir saja, dari
+`tech_signals_{TF}.parquet`), empat komponen dibatasi ke kira-kira
+[-1, 1] dan null-safe: `rsi_component = clip((rsi_14-50)/50, -1, 1)`,
+`macd_component = tanh(macd_hist/atr_14)` (null jika atr_14<=0),
+`adx_component = min(adx/50,1) * sign(di_plus-di_minus)`,
+`volume_component = tanh(relative_volume-1.0)`. `tf_composite_{TF}` =
+rata-rata komponen yang non-null (skip null, bukan diperlakukan sebagai
+nol) via `pl.mean_horizontal`. `composite_score` = rata-rata
+`tf_composite_{TF}` yang tersedia di seluruh 5 `TIMEFRAMES`
+(equal-weighted, sama seperti `mtf_alignment.py` sendiri) — full/outer
+join antar TF (bukan inner join) supaya simbol yang hanya punya sebagian
+TF tidak ikut hilang (kelas bug drop-diam-diam yang sama seperti
+ADR-046 Path C/FIX GLD-L2-01/RISK-6, diverifikasi empiris sebelum
+ditulis ke modul). Simbol dengan nol TF composite non-null (misal simbol
+baru tanpa cukup histori warm-up indikator) mendapat default netral 0.0
+(bukan null) — memenuhi requirement "no nulls for active symbols"
+Architecture v2.0 §10.2, auditable lewat kolom `tf_coverage_count` baru.
+`composite_grade`: A>=0.60, B>=0.35, C>=0.15, D lainnya — threshold
+pilihan modul ini sendiri, tunable.
+
+**Sector breadth & momentum**: `sector_breadth_pct` = % simbol
+`active_ohlcv` per sektor dengan close 1D > EMA-50 — label sektor dibaca
+dari kolom `sector` milik `sector_regime_weights.parquet` (output
+`gold_sector` sendiri, tidak dihitung ulang sebagai definisi kedua),
+fallback ke `InstrumentLoader` langsung jika file itu belum ada.
+`sector_momentum` = perubahan `sector_breadth_pct` dari output
+`signal_aggregation` sebelumnya yang paling dekat dengan target 7 hari
+kalender (~5 hari trading) dalam window [4,10] hari — null (bukan 0.0)
+jika belum ada output sebelumnya sama sekali. `breadth_divergence` =
+`mtf_score/5 - composite_score`, soft join terhadap
+`mtf_alignment_{date}.parquet` — null (bukan 0.0) jika belum tersedia.
+
+**Keputusan dependency yang sengaja MENYIMPANG dari sketsa kode
+Architecture v2.0 §6.6:** job baru `signal_aggregation` (`depends_on`:
+`gold_signals`, `silver_active_symbols` saja — dua input yang genuinely
+load-bearing), diposisikan di `DAILY_SEQUENCE` setelah `gold_mtf`.
+`mtf_alignment` (untuk `breadth_divergence`) dan `sector_regime_weights`
+(untuk label sektor) dibaca langsung oleh modul dengan graceful degrade
+— BUKAN hard dependency. `signal_aggregation` dan `gold_global_regime`
+juga SENGAJA TIDAK ditambahkan ke `depends_on` `gold_screener` —
+memperluas pola soft-dependency yang sudah diterapkan RISK-31 untuk
+tiga source CrossAssetEngine (`global_regime_tbl`/`lead_lag_tbl`/
+`forecast_tbl`): dependency keras di sini berarti run harian yang
+stale/hilang bisa memblokir seluruh watchlist untuk kolom yang menurut
+Section 0.2/0.3 murni informational DATA field, bukan filter/ranking
+input. Komentar `gold_global_regime`'s own `job_registry.py` entry —
+yang menyimpan TODO ini sejak v1.18.0 — diperbarui untuk
+mendokumentasikan resolusi ini secara eksplisit.
+
+**Integrasi `gold_screener`**: source baru `signal_agg_tbl` (per simbol,
+LEFT JOIN — pola sama seperti `forecast_tbl`) menghasilkan 5 kolom baru:
+`composite_score`, `composite_grade`, `sector_breadth_pct`,
+`sector_momentum`, `breadth_divergence`. Murni informational, sama
+seperti kolom CrossAssetEngine sebelumnya (Separation of Concerns
+GD §0.2/§0.3).
+
+**View baru**: `v_signal_aggregation` ditambahkan ke `views.py`, pola
+glob per-tanggal yang sama dengan `v_mtf_alignment`/`v_screener`.
+
+**RISK-33 (NEW, OPEN, accepted)** dicatat di `KNOWN_RISKS.md` — seluruh
+modul ini dibangun dan diuji terhadap fixture sintetis di sandbox, belum
+pernah dijalankan terhadap data Silver/Gold produksi nyata di M1, plus
+lima keputusan first-pass yang butuh validasi produksi (formula/bobot
+`composite_score`, threshold grade, keputusan soft-dependency, window
+lookback `sector_momentum`, fallback label sektor).
+
+**Test baru**: `tests/unit/test_signal_aggregation.py` (38 test — formula
+per-komponen, null-safety, outer-join lintas TF, grade threshold, sector
+breadth, sector momentum lookback, breadth_divergence soft-join, entry
+point `run()` termasuk idempotency checkpoint dan graceful-empty path) +
+5 test baru di `tests/unit/test_screener.py`
+(`TestSignalAggregationIntegration` — absent/present/symbol-tidak-ada/
+tanggal-salah/file-korup, mengikuti pola persis
+`TestCrossAssetEngineIntegration`). Coverage modul baru: 84%
+(`signal_aggregation.py`), 96% (`screener.py` setelah perubahan) — di
+atas gate CI 80%.
+
+MINOR bump (fitur/modul baru, sama seperti precedent v1.18.0 untuk
+CrossAssetEngine): tidak ada perubahan Interface Contract untuk kolom
+yang sudah ada, seluruh penambahan aditif.
+`tests/COUNT_BASELINE.txt`: 1746 → 1789 (+43). Diverifikasi di sandbox
+terisolasi (clone GitHub, dikonfirmasi byte-identical dengan live
+sebelum diedit): full suite passed dengan 2 failure pre-existing yang
+sama-sama murni environment (binary `poetry` tidak ada di sandbox ini)
+baik sebelum maupun sesudah, 0 regresi. Setiap file yang disentuh
+di-mirror ke repo live via Filesystem MCP connector dan byte-verified
+segera setelah setiap penulisan.
+
+---
+
 ## v1.18.8 — Gate 1 CLOSED: bobot NZD nyata diekstrak dan di-wire ke broad_dollar.py (September 2026)
 
 Menutup ADR-049 (chat thread, 5 Sep 2026) untuk mata uang ke-14 Broad

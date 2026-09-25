@@ -1,6 +1,92 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.18.8"
+version = "1.19.0"
+# ADD GMI-SIGAGG-001 (chat thread, 24 Sep 2026): signal_aggregation
+# (Architecture v2.0 §5.2.7) — new Gold module, closes the TODO
+# job_registry.py's own gold_global_regime entry has carried since GMI
+# Wave 1 Cycle 4 (v1.18.0: "that wiring belongs to a later
+# signal_aggregation/screener-integration pass") and the reference
+# already sitting in active_symbols.py's own module docstring
+# ("Dikonsumsi oleh: ... signal_aggregation ...").
+#
+# New src/gold/signal_aggregation.py: per-symbol composite_score/
+# composite_grade (RSI/MACD/ADX/relative_volume, four components each
+# independently bounded [-1,1] and null-safe, averaged within a
+# timeframe via pl.mean_horizontal — null-skip not null-propagate —
+# then averaged again across all 5 TIMEFRAMES via a full/outer join so
+# a symbol missing one TF isn't silently dropped, the exact ADR-046
+# Path C / FIX GLD-L2-01 / RISK-6 drop-bug class this codebase has
+# repeatedly caught). Symbols with zero non-null TF composites default
+# to a neutral 0.0 (Architecture v2.0 §10.2's "no nulls for active
+# symbols" requirement), auditable via a new tf_coverage_count column
+# rather than silently indistinguishable from a genuine neutral read.
+# Plus per-sector sector_breadth_pct/sector_momentum (reuses
+# sector_regime_weights.parquet's own published 'sector' column, not a
+# second competing definition) and breadth_divergence vs mtf_score (a
+# soft join — null, not 0.0, when mtf_alignment is unavailable). None
+# of composite_score's formula, its weighting, or the A/B/C/D grade
+# thresholds (0.60/0.35/0.15) are specified anywhere upstream —
+# Architecture v2.0 §5.3 names the four inputs and five output columns
+# only; every concrete number is this session's own documented choice,
+# written in the module's own docstring rather than left implicit.
+#
+# job_registry.py: new "signal_aggregation" job (depends_on:
+# gold_signals + silver_active_symbols only — the two genuinely
+# load-bearing inputs), positioned in DAILY_SEQUENCE right after
+# gold_mtf. Deliberate departure from Architecture v2.0 §6.6's own
+# dependency-graph sketch (which lists gold_screener depending on both
+# signal_aggregation and gold_global_regime): neither was added to
+# gold_screener's own depends_on, extending the soft-dependency,
+# graceful-degrade-to-NULL pattern screener.py's own docstring already
+# established for the three CrossAssetEngine sources during Cycle 4
+# (RISK-31) — a hard dependency here would let a stale/missing daily
+# run block the entire watchlist for a Section 0.2/0.3 informational
+# DATA field, not a filter/ranking input. gold_global_regime's own
+# job_registry.py comment (which had carried the original TODO since
+# v1.18.0) updated to record this resolution explicitly.
+#
+# screener.py: new signal_agg_tbl soft source (same has_X/try-except/
+# _empty_*_df()/LEFT JOIN idiom as forecast_tbl), 5 new watchlist
+# columns: composite_score, composite_grade, sector_breadth_pct,
+# sector_momentum, breadth_divergence. views.py: new
+# v_signal_aggregation view, same per-date glob shape as
+# v_mtf_alignment/v_screener.
+#
+# New KNOWN_RISKS.md RISK-33 (OPEN, accepted) — same standing rule as
+# RISK-31/RISK-16: sandbox-built and unit-tested only, never run
+# against live Silver/Gold data on the M1, plus five specific
+# first-pass decisions (formula/weighting, grade thresholds, the
+# soft-dependency departure above, sector_momentum's lookback window,
+# sector-label fallback) flagged for production validation before
+# further work builds on top of them.
+#
+# MINOR bump (new module/job, matching the v1.18.0 CrossAssetEngine
+# precedent exactly): fully additive, no existing Interface Contract
+# column changed. New tests/unit/test_signal_aggregation.py (38 tests
+# — per-component formula bounds/null-safety, cross-TF outer-join
+# correctness, the tf_coverage_count/no-nulls guarantee, grade
+# thresholds, sector breadth math, sector-momentum lookback window,
+# breadth_divergence's soft mtf dependency, run()'s checkpoint
+# idempotency/failure/graceful-empty paths) + 5 new tests in
+# test_screener.py (TestSignalAggregationIntegration, mirroring
+# TestCrossAssetEngineIntegration's existing shape). One real bug
+# caught during test authoring, fixed before mirroring:
+# _compute_sector_breadth() originally short-circuited to empty
+# whenever sector_map had zero rows, silently discarding a legitimate
+# "no known sector mappings yet, bucket everyone as Unknown" case —
+# fixed once confirmed empirically (sandbox REPL, not assumed) that a
+# polars left-join against an empty right-hand DataFrame correctly
+# leaves the new column null rather than dropping rows. Coverage:
+# signal_aggregation.py 84%, screener.py 96% after its own changes —
+# both above the CI 80% gate. tests/COUNT_BASELINE.txt: 1746 -> 1789
+# (+43). Verified in an isolated sandbox (GitHub clone, confirmed
+# byte-identical to live before editing): full suite passed with the
+# same 2 pre-existing environment-only failures (poetry binary absent
+# from this sandbox) both before and after, 0 regressions. Every
+# touched file mirrored to the live repo via the Filesystem MCP
+# connector and byte-verified immediately after each write. Full
+# detail: CHANGELOG.md v1.19.0,
+# dev-log/2026-09-24-gmi-signal-aggregation.md.
 # FIX (chat thread, 22 Sep 2026): Gate 1 CLOSED for the 14th Broad Dollar
 # currency -- ADR-049's NZD_USD addition (5 Sep 2026 decision) is now
 # fully wired. Ovi re-ran scripts/preflight/check_bis_eer_weights.py

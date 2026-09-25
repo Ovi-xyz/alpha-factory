@@ -52,6 +52,20 @@ sector_tbl/active_tbl/regime_tbl, so a missing or stale (weekly, possibly
 several days old within the week) CrossAssetEngine output never blocks
 the screener the way a missing gold_mtf does.
 
+ADD GMI-SIGAGG-001 — signal_aggregation integration (Architecture v2.0
+§5.2.7, §9.1 Phase 5). A fourth soft source, same idiom as the three
+above: signal_agg_tbl (data/gold/signal_aggregation/
+signal_aggregation_{date}.parquet, one row per active_ohlcv symbol) ->
+composite_score, composite_grade, sector_breadth_pct, sector_momentum,
+breadth_divergence. Purely informational DATA fields (Section 0.2/0.3
+Separation of Concerns), never a filter or ranking input — identical
+treatment to days_to_earnings/sentiment_score before Finnhub's
+retirement. NOT in gold_screener's depends_on, for the same reliability
+reason as the three CrossAssetEngine sources: see
+signal_aggregation.py's own module docstring for the full rationale
+(this deliberately supersedes Architecture v2.0 §6.6's dependency-graph
+sketch, which predates this established soft-dependency pattern).
+
 Output: data/gold/screener/watchlist_{date}.parquet
 """
 
@@ -79,6 +93,8 @@ GOLD_CROSS_ASSET_PATH   = Path("data/gold/cross_asset")
 GLOBAL_REGIME_PATH      = GOLD_CROSS_ASSET_PATH / "global_regime.parquet"
 LEAD_LAG_PATH           = GOLD_CROSS_ASSET_PATH / "lead_lag_matrix.parquet"
 CROSS_ASSET_FORECAST_PATH = GOLD_CROSS_ASSET_PATH / "cross_asset_forecast.parquet"
+# ADD GMI-SIGAGG-001 — see module docstring.
+SIGNAL_AGG_PATH = Path("data/gold/signal_aggregation")
 # FIX GLD-SCR-002: this was previously built inline as an ad hoc string/
 # f-string Path construction inside build_watchlist() (not the SQL-injection
 # kind — a plain filesystem path — but an un-patchable hardcode all the
@@ -165,6 +181,18 @@ def _empty_forecast_df() -> pl.DataFrame:
         "symbol":              pl.Series([], dtype=pl.Utf8),
         "forecast_return_1d":  pl.Series([], dtype=pl.Float64),
         "forecast_stable":     pl.Series([], dtype=pl.Boolean),
+    })
+
+
+def _empty_signal_agg_df() -> pl.DataFrame:
+    """Placeholder signal_aggregation DataFrame dengan schema minimal (ADD GMI-SIGAGG-001)."""
+    return pl.DataFrame({
+        "symbol":              pl.Series([], dtype=pl.Utf8),
+        "composite_score":     pl.Series([], dtype=pl.Float64),
+        "composite_grade":     pl.Series([], dtype=pl.Utf8),
+        "sector_breadth_pct":  pl.Series([], dtype=pl.Float64),
+        "sector_momentum":     pl.Series([], dtype=pl.Float64),
+        "breadth_divergence":  pl.Series([], dtype=pl.Float64),
     })
 
 
@@ -394,6 +422,21 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
         forecast_df = _empty_forecast_df()
     con.register("forecast_tbl", forecast_df.to_arrow())
 
+    # Signal aggregation table (signal_aggregation job, daily) — one row
+    # per active_ohlcv symbol (ADD GMI-SIGAGG-001, see module docstring).
+    signal_agg_path = SIGNAL_AGG_PATH / f"signal_aggregation_{run_date.isoformat()}.parquet"
+    if signal_agg_path.exists():
+        try:
+            signal_agg_df = pl.read_parquet(signal_agg_path).select([
+                "symbol", "composite_score", "composite_grade",
+                "sector_breadth_pct", "sector_momentum", "breadth_divergence",
+            ])
+        except Exception:
+            signal_agg_df = _empty_signal_agg_df()
+    else:
+        signal_agg_df = _empty_signal_agg_df()
+    con.register("signal_agg_tbl", signal_agg_df.to_arrow())
+
     # ── Parameterized query — no f-string SQL ─────────────────────────────────
     # FIX GLD-003: read_parquet($mtf_path) + $min_mtf_score, $min_sector_weight,
     # $min_dollar_volume, $run_date — semua via $name binding.
@@ -443,6 +486,11 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
         ll.lead_lag_top_lag,
         f.forecast_return_1d,
         f.forecast_stable,
+        sa.composite_score,
+        sa.composite_grade,
+        sa.sector_breadth_pct,
+        sa.sector_momentum,
+        sa.breadth_divergence,
         $run_date                                  AS watchlist_date
     FROM mtf m
     LEFT JOIN sector_tbl s ON m.symbol = s.symbol
@@ -468,6 +516,8 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     LEFT JOIN (SELECT * FROM global_regime_tbl LIMIT 1) gr ON TRUE
     LEFT JOIN lead_lag_tbl ll ON m.symbol = ll.follower
     LEFT JOIN forecast_tbl  f ON m.symbol = f.symbol
+    -- ADD GMI-SIGAGG-001: same per-symbol LEFT JOIN shape as forecast_tbl.
+    LEFT JOIN signal_agg_tbl sa ON m.symbol = sa.symbol
     WHERE COALESCE(s.sector_weight_adj, 1.0) > $min_sector_weight
       AND COALESCE(a.dollar_volume_20d, 1e9) > $min_dollar_volume
     ORDER BY ABS(m.mtf_score) DESC,

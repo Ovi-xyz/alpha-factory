@@ -266,6 +266,17 @@ def _gold_screener(run_date: date) -> None:
     screener_run(run_date)
 
 
+def _signal_aggregation(run_date: date) -> None:
+    """
+    ADD GMI-SIGAGG-001 — Architecture v2.0 §5.2.7. Fulfils the deferred
+    reference left in gold_global_regime's own entry below ("that wiring
+    belongs to a later signal_aggregation/screener-integration pass") and
+    in active_symbols.py's own module docstring, which already lists
+    'signal_aggregation' as a consumer of ActiveSymbolsResolver."""
+    from src.gold.signal_aggregation import run as signal_aggregation_run
+    signal_aggregation_run(run_date)
+
+
 def _gold_global_regime(run_date: date) -> None:
     """ADD GMI Wave 1 Cycle 4 — CrossAssetEngine's first module
     (Architecture v2.0 §6.5). Independent of the gold_signals -> gold_mtf
@@ -618,6 +629,29 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "est_minutes": 5,
     },
 
+    # ADD GMI-SIGAGG-001 (Architecture v2.0 §5.2.7) — composite indicator
+    # score (RSI/MACD/ADX/relative_volume across TIMEFRAMES) + per-sector
+    # breadth analytics. depends_on matches Architecture v2.0's own
+    # §6.6 sketch for THIS job's genuinely load-bearing inputs:
+    # gold_signals (tech_signals_{TF}.parquet) and silver_active_symbols
+    # (active_ohlcv universe). mtf_alignment (for breadth_divergence) and
+    # sector_regime_weights (for sector labels) are read directly by the
+    # module itself with a graceful degrade-to-null/fallback — NOT hard
+    # dependencies here, matching the soft-dependency pattern screener.py
+    # already established for the CrossAssetEngine outputs (see that
+    # module's docstring). Deliberately NOT added to gold_screener's own
+    # depends_on either, for the identical reliability reason — see
+    # signal_aggregation.py's module docstring for the full rationale.
+    # This supersedes Architecture v2.0 §6.6's diagram (which predates
+    # that established pattern) for this specific wiring decision only.
+    "signal_aggregation": {
+        "description": "Composite indicator score + sector breadth analytics — active_ohlcv universe",
+        "fn":          _signal_aggregation,
+        "depends_on":  ["gold_signals", "silver_active_symbols"],
+        "layer":       "gold",
+        "est_minutes": 10,
+    },
+
     # FIX GMI-CORR-RETIRE-01 (RISK-31, 20 Sep 2026): pre-Cycle-4
     # "gold_correlation" entry (Layer 1-only, raw Pearson via
     # correlation_matrix.py) removed entirely — retired, not just excluded
@@ -666,11 +700,21 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
     # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.5) — first CrossAssetEngine
     # module. depends_on=['silver_ohlcv_context'] (the Layer 2 OHLCV price
     # job) — NOT 'silver_context_anchors' (pure config metadata, no price
-    # data; see src/silver/context_anchors.py docstring). Deliberately NOT
-    # yet in gold_screener's depends_on (Architecture v2.0 §6.5's own code
-    # snippet does this) — that wiring belongs to a later
-    # signal_aggregation/screener-integration pass (Architecture v2.0 §5.3,
-    # §9.1 Phase 5), out of scope for this module.
+    # data; see src/silver/context_anchors.py docstring).
+    #
+    # UPDATE GMI-SIGAGG-001 (closes the TODO this comment used to carry):
+    # the "later signal_aggregation/screener-integration pass" referenced
+    # here has landed — see signal_aggregation.py and screener.py's own
+    # module docstrings. Resolution differs from what this comment
+    # originally implied (Architecture v2.0 §6.5's own code snippet
+    # appends 'gold_global_regime' to gold_screener['depends_on']): this
+    # job is wired into screener.py as a soft/optional informational
+    # source instead (it already was, since GMI Wave 1 Cycle 4 —
+    # global_regime_tbl in build_watchlist() — this only concerns the
+    # JOB_REGISTRY depends_on entry, which remains deliberately absent).
+    # A hard dependency would let a stale/missing daily global-regime run
+    # block the entire watchlist for a Section 0.2/0.3 "informational
+    # DATA field, not a filter/ranking input" — not adopted.
     "gold_global_regime": {
         "description": "Global equity-index breadth regime — 14 Layer 2 indices, daily",
         "fn":          _gold_global_regime,
@@ -741,6 +785,14 @@ DAILY_SEQUENCE: list[str] = [
     # Gold — urutan KRITIS: regime -> sector -> screener
     "gold_signals",
     "gold_mtf",
+    # ADD GMI-SIGAGG-001: positioned right after gold_mtf so its own soft
+    # read of mtf_alignment_{date}.parquet (for breadth_divergence) is
+    # normally satisfied in the scheduled path — not a hard ordering
+    # requirement (JOB_REGISTRY depends_on is gold_signals +
+    # silver_active_symbols only; module degrades breadth_divergence to
+    # null gracefully if mtf_alignment is unavailable — see that module's
+    # docstring). Independent of the regime -> sector -> screener chain.
+    "signal_aggregation",
     "gold_regime",        # dep: silver_macro — akan skip jika silver_macro tidak ada
     "gold_sector",
     "gold_screener",

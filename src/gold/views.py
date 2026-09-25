@@ -170,6 +170,17 @@ VIEW_DEFINITIONS = {
         )
     """,
 
+    # ADD GMI-SIGAGG-001 — composite indicator score + sector breadth
+    # (Architecture v2.0 §5.2.7). Same per-date-file glob shape as
+    # v_mtf_alignment / v_screener above.
+    "v_signal_aggregation": """
+        CREATE OR REPLACE VIEW v_signal_aggregation AS
+        SELECT * FROM read_parquet(
+            'data/gold/signal_aggregation/signal_aggregation_*.parquet',
+            hive_partitioning=false
+        )
+    """,
+
     "v_tech_signals_1D": """
         CREATE OR REPLACE VIEW v_tech_signals_1D AS
         SELECT * FROM read_parquet(
