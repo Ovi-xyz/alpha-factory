@@ -1,5 +1,74 @@
 # CHANGELOG — Data Platform
 
+## v1.19.1 — FIX GMI-JR-004: schedule guard hilang di 3 job CrossAssetEngine mingguan, ditemukan via pengecekan live `--job gold` (RISK-34, September 2026)
+
+Ovi menjalankan `python src/runner.py --job gold` di live machine dan
+melaporkan hasilnya "returned with no warning or error", lalu meminta
+pengecekan. Root cause ditelusuri sesi ini via pembacaan langsung
+`job_registry.py` (GitHub mirror, di-diff byte-identical terhadap live
+copy sebelum dipercaya) plus inspeksi empiris sentinel history dan
+timestamp output Parquet di mesin live via Filesystem MCP connector —
+sebelum satu baris kode pun disentuh, sesuai disiplin "jangan gegabah"
+proyek ini.
+
+**RISK-34 — `gold_cross_asset_correlation`/`gold_lead_lag`/`gold_forecast`
+tidak punya schedule guard sama sekali.** Ketiganya didokumentasikan
+sebagai "weekly (Sunday)" di Architecture v2.0 §6.1–§6.4 dan di docstring
+`forecast_module.py` sendiri, tapi tidak pernah punya `run_on_weekdays`
+di `JOB_REGISTRY` — persis gap yang sama dengan RISK-23
+(`bronze_macro_weekly`/`bronze_bis_rates`, 31 Agustus 2026), hanya saja
+tidak ikut diperbaiki saat GMI Wave 1 Cycle 4 menambahkan ketiga job
+Gold-layer ini ke `WEEKLY_SEQUENCE` lima hari setelah RISK-23 ditutup.
+`--job gold` (GMI-JR-003, `layer_sequence()` berbasis `WEEKLY_SEQUENCE`
+yang mendaftar ketiganya SEBELUM `DAILY_SEQUENCE` gold chain) akibatnya
+menjalankan ulang seluruh Ledoit-Wolf correlation matrix, ~57.950 test
+Granger-causality + BH-FDR lead-lag, dan PCA + per-equity VAR forecast —
+di hari apa pun. Dikonfirmasi empiris via sentinel history M1: job ini
+sudah jalan di Rabu(16), Kamis(17), Senin(21), Selasa(22) September
+2026 — tidak pernah sekalipun di hari Minggu, walau setiap run selesai
+"sukses" dan menulis output Parquet baru yang valid (bukan skip/no-op —
+`cross_asset_corr.parquet`, `lead_lag_matrix.parquet`,
+`cross_asset_forecast.parquet` ketiganya ditulis ulang dalam jendela 30
+detik pada 25 Sep 2026, ukuran konsisten dengan komputasi nyata).
+RISK-31 sudah menandai gap yang berdekatan (`gold_screener` tidak
+memblokir output CrossAssetEngine yang stale) tapi bukan gap arah
+sebaliknya ini (komputasi ulang terlalu sering, di luar cadence).
+
+Diperbaiki identik dengan RISK-23: `run_on_weekdays: [6]` ditambahkan ke
+ketiga entry `JOB_REGISTRY`. Berbeda dari RISK-23, tidak ada
+`stale_tolerance` yang perlu di-ripple ke mana pun — tidak ada job di
+`DAILY_SEQUENCE` yang hard-depend ke salah satu dari ketiganya (dependency
+`gold_screener` terhadap CrossAssetEngine memang sengaja soft/absent,
+RISK-31), dikonfirmasi oleh test regresi baru
+`test_no_daily_sequence_job_hard_depends_on_the_three_weekly_gold_jobs`.
+
+**Fix konsekuensial (test pre-existing yang mengasumsikan perilaku lama):**
+`test_bronze_then_silver_then_gold_completes_full_chain` di
+`test_runner_weekly_cadence.py` men-assert semua job
+`LAYER_JOB_NAMES["gold"]` selesai pada `run_date` hari Rabu — asumsi yang
+kini benar-benar dilanggar oleh fix ini untuk ketiga job yang baru
+di-gate. Diupdate untuk mengecualikan ketiganya, mengikuti pola yang
+sudah ada untuk `bronze_macro_weekly`/`bronze_bis_rates` di test yang
+sama persis.
+
+Verifikasi: `ast.parse` bersih di 3 file yang diubah
+(`src/scheduler/job_registry.py`,
+`tests/integration/test_job_registry_integrity.py`,
+`tests/integration/test_runner_weekly_cadence.py`), tidak ada f-string
+SQL baru. 9 test baru (`TestGoldCrossAssetScheduleGuard`) dikonfirmasi
+**gagal** terhadap source pre-fix (6 dari 9 gagal, mereproduksi persis
+perilaku live Jumat 25 Sep 2026) dan **lolos** terhadap fix, sesuai
+disiplin regression-test proyek ini.
+
+PATCH bump: perbaikan bug pada scheduling job yang sudah ada, tidak ada
+kapabilitas baru yang diekspos ke downstream, tidak ada perubahan
+Interface Contract atau schema. Total: **1 file source dimodifikasi**
+(`src/scheduler/job_registry.py`) | **2 file test dimodifikasi**
+(1 ditambah class baru, 1 diupdate untuk fix konsekuensial) | **1798
+passed / 0 failed / 0 error** (naik dari 1789, +9 test baru, 0 regresi;
+2 failure pre-existing environment-only — `test_check_poetry_env.py`,
+binary `poetry` tidak ada di sandbox — tidak berubah).
+
 ## v1.19.0 — signal_aggregation (Architecture v2.0 §5.2.7): composite indicator score + sector breadth, integrasi gold_screener (September 2026)
 
 Implementasi `src/gold/signal_aggregation.py` — modul Gold layer baru

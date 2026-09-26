@@ -238,6 +238,16 @@ class TestLayerCommands:
         the real SOP (GD §14.4.2) and the existing GATE-N1 precedent in
         TestJobAllAcrossWeek above — not the previously-accidental behavior
         where bronze_macro_weekly ran unconditionally on every invocation.
+
+        FIX GMI-JR-004 (RISK-34, 25 Sep 2026): gold_cross_asset_correlation/
+        gold_lead_lag/gold_forecast are now identically Sunday-gated (same
+        gap, same fix, just found later — see JOB_REGISTRY's own comment on
+        gold_cross_asset_correlation for the full evidence trail). Unlike
+        the bronze pair above, nothing downstream needed a stale_tolerance
+        ripple — no DAILY_SEQUENCE job hard-depends on any of the three — so
+        the only change needed here is excluding them from this Wednesday
+        run_date's "must complete" assertion, the same way the bronze pair
+        already was.
         """
         from src.runner import run_job, run_layer
         from src.scheduler.job_registry import LAYER_JOB_NAMES
@@ -260,7 +270,20 @@ class TestLayerCommands:
         # on this Wednesday (see test_bronze_layer_completes_standalone) —
         # their Sunday sentinel is what satisfies the downstream
         # stale_tolerance checks, not a fresh same-day run.
-        weekly_only = {"bronze_macro_weekly", "bronze_bis_rates"}
+        #
+        # FIX GMI-JR-004 (RISK-34): gold_cross_asset_correlation/
+        # gold_lead_lag/gold_forecast are also correctly skipped on this
+        # Wednesday now (run_on_weekdays: [6]) — they have no daily
+        # dependent, so no preceding-Sunday seed is needed for them the way
+        # bronze_macro_weekly/bronze_bis_rates need one above; they simply
+        # don't run outside the weekly SOP, same as intended.
+        weekly_only = {
+            "bronze_macro_weekly",
+            "bronze_bis_rates",
+            "gold_cross_asset_correlation",
+            "gold_lead_lag",
+            "gold_forecast",
+        }
         for layer in ("bronze", "silver", "gold"):
             for job_name in LAYER_JOB_NAMES[layer]:
                 if job_name in weekly_only:

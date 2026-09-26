@@ -578,3 +578,79 @@ class TestWeeklyMacroScheduleGuard:
         assert JOB_REGISTRY["silver_global_rates"].get("stale_tolerance") == {
             "bronze_bis_rates": 7
         }
+
+
+class TestGoldCrossAssetScheduleGuard:
+    """FIX GMI-JR-004 (RISK-34, chat thread, 25 Sep 2026): the three
+    CrossAssetEngine weekly jobs (gold_cross_asset_correlation,
+    gold_lead_lag, gold_forecast) previously had no schedule constraint at
+    all — "weekly (Sunday)" cadence (Architecture v2.0 §6.1) was assumed via
+    SOP discipline only, the exact same gap TestWeeklyMacroScheduleGuard
+    above already caught and fixed for bronze_macro_weekly/bronze_bis_rates
+    (RISK-23), just not yet extended to Gold when GMI Wave 1 Cycle 4 added
+    these three jobs to WEEKLY_SEQUENCE. Since layer_sequence("gold") also
+    derives from WEEKLY_SEQUENCE (which lists all three ahead of the
+    DAILY_SEQUENCE gold chain), `--job gold` ran the full Ledoit-Wolf
+    correlation + Granger/BH-FDR lead-lag + PCA-VAR forecast on any day of
+    the week — confirmed empirically via live sentinel history on the M1
+    (fired Wed/Thu/Mon/Tue/Fri, never gated to Sunday). These tests lock in
+    the fix: all three are now Sunday-only, and nothing downstream needed a
+    stale_tolerance ripple (unlike RISK-23) since no DAILY_SEQUENCE job
+    hard-depends on any of them.
+    """
+
+    @pytest.mark.parametrize(
+        "job_name",
+        ["gold_cross_asset_correlation", "gold_lead_lag", "gold_forecast"],
+    )
+    def test_cross_asset_job_is_sunday_only(self, job_name):
+        assert JOB_REGISTRY[job_name].get("run_on_weekdays") == [6]
+
+    @pytest.mark.parametrize(
+        "job_name",
+        ["gold_cross_asset_correlation", "gold_lead_lag", "gold_forecast"],
+    )
+    def test_cross_asset_job_skipped_on_non_sunday(self, job_name):
+        friday = date(2026, 9, 25)  # the live-run date this bug was found on
+        assert friday.weekday() == 4
+        assert not _passes_schedule(JOB_REGISTRY[job_name], friday)
+
+    def test_all_three_cross_asset_jobs_pass_on_sunday(self):
+        sunday = date(2026, 9, 20)
+        assert sunday.weekday() == 6
+        for job_name in (
+            "gold_cross_asset_correlation",
+            "gold_lead_lag",
+            "gold_forecast",
+        ):
+            assert _passes_schedule(JOB_REGISTRY[job_name], sunday)
+
+    def test_gold_global_regime_remains_unguarded(self):
+        """gold_global_regime is genuinely daily (Architecture v2.0 §6.5) —
+        this fix must not accidentally gate it too."""
+        assert "run_on_weekdays" not in JOB_REGISTRY["gold_global_regime"]
+        wednesday = date(2026, 9, 23)
+        assert _passes_schedule(JOB_REGISTRY["gold_global_regime"], wednesday)
+
+    def test_no_daily_sequence_job_hard_depends_on_the_three_weekly_gold_jobs(self):
+        """Unlike RISK-23 (which needed a stale_tolerance ripple to
+        silver_macro/silver_global_rates), gating these three must not newly
+        break any DAILY_SEQUENCE job's dependency check on a non-Sunday —
+        confirms none of them are hard dependencies outside the weekly
+        trio's own internal chain."""
+        weekly_gold_jobs = {
+            "gold_cross_asset_correlation",
+            "gold_lead_lag",
+            "gold_forecast",
+        }
+        offending = [
+            job_name
+            for job_name, job in JOB_REGISTRY.items()
+            if job_name not in weekly_gold_jobs
+            and job.get("layer") != "bronze"
+            and set(job.get("depends_on", [])) & weekly_gold_jobs
+        ]
+        assert not offending, (
+            f"Jobs outside the weekly gold trio depend on it: {offending} — "
+            "would need a stale_tolerance entry, mirroring RISK-23"
+        )

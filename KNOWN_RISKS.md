@@ -3337,9 +3337,93 @@ synthetic-fixture tests only checked for directional correctness and
 bounds — the same live-vs-synthetic gap RISK-31's "Update — 19 Sep
 2026" closed for `gold_forecast`.
 
+## RISK-34 (NEW): `gold_cross_asset_correlation`/`gold_lead_lag`/`gold_forecast` had no schedule guard — full weekly CrossAssetEngine recomputed on every `--job gold`, any day of the week — RESOLVED (fixed)
+
+**Status:** ✅ **FIXED (25 Sep 2026).** Found while checking a live
+`--job gold` run Ovi reported ("returned with no warning or error") —
+root cause traced this session via direct read of `job_registry.py`
+(GitHub mirror, byte-verified against the live M1 copy) plus empirical
+sentinel-history and output-timestamp inspection on the live machine via
+the Filesystem MCP connector, before any code was touched.
+
+**Reference:** Architecture v2.0 §6.1–§6.4 (CrossAssetEngine, "weekly
+(Sunday)" cadence for all three modules), RISK-23 above (identical root
+cause, Bronze layer, 31 Aug 2026), RISK-31 (adjacent but distinct gap —
+staleness/no-alerting on the *stale* side, not this over-frequent side).
+
+### What the risk was
+
+`gold_cross_asset_correlation`, `gold_lead_lag`, and `gold_forecast`
+carried **no `run_on_weekdays` constraint at all** in `JOB_REGISTRY` —
+their "weekly (Sunday)" cadence was documented only in Architecture v2.0
+and in `forecast_module.py`'s own module docstring, never enforced in
+code. GMI-JR-003's `--job gold` layer-scoped runner (`layer_sequence()`,
+derived from `WEEKLY_SEQUENCE`, which lists all three ahead of the
+`DAILY_SEQUENCE` gold chain) exposes exactly this gap: `--job gold` on
+ANY day recomputed the full Ledoit-Wolf correlation matrix (merged Layer
+1+2 universe), all ~57,950 Granger-causality lead-lag tests with BH-FDR
+correction, and the PCA + per-equity VAR forecast — regardless of
+weekday. This is the identical failure shape RISK-23 already fixed for
+`bronze_macro_weekly`/`bronze_bis_rates`, just not carried forward when
+GMI Wave 1 Cycle 4 added these three Gold-layer jobs to
+`WEEKLY_SEQUENCE` five days after RISK-23 was closed.
+
+### Why this was invisible
+
+No exception, no warning, no wrong output — `_passes_schedule()` simply
+had nothing to check for these three entries, so it always returned
+`True`. Every run wrote genuine, correctly-computed, freshly-timestamped
+Parquet output (confirmed empirically: `cross_asset_corr.parquet`,
+`lead_lag_matrix.parquet`, `cross_asset_forecast.parquet` all rewritten
+within a 30-second window on 25 Sep 2026, sizes consistent with real
+computation, not a skip). RISK-31's own review flagged the *opposite*
+gap (`gold_screener` not blocking on stale CrossAssetEngine output) but
+not this one. Live sentinel history on the M1 confirms the gap was live
+and firing for days before being reported: `gold_cross_asset_correlation`
+had already run on Wed(16), Thu(17), Mon(21), Tue(22) Sep 2026 — never
+once on an actual Sunday, despite every run completing "successfully."
+
+### Fix
+
+`run_on_weekdays: [6]` added to all three `JOB_REGISTRY` entries,
+identical to RISK-23's fix. Unlike RISK-23, no `stale_tolerance` ripple
+was needed anywhere: nothing in `DAILY_SEQUENCE` hard-depends on any of
+the three (confirmed by a new regression test —
+`test_no_daily_sequence_job_hard_depends_on_the_three_weekly_gold_jobs`),
+and `gold_screener`'s own dependency on them is deliberately soft/absent
+by design (RISK-31), so gating them introduces no new dependency-check
+failure path on non-Sunday `--job gold`/`--job all` invocations.
+
+### Verification
+
+9 new tests added: `TestGoldCrossAssetScheduleGuard` in
+`tests/integration/test_job_registry_integrity.py` (parametrized over
+all three jobs — Sunday-only assertion, Friday-skip assertion, plus a
+`gold_global_regime`-remains-unguarded guard and the no-hard-dependents
+check above). Confirmed to **fail** against the pre-fix source (6 of 9
+failing, reproducing the exact live behavior on Fri 25 Sep 2026) and
+**pass** against the fix, per this project's regression-test discipline.
+One pre-existing integration test
+(`test_bronze_then_silver_then_gold_completes_full_chain`) updated in
+the same pass — it asserted every `LAYER_JOB_NAMES["gold"]` job
+completes on a Wednesday `run_date`, an assumption this fix correctly
+breaks for the three now-gated jobs; updated to exclude them the same
+way the pre-existing bronze pair already was. `ast.parse` clean on all
+3 modified files. No f-string SQL introduced. Full suite: 1789 → 1798
+passed (+9), 0 regressions, 2 pre-existing environment-only failures
+unchanged (`test_check_poetry_env.py`, poetry binary absent from
+sandbox).
+
 ---
 
-*Last updated: v1.18.0 — GMI Wave 1 Cycle 4: CrossAssetEngine implemented
+*Last updated: v1.19.1 — FIX GMI-JR-004: `gold_cross_asset_correlation`/
+`gold_lead_lag`/`gold_forecast` gained `run_on_weekdays: [6]` (RISK-34,
+25 Sep 2026) — same schedule-guard gap as RISK-23, found via a live
+`--job gold` run and confirmed against M1 sentinel history before the
+fix. 9 new tests, 1789 → 1798 passed, 0 regressions. Full detail:
+CHANGELOG.md v1.19.1,
+dev-log/2026-09-25-gmi-jr-004-gold-cross-asset-schedule-guard.md.
+Prior entry: v1.18.0 — GMI Wave 1 Cycle 4: CrossAssetEngine implemented
 in full (GlobalIndexRegimeModule, CorrelationModule, LeadLagModule,
 ForecastModule) plus gold_screener integration (12-13 Sep 2026). Gate 1
 (RISK-16 above) CLOSED — Ovi ran the real BIS weight extraction on the

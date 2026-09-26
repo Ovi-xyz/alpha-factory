@@ -1,6 +1,26 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.19.0"
+version = "1.19.1"
+# FIX GMI-JR-004 (RISK-34, chat thread, 25 Sep 2026): gold_cross_asset_
+# correlation/gold_lead_lag/gold_forecast had no run_on_weekdays guard —
+# identical gap to RISK-23 (31 Aug 2026, bronze_macro_weekly/
+# bronze_bis_rates), just never extended to these three when GMI Wave 1
+# Cycle 4 added them to WEEKLY_SEQUENCE. --job gold (GMI-JR-003) recomputed
+# the full weekly CrossAssetEngine (Ledoit-Wolf correlation, ~57,950-test
+# Granger/BH-FDR lead-lag, PCA+VAR forecast) on any day of the week.
+# Found while checking a live --job gold run (Ovi: "returned with no
+# warning or error") via direct M1 sentinel-history + output-timestamp
+# inspection (Filesystem MCP) before any code was touched — confirmed the
+# run itself was genuine (fresh, correctly-sized Parquet output, not a
+# skip), but gold_cross_asset_correlation had already fired on Wed/Thu/
+# Mon/Tue, never a Sunday. Fixed identically to RISK-23:
+# run_on_weekdays: [6] on all three. No stale_tolerance ripple needed
+# anywhere (unlike RISK-23) — nothing in DAILY_SEQUENCE hard-depends on
+# any of the three. 9 new tests (TestGoldCrossAssetScheduleGuard),
+# confirmed to fail pre-fix / pass post-fix. 1 consequential test update
+# (test_bronze_then_silver_then_gold_completes_full_chain). 1789 → 1798
+# passed, 0 regressions. See KNOWN_RISKS.md RISK-34, CHANGELOG.md v1.19.1,
+# dev-log/2026-09-25-gmi-jr-004-gold-cross-asset-schedule-guard.md.
 # ADD GMI-SIGAGG-001 (chat thread, 24 Sep 2026): signal_aggregation
 # (Architecture v2.0 §5.2.7) — new Gold module, closes the TODO
 # job_registry.py's own gold_global_regime entry has carried since GMI

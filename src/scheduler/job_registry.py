@@ -671,6 +671,41 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "depends_on":  ["silver_active_symbols", "silver_context_anchors"],
         "layer":       "gold",
         "est_minutes": 10,
+        # FIX GMI-JR-004 (RISK-34, chat thread, 25 Sep 2026): same missing-
+        # guard gap as bronze_macro_weekly/bronze_bis_rates (FIX, 31 Aug
+        # 2026, RISK-23) — this job's "weekly (Sunday)" cadence
+        # (Architecture v2.0 §6.1; forecast_module.py's own docstring
+        # references "the normal Sunday slot") was never enforced in code,
+        # only assumed via SOP discipline, an assumption GMI-JR-003's
+        # `--job gold` layer-scoped runner silently breaks the exact same
+        # way `--job bronze` did for RISK-23: layer_sequence("gold")
+        # derives from WEEKLY_SEQUENCE, which lists this job (and
+        # gold_lead_lag, gold_forecast below) ahead of the DAILY_SEQUENCE
+        # gold chain — so `--job gold` on ANY day recomputed the full
+        # Ledoit-Wolf correlation matrix regardless of weekday. Confirmed
+        # empirically via live sentinel history on the M1
+        # (data/.sentinels/), not assumed: this job had already fired on
+        # Wed(16), Thu(17), Mon(21), Tue(22), and Fri(25) Sep 2026 — never
+        # gated to Sunday, and had in fact never once landed ON an actual
+        # Sunday despite every one of those runs completing successfully
+        # and writing real, freshly-timestamped output
+        # (cross_asset_corr.parquet). This was invisible to RISK-31's own
+        # review, which flagged the adjacent, opposite-direction gap
+        # (gold_screener not blocking on STALE CrossAssetEngine output)
+        # but not this one (over-frequent, off-cadence recomputation). No
+        # output is ever wrong or corrupted by this — the module computes
+        # correctly on any day — but a regime-conditional, calendar-
+        # sensitive weekly snapshot silently becoming a same-day-as-
+        # `--job gold` snapshot changes what "weekly" means for every
+        # downstream consumer, with no error or warning raised anywhere.
+        # Fixed identically to RISK-23: run_on_weekdays: [6] on all three
+        # CrossAssetEngine jobs (this entry, gold_lead_lag, gold_forecast
+        # below). No stale_tolerance ripple needed anywhere as a
+        # consequence (unlike RISK-23's silver_macro/silver_global_rates
+        # follow-on) — nothing in DAILY_SEQUENCE hard-depends on any of
+        # these three; gold_screener's own dependency on them is
+        # deliberately soft/absent by design (RISK-31).
+        "run_on_weekdays": [6],   # 0=Mon .. 6=Sunday
     },
 
     # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.3, ADR-001) — third
@@ -683,6 +718,10 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "depends_on":  ["silver_active_symbols", "silver_context_anchors", "gold_cross_asset_correlation"],
         "layer":       "gold",
         "est_minutes": 15,
+        # FIX GMI-JR-004 (RISK-34, 25 Sep 2026): same gap as
+        # gold_cross_asset_correlation above, closed in the same pass, same
+        # rationale — see that entry's comment for the full evidence trail.
+        "run_on_weekdays": [6],   # 0=Mon .. 6=Sunday
     },
 
     # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.4) — fourth and final
@@ -695,6 +734,9 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "depends_on":  ["silver_active_symbols", "silver_context_anchors", "gold_lead_lag"],
         "layer":       "gold",
         "est_minutes": 20,
+        # FIX GMI-JR-004 (RISK-34, 25 Sep 2026): same gap, closed in the
+        # same pass — see gold_cross_asset_correlation's comment above.
+        "run_on_weekdays": [6],   # 0=Mon .. 6=Sunday
     },
 
     # ADD GMI Wave 1 Cycle 4 (Architecture v2.0 §6.5) — first CrossAssetEngine
