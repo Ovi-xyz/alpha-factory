@@ -83,3 +83,32 @@ def tmp_db_path(tmp_path: Path) -> Path:
 def run_date() -> date:
     """Default test run_date."""
     return date(2025, 1, 22)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cross_asset_history(tmp_path_factory, monkeypatch):
+    """
+    ADD GMI-PIT-001 follow-up (ADR-050): the three weekly CrossAssetEngine
+    run() functions now also write a PIT history snapshot
+    (src/gold/cross_asset/history.py). Existing module tests already
+    redirect each module's own snapshot path, but know nothing about the
+    history root — without this they would write
+    data/gold/cross_asset/history/... into the real repo tree (observed:
+    *_2026-03-01.parquet files leaking after a run). Redirect it for every
+    test; tests that exercise the history store itself override this.
+    """
+    import src.gold.cross_asset.history as history_mod
+    monkeypatch.setattr(
+        history_mod, "HISTORY_ROOT", tmp_path_factory.mktemp("cross_asset_history")
+    )
+
+    # Same reasoning for Gatekeeper's Bronze quarantine check: other tests in
+    # this suite (bronze ingester tests) leave real files in data/quarantine/
+    # with today's mtime, which would make Gatekeeper's "quarantine today"
+    # signal depend on ambient repo state. Point it at an empty dir; the one
+    # test that exercises the quarantine path overrides this explicitly.
+    import src.utils.gatekeeper as gatekeeper_mod
+    monkeypatch.setattr(
+        gatekeeper_mod, "QUARANTINE_GLOB",
+        str(tmp_path_factory.mktemp("no_quarantine") / "*.parquet"),
+    )

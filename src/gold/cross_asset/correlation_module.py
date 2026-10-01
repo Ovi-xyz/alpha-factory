@@ -89,6 +89,7 @@ from src.gold.cross_asset.legacy_correlation_bridge import write_legacy_correlat
 from src.silver.active_symbols import ActiveSymbolsResolver
 from src.silver.context_anchors import ContextAnchorsResolver
 from src.utils.atomic_io import atomic_write_parquet
+from src.gold.cross_asset.history import CORR_HISTORY_NAME, write_history_snapshot
 from src.utils.silver_scope import context_glob, layer1_globs
 
 SILVER_OHLCV_PATH     = Path("data/silver/market_ohlcv")
@@ -376,6 +377,7 @@ def run(run_date: date) -> None:
         compression="zstd",
         compression_level=3,
     )
+    write_history_snapshot(result, CORR_HISTORY_NAME, run_date)   # ADD GMI-PIT-001 follow-up
     n_symbols = len(set(result["symbol_a"]) | set(result["symbol_b"]))
     logger.info(
         f"[gold_cross_asset_correlation] {n_symbols} symbols, {result.height:,} pairs, "

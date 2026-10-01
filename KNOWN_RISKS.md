@@ -3416,7 +3416,170 @@ sandbox).
 
 ---
 
-*Last updated: v1.19.1 — FIX GMI-JR-004: `gold_cross_asset_correlation`/
+## RISK-35: ADR-050 (Gatekeeper, PITDataLoader extension, FRED `contributes_to`) — built and unit-tested in sandbox only, never run against live data; first-pass design decisions, 5 replayed against live history and revised 29 Sep, remainder unchanged
+
+**Status:** 🟡 **OPEN (accepted, 28 Sep 2026; findings 1-5 revised 29 Sep 2026
+after replay against live sentinel history — see Update below).** v1.20.0.
+Implemented from a GitHub `main` clone in the sandbox; not run on the live
+M1 and not byte-verified against the live copy. Same class of caveat as
+RISK-31 / RISK-33.
+
+**Reference:** ADR-050 (Decision, Consequences), `hmm-gatekeeper-xgboost.md`
+(gatekeeper notation), RISK-31 (CrossAssetEngine), FIX NEW-1 (stale_tolerance).
+
+### What is accepted, and why
+
+1. **Hysteresis windows are first-pass calibration.** `RECOVERY_CONFIRM_DAYS=2`,
+   `BLOCK_CONFIRM_DAYS=4`, `LOOKBACK_DAYS=14` are read off the source
+   notation's `t(0,1)` / `t(0,1,2,3)` windows, not tuned — no live history
+   exists (ADR-050 Consequences names this explicitly). Consequences worth
+   knowing: even a perfectly healthy first day emits `warn` (needs 2 days);
+   a single failed day emits `warn`, never `block`.
+2. **Two axes collapsed into one.** The source notation separates a
+   health-function axis from a layer-state axis; this implementation uses
+   one combined raw status per layer. Revisit the collapse if a real case
+   shows the axes diverging.
+3. **Gold has no per-check validator.** Gold's local signal is job
+   completion only (plus cascade from Silver). No Gold analogue of
+   `quality_gate_log.parquet` exists.
+4. **`--job all` never reaches `gatekeeper` on a failed day.** `run_all()`
+   `sys.exit(1)`s at the first failed/missing-dependency job, so the
+   automatic path only writes a `gate_status` row on days the chain
+   completed. `depends_on: []` lets the operator run `--job gatekeeper`
+   manually on a bad day, and the next run's 14-day lookback recomputes
+   the missed days from sentinels — history is not lost, but a bad day has
+   no row of its own unless run by hand.
+5. **Weekly-cadence jobs have a detection lag.** Jobs outside
+   `DAILY_SEQUENCE` are checked with a 7-day staleness window (the same
+   convention as FIX NEW-1). A weekly job that fails on Sunday is not
+   flagged until the window expires (up to ~7 days later).
+6. **Startup artifact.** `quality_gate_log.parquet` only exists from the
+   first `silver_validate` run after this ships. Earlier days have a Silver
+   sentinel but no log rows and are treated as `warn` (absence of evidence
+   is not health), so expect `warn` for the first days.
+7. **Bronze quarantine detection is a heuristic** (file mtime date ==
+   run_date), because quarantine filenames carry wall-clock time, not
+   `run_date`. Backfills of old dates won't match.
+8. **`fred_series.yaml` `contributes_to` is intentionally empty** — zero
+   consumers until ADR-051 (see FIX ADR-019 precedent).
+9. **`get_context_regime` returns `None`** until ADR-051 writes its output.
+
+### Limitation that matters for ADR-053 (found while reading producers)
+
+`cross_asset_corr.parquet`, `lead_lag_matrix.parquet`, and
+`cross_asset_forecast.parquet` are **overwritten** each weekly run with no
+history retained. The new `PITDataLoader` methods are PIT-correct, but for
+any `trade_date` earlier than the latest snapshot they return empty. So
+`cross_asset_xgboost` (ADR-053) cannot be walk-forward trained on
+historical per-date correlation / lead-lag / forecast values from these
+files as they are today — only `global_regime.parquet` and
+`signal_aggregation_{date}.parquet` retain history. Either those three
+modules need to start retaining history (append-by-`computation_date`, like
+`global_regime.parquet`) before ADR-053, or `cross_asset_xgboost` must be
+scoped to what history exists. Not decided here.
+
+### Verification
+
+103 new tests; the new regression tests fail against the pre-change source
+and pass against the fix. Full suite 1798 → 1901 passed, 0 regressions.
+
+
+---
+
+### Update — 29 Sep 2026 (v1.20.0, same-day follow-up): points 1-5 resolved before mirroring
+
+Reviewed against **real live sentinel history** (`/Users/opi/alpha-factory/
+data/.sentinels`, 280 files, 5-28 Sep 2026) before deciding anything —
+replayed via the new `scripts/replay_gatekeeper.py` rather than reasoned
+about in the abstract.
+
+1. **`silver_macro`/`silver_global_rates` — investigated, left unguarded on
+   purpose.** `macro_processor.process_fred` reads `data/bronze/macro/fred/**`
+   — the SAME directory `bronze_fred_daily` (daily) writes to, not only
+   `bronze_macro_weekly` (Sunday). A Sunday-only guard on `silver_macro`
+   would starve ADR-051's `raw_macro.py` of the daily FRED series it needs.
+   Live history confirms the job actually runs daily in practice
+   (`--job silver`), consistent with this. Gatekeeper's staleness-window
+   check (point 2 below) already handles both a daily-run and a
+   Sunday-only-run silver_macro correctly — no Gatekeeper change needed
+   here. The real inconsistency this surfaced — a functionally-daily job
+   sitting in `WEEKLY_SEQUENCE`'s weekly-only prefix, so it is invisible to
+   `--job all` — is an existing `job_registry.py` orchestration question,
+   independent of Gatekeeper, and is **left open** rather than changed
+   as a side effect of this ADR.
+2. **Detection lag — fixed.** Measured (not assumed): a missed guarded
+   weekly job (`run_on_weekdays`-only, e.g. `bronze_macro_weekly`,
+   `bronze_eia`) was first flagged at **day+14** under a blanket 7-day
+   staleness window, because the window still covered the prior run on the
+   due day itself. `_job_completed()` now checks such jobs exact-date on
+   their own due day (flagged at **day+7**, i.e. the very day they're
+   missed); jobs with no day-of-week guard at all (silver_macro,
+   silver_global_rates) keep the 7-day window (flagged day+8). Classification
+   (`_due_exactly_on_guard_days()`) is derived from each job's own
+   `run_on_*` keys, not a hardcoded job list.
+3. **`--job all` reaching Gatekeeper on a failed day — fixed.** New
+   `run_on_failure` registry flag; `run_all()` skips remaining jobs after a
+   first failure except flagged ones, still re-raises the first failure
+   unchanged (`KeyboardInterrupt` excepted — an operator abort must not
+   trigger anything). Only `gatekeeper` carries the flag (pinned by test).
+4. **Hysteresis — replayed, not re-tuned.** Against the 280-sentinel live
+   history: Bronze holds `pass` throughout with no false positive; Silver
+   correctly surfaces two real gaps (18 Sep single day, 26-28 Sep ongoing at
+   the time of the pull). A window sweep ((1,1) through (3,5)) shows (2,4)
+   materially calmer than (1,1) (0 vs 3 Silver flips over 21 days) and
+   indistinguishable from (3,4)/(2,5)/(3,5) on this data — kept as-is;
+   genuinely not enough history yet to choose among the calmer options.
+   `scripts/replay_gatekeeper.py --sweep` makes this repeatable as history
+   grows — re-run it before the next calibration decision, don't re-derive
+   by hand.
+5. **CrossAssetEngine snapshot history — built.** Making the snapshot files
+   themselves retain history was rejected: `gold_screener` LEFT JOINs
+   `lead_lag_tbl`/`forecast_tbl` against the whole file with no
+   `computation_date` filter, so retained history there would silently
+   duplicate every watchlist row once per retained week. Added
+   `src/gold/cross_asset/history.py` — additive, one dated file per run,
+   written alongside the (unchanged) snapshot file. `PITDataLoader`'s three
+   methods now read history and return exactly one snapshot (latest
+   `computation_date <= trade_date`); demonstrated that the naive
+   `computation_date <= trade_date` predicate returns all retained weeks
+   concatenated once history exists (6 rows / 3 weeks vs. 2 rows / 1 week
+   on a 3-week fixture). **Still open, unchanged by this update:** history
+   only accrues from the first weekly run after this shipped — not a
+   backfill, and the `cross_asset_xgboost` (ADR-053) training-data gap this
+   creates is not resolved here.
+
+Bugs caught by tests before shipping this update: `_persist_quality_gate_log`
+and the cross-asset PIT rewrite both went through the same
+write-test-first-fail discipline as the original ADR-050 pass — see
+CHANGELOG.md v1.20.0 for the specific mistakes (f-string SQL in a first
+draft of the PIT rewrite; a test-pollution leak from the new history hooks,
+fixed via an autouse `conftest.py` fixture).
+
+Items 6-9 above are unchanged by this update. Full detail: CHANGELOG.md
+v1.20.0, dev-log/2026-09-29-adr050-followup-findings-1-5.md.
+
+154 new tests total (was 103); 1798 -> 1952 passed, 0 regressions. New
+regression tests for this update confirmed to fail against the pre-fix
+behavior (runner: 3 failed; old blanket window: 3 failed; missing history
+hooks: 4 failed).
+
+
+
+---
+
+*Last updated: v1.20.0 — ADR-050 follow-up (29 Sep 2026): points 1-5 of RISK-35
+replayed against 280 real sentinels (5-28 Sep) via new `scripts/replay_gatekeeper.py` — weekly-job
+detection lag fixed (day+14 -> day+7), `run_on_failure` added so `--job all` reaches `gatekeeper`
+on a failed day, `src/gold/cross_asset/history.py` added (additive PIT history for the 3
+CrossAssetEngine snapshot files; `PITDataLoader` rewritten to read it, one snapshot only, no
+f-string SQL). `silver_macro`/`silver_global_rates` investigated and left unguarded on purpose
+(reads daily FRED files). Hysteresis windows kept as-is after a sweep. 154 total new tests
+(was 103), 1798 -> 1952 passed, 0 regressions. Full detail: CHANGELOG.md v1.20.0,
+dev-log/2026-09-29-adr050-followup-findings-1-5.md.
+Prior entry (28 Sep 2026, initial ADR-050 pass): v1.20.0 — ADR-050: Gatekeeper
+(`src/utils/gatekeeper.py`), 7 new `PITDataLoader` read methods, `quality_validator.py`
+per-check persistence, `fred_series.yaml` `domains.contributes_to` schema. 103 new tests,
+1798 -> 1901 passed. Prior entry before that: v1.19.1 — FIX GMI-JR-004: `gold_cross_asset_correlation`/
 `gold_lead_lag`/`gold_forecast` gained `run_on_weekdays: [6]` (RISK-34,
 25 Sep 2026) — same schedule-guard gap as RISK-23, found via a live
 `--job gold` run and confirmed against M1 sentinel history before the

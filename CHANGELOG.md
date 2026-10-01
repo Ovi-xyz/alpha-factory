@@ -1,5 +1,114 @@
 # CHANGELOG — Data Platform
 
+## v1.20.0 — ADR-050: Gatekeeper, perluasan PITDataLoader, pemisahan konfigurasi macro-series, dan penyelesaian temuan implementasi (GMI-FSR-001, GMI-PIT-001, GMI-GATE-001, September 2026)
+
+Implementasi ADR-050 (status PROPOSED, 27 September 2026) — fondasi yang
+memblokir ADR-051, ADR-053, dan ADR-054. Dikerjakan di sandbox dari clone
+GitHub `main` (dikonfirmasi identik dengan salinan live untuk 4 file yang
+disentuh); baseline 1798 passed dikonfirmasi sebelum satu baris pun diubah.
+**Belum dijalankan terhadap data live M1 dan belum di-mirror/byte-verify ke
+live repo** (lihat RISK-35).
+
+**GMI-FSR-001 — `config/fred_series.yaml` punya blok `domains` sendiri.**
+Setiap nilai `domain:` yang sudah dipakai seri (8 domain) kini punya entri
+`domains.<nama>._meta.contributes_to`, secara struktur meniru
+`_meta.contributes_to` di `instruments_taxonomy.yaml` tetapi dimiliki
+registry FRED. Kunci `domain` (bukan `score`) karena domain raw_macro ADR-051
+memberi makan GaussianHMM sebagai vektor fitur multivariat, bukan skor skalar
+berbobot. **Sengaja dikosongkan** — ADR-050: tanpa konsumen sampai ADR-051;
+`instruments_taxonomy.yaml` sendiri pernah membatalkan bobot tanpa sumber
+(FIX ADR-019). 68 seri dan invarian ADR-041/042 tidak berubah.
+
+**GMI-PIT-001 — `PITDataLoader` mendapat 7 method baca baru:**
+`get_global_regime`, `get_cross_asset_corr`, `get_lead_lag`, `get_forecast`,
+`get_signal_aggregation`, `get_context_regime`, `get_gate_status`. Semuanya
+`$name` parameterized (SQL statis, tanpa perakitan string), dibatasi
+`trade_date`. `get_context_regime` mengembalikan `None` secara alami sampai
+ADR-051 menulis outputnya. `get_gate_status` default `scope="gold"` karena
+Gatekeeper cascading.
+
+**GMI-GATE-001 — Gatekeeper (`src/utils/gatekeeper.py`, baru).**
+`quality_validator.py::run()` kini menyimpan seluruh hasil per-check ke
+`data/health/quality_gate_log.parquet` (idempoten per `run_date`, tetap
+ditulis saat CRITICAL gagal, tidak pernah menggagalkan gate itu sendiri).
+Gatekeeper membaca log itu + sentinel `DependencyGuard` + `JOB_REGISTRY`,
+menghitung status cascading Bronze→Silver→Gold (`pass`/`warn`/`block`) dan
+menulis `data/health/gate_status.parquet` (`run_date, scope, layer_health,
+gate_status, streak_days`). Hysteresis (dibaca dari `hmm-gatekeeper-xgboost.md`):
+`pass` butuh 2 hari berturut-turut, `block` butuh 4, `warn` selalu langsung.
+Riwayat 14 hari dihitung ulang dari sinyal dasar tiap run. Job `gatekeeper`
+(layer `util`, `depends_on: []`) di `DAILY_SEQUENCE` tepat sebelum
+`health_report`; `health_report` membacanya secara soft.
+
+**Penyelesaian lima temuan (diverifikasi terhadap riwayat sentinel live,
+5–28 Sep 2026, 280 sentinel direplay):**
+
+1. *`silver_macro`/`silver_global_rates` tanpa guard.* Diputuskan **tidak**
+   diberi guard Minggu (pola RISK-23/34): `macro_processor.process_fred`
+   membaca `data/bronze/macro/fred/**` — direktori yang sama dengan output
+   `bronze_fred_daily` — sehingga guard mingguan akan membuat Silver
+   kekurangan seri FRED harian yang dibutuhkan ADR-051. Riwayat live memang
+   menunjukkan job ini jalan harian via `--job silver`. Gatekeeper benar untuk
+   kedua mode (harian maupun mingguan). Ketidakkonsistenan registry yang
+   sebenarnya — job yang secara fungsional harian tetapi berada di prefix
+   weekly-only dan tidak ikut `--job all` — dicatat di RISK-35, **tidak
+   diubah** (keputusan orkestrasi milik operator).
+2. *Detection lag job mingguan.* Diukur, bukan diasumsikan: job mingguan ber-
+   guard (`run_on_weekdays`) yang terlewat baru terdeteksi 14 hari setelah
+   sukses terakhir (satu minggu terlambat) karena jendela 7 hari masih
+   menutupi run sebelumnya pada hari jatuh tempo. Diperbaiki: job yang
+   satu-satunya guard-nya `run_on_weekdays` dinilai **exact-date pada hari
+   jatuh tempo** (terdeteksi pada hari itu juga, day+7); job tanpa guard tetap
+   memakai jendela 7 hari (day+8). Klasifikasi diturunkan dari struktur
+   registry, bukan daftar job hardcoded.
+3. *`--job all` tidak pernah mencapai `gatekeeper` di hari gagal.* Ditambah
+   flag registry `run_on_failure`; `run_all()` kini men-skip sisa job setelah
+   kegagalan pertama **kecuali** yang ber-flag, lalu me-raise kegagalan
+   pertama (tipe exception / exit code tidak berubah; kegagalan job ber-flag
+   tidak menimpanya; `KeyboardInterrupt` tidak ditangkap). Hanya `gatekeeper`
+   yang ber-flag (dikunci test). `run_layer` tidak diubah — setelah layer run
+   gagal, jalankan `--job gatekeeper` (berdiri sendiri, tanpa dependency).
+4. *Hysteresis kalibrasi awal.* Direplay pada riwayat live: Bronze pass
+   sejak 8 Sep tanpa false positive; Silver menangkap celah nyata (18 Sep,
+   26–28 Sep). Sweep jendela: (2,4) tidak terbedakan dari (3,4)/(2,5)/(3,5)
+   pada data ini, tetapi jelas lebih tenang daripada block=1 (3 flip, hard-
+   block satu hari terlewat). Nilai dipertahankan; data belum cukup untuk
+   tuning lebih halus. Ditambah `scripts/replay_gatekeeper.py` (read-only,
+   `--sweep`) agar kalibrasi bisa diulang saat riwayat bertambah.
+5. *Tiga output CrossAssetEngine di-overwrite tiap minggu.* Membuat file
+   snapshot itu menyimpan riwayat ditolak: `gold_screener` melakukan `LEFT
+   JOIN lead_lag_tbl ON symbol = follower` dan `forecast_tbl ON symbol` atas
+   seluruh file tanpa filter `computation_date` — riwayat akan menduplikasi
+   setiap baris watchlist. Solusi aditif: `src/gold/cross_asset/history.py`
+   menulis satu file per run (`history/<nama>/<nama>_<tanggal>.parquet`) di
+   `run()` tiap modul setelah snapshot; snapshot tidak berubah. `PITDataLoader`
+   membaca history dan mengembalikan **satu** snapshot terbaru
+   `computation_date <= trade_date` (predikat naif `<=` akan mengembalikan 3
+   minggu tergabung — 6 baris vs 2, didemonstrasikan). **Keterbatasan
+   tetap:** riwayat hanya terkumpul sejak run mingguan pertama setelah rilis;
+   bukan backfill (modul butuh universe aktif yang ter-resolve per tanggal,
+   yang hanya ada sejak 5 Sep).
+
+**Kesalahan saya selama pengerjaan, tertangkap test sebelum dikirim:**
+(a) `_quarantine_today()` awalnya `Path(".").glob()` yang menolak pola absolut
+→ `glob.glob()`; (b) draf pertama penulisan ulang method PIT memakai f-string
+SQL dan merujuk konstanta yang belum didefinisikan — ditangkap
+`test_fstring_sql_absence`, ditulis ulang dengan SQL statis; (c) hook history
+menulis ke `data/gold/cross_asset/history/` asli saat test `run()` yang sudah
+ada berjalan — diisolasi lewat fixture autouse di `tests/conftest.py`
+(sekaligus mengisolasi `QUARANTINE_GLOB` Gatekeeper dari file bocoran test lain).
+
+**Verifikasi:** 154 test baru (1798 → 1952 passed, 0 regresi): `test_fred_
+series_contributes_to_adr050` 9, `test_quality_gate_log_persistence_adr050` 15,
+`test_gatekeeper_adr050` 47, `test_pit_data` 33 (file test pertama modul ini),
+`test_gatekeeper_wiring_adr050` 15, `test_run_all_run_on_failure_adr050` 12,
+`test_cross_asset_history_adr050` 14, `test_replay_gatekeeper_adr050` 9.
+Test putaran ini dikonfirmasi gagal terhadap perilaku lama (runner: 3 gagal;
+jendela lama: 3 gagal; hook history: 4 gagal). `ast.parse` bersih pada 20 file.
+Tanpa f-string SQL. Kebocoran test ke `data/` (correlation_clusters,
+hmm_regime_model.pkl, progress.db, quarantine/*) identik pada HEAD murni —
+sudah ada sebelumnya, tidak diubah. MINOR bump.
+
 ## v1.19.1 — FIX GMI-JR-004: schedule guard hilang di 3 job CrossAssetEngine mingguan, ditemukan via pengecekan live `--job gold` (RISK-34, September 2026)
 
 Ovi menjalankan `python src/runner.py --job gold` di live machine dan

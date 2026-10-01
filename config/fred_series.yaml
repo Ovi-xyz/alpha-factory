@@ -18,6 +18,50 @@
 version: "1.0"
 cadence_default: weekly    # pipeline fetch cadence (lebih sering dari release)
 
+# ── Domain Metadata — GMI-FSR-001 (ADR-050) ────────────────────────────────
+# contributes_to block, structurally mirroring instruments_taxonomy.yaml's
+# per-subcategory _meta.contributes_to shape (a list of {..., weight,
+# aggregation} objects) -- but owned HERE, as its own schema, not an
+# extension of instruments_taxonomy.yaml. Rationale (ADR-050): a raw FRED
+# macro series (DFF, T5YIE, NFCI, etc.) carries no yfinance_symbol, no
+# layer, no context_category -- it has no natural slot in that registry's
+# per-instrument shape, and bolting it on would couple instrument-count
+# validation (validate_instruments.py) to macro-series changes unrelated
+# to the tradable/context universe.
+#
+# Keyed by this file's own `domain:` values (the field every series entry
+# above already carries) -- NOT a new grouping vocabulary. Uses "domain"
+# rather than instruments_taxonomy's "score" key: entries here name a
+# CONTRIBUTING DOMAIN (e.g. ADR-051's raw_macro monetary/growth/inflation/
+# stress/liquidity buckets), not a single weighted-scalar composite score
+# the way instruments_taxonomy's score_dollar_strength/score_yield_curve/
+# etc. are. A raw_macro domain feeds a GaussianHMM its own multivariate
+# feature vector directly (ADR-051) -- there is no cross-series scalar
+# aggregation step the way instruments_taxonomy's z_score_* aggregations
+# imply, so "weight"/"aggregation" here describe a future consumer's own
+# routing needs, not a ready-to-run formula.
+#
+# Deliberately left EMPTY for every domain in this pass -- ADR-050's own
+# Consequences: "fred_series.yaml's contributes_to block has zero
+# consumers until ADR-051 ships." instruments_taxonomy.yaml already had to
+# reverse one case of undocumented, untraceable contributes_to weights
+# (FIX ADR-019 -- weights that appeared in neither Architecture Extension
+# v1.0 §5.2 nor Data Source & Rates Adjustment v1.0 §7's contributor
+# tables were emptied rather than kept). The same discipline applies here:
+# a domain/weight/aggregation value gets filled in only when the ADR that
+# actually builds the consumer (ADR-051, or a successor) says so
+# explicitly -- never invented ahead of that, however plausible a guess
+# might look from ADR-051's own variable->domain table.
+domains:
+  monetary_policy: { _meta: { contributes_to: [] } }
+  inflation:       { _meta: { contributes_to: [] } }
+  growth:          { _meta: { contributes_to: [] } }
+  labor:           { _meta: { contributes_to: [] } }
+  credit:          { _meta: { contributes_to: [] } }
+  housing:         { _meta: { contributes_to: [] } }
+  volatility:      { _meta: { contributes_to: [] } }
+  commodity:       { _meta: { contributes_to: [] } }
+
 # Subset yang masuk macro regime computation
 regime_inputs:
   vix_proxy:        VIXCLS

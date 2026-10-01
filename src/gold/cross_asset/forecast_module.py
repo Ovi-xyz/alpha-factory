@@ -163,6 +163,7 @@ from src.config.instrument_loader import get_loader
 from src.gold.cross_asset.broad_dollar import compute_broad_dollar, load_fx_returns
 from src.silver.active_symbols import ActiveSymbolsResolver
 from src.utils.atomic_io import atomic_write_parquet
+from src.gold.cross_asset.history import FORECAST_HISTORY_NAME, write_history_snapshot
 from src.utils.silver_scope import context_glob, layer1_globs
 
 SILVER_OHLCV_PATH     = Path("data/silver/market_ohlcv")
@@ -669,6 +670,7 @@ def run(run_date: date) -> None:
         compression="zstd",
         compression_level=3,
     )
+    write_history_snapshot(result, FORECAST_HISTORY_NAME, run_date)   # ADD GMI-PIT-001 follow-up
     n_symbols = result["symbol"].n_unique()
     n_unstable = int((~result["stable"]).sum())
     logger.info(

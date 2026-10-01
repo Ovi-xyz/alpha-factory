@@ -145,8 +145,37 @@ def run_all(force: bool = False, run_date: date | None = None) -> None:
     run_date = run_date or date.today()
     pipeline_logger.banner(f"FULL PIPELINE RUN — {run_date}")
 
+    # ADD GMI-GATE-001 (ADR-050) — run_on_failure. Sebelumnya run_all() berhenti
+    # di job gagal pertama (SystemExit dari dependency guard, atau exception
+    # dari job itu sendiri), sehingga job yang tugasnya MENGAMATI pipeline
+    # yang gagal (gatekeeper) justru tidak pernah jalan di hari yang paling
+    # membutuhkannya. Sekarang: setelah kegagalan pertama, job lain di-skip
+    # KECUALI yang ber-flag "run_on_failure" di JOB_REGISTRY; kegagalan
+    # pertama tetap di-raise di akhir (exit code / tipe exception tidak
+    # berubah), dan kegagalan job run_on_failure setelahnya TIDAK menimpanya.
+    # KeyboardInterrupt (BaseException) sengaja tidak ditangkap — operator
+    # yang membatalkan tidak boleh memicu job apa pun.
+    first_failure: BaseException | None = None
     for job_name in PIPELINE_SEQUENCE:
-        run_job(job_name, force=force, run_date=run_date)  # FIX R-F02
+        if first_failure is not None and not JOB_REGISTRY[job_name].get("run_on_failure", False):
+            continue
+        try:
+            run_job(job_name, force=force, run_date=run_date)  # FIX R-F02
+        except (SystemExit, Exception) as exc:
+            if first_failure is None:
+                first_failure = exc
+                pipeline_logger.warn(
+                    f"'{job_name}' gagal — sisa job di-skip kecuali yang ber-flag "
+                    f"run_on_failure (gatekeeper). Kegagalan ini tetap di-raise di akhir."
+                )
+            else:
+                logger.error(
+                    f"[Runner] run_on_failure job '{job_name}' juga gagal ({exc!r}) — "
+                    f"kegagalan pertama dipertahankan, tidak ditimpa."
+                )
+
+    if first_failure is not None:
+        raise first_failure
 
 
 def run_layer(layer: str, force: bool = False, run_date: date | None = None) -> None:

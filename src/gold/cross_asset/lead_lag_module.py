@@ -86,6 +86,7 @@ from src.config.instrument_loader import get_loader
 from src.silver.active_symbols import ActiveSymbolsResolver
 from src.silver.context_anchors import ContextAnchorsResolver
 from src.utils.atomic_io import atomic_write_parquet
+from src.gold.cross_asset.history import LEAD_LAG_HISTORY_NAME, write_history_snapshot
 from src.utils.silver_scope import context_glob, layer1_globs
 
 SILVER_OHLCV_PATH     = Path("data/silver/market_ohlcv")
@@ -390,6 +391,7 @@ def run(run_date: date) -> None:
         compression="zstd",
         compression_level=3,
     )
+    write_history_snapshot(result, LEAD_LAG_HISTORY_NAME, run_date)   # ADD GMI-PIT-001 follow-up
     n_sig = int(result["bh_significant"].sum())
     logger.info(
         f"[gold_lead_lag] {result.height:,} pairs tested, {n_sig:,} bh_significant "

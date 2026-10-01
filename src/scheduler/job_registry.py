@@ -322,6 +322,12 @@ def _health_report(run_date: date) -> None:
     health_run(run_date)
 
 
+def _gatekeeper(run_date: date) -> None:
+    # ADD GMI-GATE-001 (ADR-050): lazy import, same pattern as _health_report
+    from src.utils.gatekeeper import run as gatekeeper_run
+    gatekeeper_run(run_date)
+
+
 # ── Job Registry ──────────────────────────────────────────────────────────────
 
 JOB_REGISTRY: dict[str, dict[str, Any]] = {
@@ -767,6 +773,32 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
 
     # ── UTILITIES ─────────────────────────────────────────────────────────────
 
+    # ADD GMI-GATE-001 (ADR-050): cascading Bronze -> Silver -> Gold health
+    # gate with time-windowed hysteresis — see src/utils/gatekeeper.py.
+    #
+    # depends_on=[] is DELIBERATE, same reasoning as silver_context_anchors:
+    # this job exists to observe a pipeline that may have partly failed — a
+    # hard dependency on gold_screener would make it unrunnable on exactly
+    # the days its output matters most. Its position immediately before
+    # health_report in DAILY_SEQUENCE is for reading that day's completed
+    # sentinels, not an ordering requirement enforced by the guard.
+    #
+    # run_on_failure=True: run_all() stops at the first failed job, but
+    # still runs jobs carrying this flag before re-raising the original
+    # failure — so `--job all` records a gate_status row on a bad day too.
+    # Only this job carries it (pinned by a test); adding it elsewhere
+    # should be a deliberate decision. Layer runs (`--job bronze|silver|gold`)
+    # do not include util jobs — after a failed layer run, invoke
+    # `--job gatekeeper` explicitly (works standalone, no dependencies).
+    "gatekeeper": {
+        "description": "Gatekeeper — cascading Bronze/Silver/Gold gate status (pass/warn/block) + hysteresis",
+        "fn":          _gatekeeper,
+        "depends_on":  [],
+        "layer":       "util",
+        "est_minutes": 1,
+        "run_on_failure": True,
+    },
+
     "health_report": {
         "description": "Daily summary — run stats, storage check, optional Telegram alert",
         "fn":          _health_report,
@@ -840,6 +872,10 @@ DAILY_SEQUENCE: list[str] = [
     "gold_screener",
 
     # Util
+    # ADD GMI-GATE-001 (ADR-050): immediately before health_report so it
+    # reads that day's completed sentinels/checks, and health_report can
+    # surface gate status alongside its own summary.
+    "gatekeeper",
     "health_report",
 
     # gold_correlation RETIRED (FIX GMI-CORR-RETIRE-01, RISK-31) — successor

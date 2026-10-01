@@ -69,7 +69,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -89,6 +89,9 @@ from src.utils.silver_scope import (  # FIX QV-L2-01, ADD GAP-PEER-01
 
 SILVER_OHLCV_PATH  = Path("data/silver/market_ohlcv")
 SILVER_MACRO_PATH  = Path("data/silver/macro_enriched")
+# FIX GMI-GATE-001 (ADR-050): persisted per-check history — see
+# _persist_quality_gate_log() docstring below.
+QUALITY_GATE_LOG_PATH = Path("data/health/quality_gate_log.parquet")
 NULL_TOLERANCE     = 0.001   # 0.1% max null rate
 ZSCORE_THRESHOLD   = 4.0     # Outlier threshold — kept for backward compat;
                               # GAP-9 fix reads cfg.outlier_zscore_threshold instead
@@ -1119,6 +1122,84 @@ class QualityValidator:
         return True   # Non-blocking: warning only
 
 
+def _persist_quality_gate_log(
+    run_date: date,
+    results: dict[str, bool],
+    issues: list[dict],
+) -> None:
+    """
+    FIX GMI-GATE-001 (ADR-050): persist QualityValidator's full per-check
+    result set to data/health/quality_gate_log.parquet.
+
+    Previously this detail existed only in-memory for the duration of one
+    run() call — the `results` dict and the QualityValidator instance's
+    `_issues` list were both discarded the moment silver_validate's job
+    function returned. src/utils/gatekeeper.py (ADR-050 GMI-GATE-001) needs
+    this history across multiple days to evaluate its own time-windowed
+    hysteresis, which requires the detail to actually be written somewhere
+    durable — this was the gap.
+
+    Schema: run_date, check_name, tier, passed, detail, logged_at.
+        tier   — one of 'critical' / 'warning' / 'other', derived from the
+                 SAME CRITICAL_CHECKS / WARNING_CHECKS sets run() itself
+                 partitions against below — not re-derived independently.
+        detail — the matching self._issues entry's "detail" string for
+                 checks that failed or logged a warning-level issue, else
+                 None. First matching issue wins if a check somehow logs
+                 more than one in a single run (none currently do) —
+                 never silently concatenated.
+
+    Idempotent re-run convention matches global_index_regime.py's run():
+    existing rows for this run_date are dropped before the new rows are
+    appended/written, so re-running silver_validate for the same run_date
+    replaces that day's log rather than duplicating it.
+
+    Persistence failures are logged and swallowed, never raised — a
+    logging side-effect must not be able to fail the quality gate itself
+    (or block Gold, via a QualityGateError this function has no business
+    causing). Gatekeeper degrading to "no data yet" for one day is a far
+    smaller problem than silver_validate failing here.
+    """
+    issue_detail: dict[str, str] = {}
+    for issue in issues:
+        issue_detail.setdefault(issue["check"], issue.get("detail"))
+
+    if not results:
+        return
+
+    logged_at = datetime.now().isoformat()
+    rows = []
+    for check_name, passed in results.items():
+        if check_name in CRITICAL_CHECKS:
+            tier = "critical"
+        elif check_name in WARNING_CHECKS:
+            tier = "warning"
+        else:
+            tier = "other"
+        rows.append({
+            "run_date":   run_date.isoformat(),
+            "check_name": check_name,
+            "tier":       tier,
+            "passed":     bool(passed),
+            "detail":     issue_detail.get(check_name),
+            "logged_at":  logged_at,
+        })
+
+    try:
+        new_rows = pl.DataFrame(rows)
+        if QUALITY_GATE_LOG_PATH.exists():
+            existing = pl.read_parquet(QUALITY_GATE_LOG_PATH)
+            existing = existing.filter(pl.col("run_date") != run_date.isoformat())
+            out = pl.concat([existing, new_rows], how="diagonal_relaxed")
+        else:
+            out = new_rows
+        atomic_write_parquet(
+            out, QUALITY_GATE_LOG_PATH, compression="zstd", compression_level=3,
+        )
+    except Exception as e:
+        logger.warning(f"[QV] quality_gate_log persistence failed (non-blocking): {e}")
+
+
 def run(run_date: date) -> None:
     """Job entry point.
 
@@ -1130,7 +1211,8 @@ def run(run_date: date) -> None:
     Dependency Guard does not write .done sentinel when exception is raised,
     automatically blocking all downstream Gold jobs (GD §14.3.3).
     """
-    results = QualityValidator().run(run_date)
+    validator = QualityValidator()
+    results   = validator.run(run_date)
 
     # FIX F-QV-01 [P0]: key alignment ensures these partitions now work correctly.
     critical_failed = [k for k in CRITICAL_CHECKS if k in results and not results[k]]
@@ -1139,6 +1221,12 @@ def run(run_date: date) -> None:
         k for k, v in results.items()
         if not v and k not in CRITICAL_CHECKS and k not in WARNING_CHECKS
     ]
+
+    # FIX GMI-GATE-001 (ADR-050): persist unconditionally, before any
+    # warning/critical branching below — a blocked run (about to raise
+    # QualityGateError) is exactly the case Gatekeeper's history most
+    # needs to see, not one to skip logging for.
+    _persist_quality_gate_log(run_date, results, validator._issues)
 
     if warning_failed:
         logger.warning(

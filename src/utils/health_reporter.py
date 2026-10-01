@@ -42,6 +42,9 @@ from pathlib import Path
 from loguru import logger
 
 DB_PATH = Path("data/health/pipeline_runs.db")
+# ADD GMI-GATE-001 (ADR-050): Gatekeeper's output, surfaced alongside the
+# existing summary (ADR-050 Consequences). Soft read — see _read_gate_status().
+GATE_STATUS_PATH = Path("data/health/gate_status.parquet")
 BRONZE_IDX_GLOB = "data/bronze/market/ohlcv/idx/**/*.parquet"
 
 # System health thresholds (GD §15.2)
@@ -86,6 +89,10 @@ def generate_daily_report(run_date: date) -> dict:
         "total_failed":     0,
         "total_rows":       0,
         "avg_duration_sec": 0.0,
+        # ADD GMI-GATE-001 (ADR-050): {scope: {gate_status, layer_health,
+        # streak_days}} for run_date, or {} when Gatekeeper hasn't written
+        # a row for it (see _read_gate_status()).
+        "gate_status":      {},
         # FIX GAP-10 [P3] + FIX ADR-029: IDX coverage fields, populated by
         # _check_idx_coverage(). Reworked to presence-vs-missing (30 Jul 2026) --
         # idx_tvdatafeed_count/idx_fallback_count REMOVED (source-of-origin no
@@ -156,7 +163,38 @@ def generate_daily_report(run_date: date) -> dict:
     # ── IDX coverage check (FIX GAP-10 [P3]) ────────────────────────────────
     report.update(_check_idx_coverage(run_date))
 
+    # ── Gatekeeper status (ADD GMI-GATE-001, ADR-050) ────────────────────────
+    report["gate_status"] = _read_gate_status(run_date)
+
     return report
+
+
+def _read_gate_status(run_date: date) -> dict:
+    """
+    Soft read of data/health/gate_status.parquet for run_date. Returns
+    {scope: {gate_status, layer_health, streak_days}}, or {} if the file
+    or that day's rows don't exist (Gatekeeper not yet run, or its own
+    persistence failed non-fatally) — health_report must never fail
+    because a companion job's output is missing.
+    """
+    if not GATE_STATUS_PATH.exists():
+        return {}
+    try:
+        import polars as pl
+        df = pl.read_parquet(GATE_STATUS_PATH).filter(
+            pl.col("run_date") == run_date.isoformat()
+        )
+        return {
+            r["scope"]: {
+                "gate_status":  r["gate_status"],
+                "layer_health": r["layer_health"],
+                "streak_days":  r["streak_days"],
+            }
+            for r in df.to_dicts()
+        }
+    except Exception as e:
+        logger.warning(f"[HealthReporter] gate_status read failed: {e}")
+        return {}
 
 
 def _check_idx_coverage(run_date: date) -> dict:
@@ -291,6 +329,16 @@ def _print_report(report: dict) -> None:
             f"present ({report['idx_coverage_pct']}%) | "
             f"{report['idx_missing_count']} missing{idx_status}"
         )
+
+    # ADD GMI-GATE-001 (ADR-050): Gatekeeper line, only when a row exists.
+    gate = report.get("gate_status") or {}
+    if gate:
+        parts = [
+            f"{scope}={gate[scope]['gate_status']}"
+            f" (raw {gate[scope]['layer_health']}, streak {gate[scope]['streak_days']}d)"
+            for scope in ("bronze", "silver", "gold") if scope in gate
+        ]
+        logger.info("Gatekeeper: " + " | ".join(parts))
 
     logger.info("=" * 60)
 
