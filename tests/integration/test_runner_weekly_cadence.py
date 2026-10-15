@@ -283,6 +283,11 @@ class TestLayerCommands:
             "gold_cross_asset_correlation",
             "gold_lead_lag",
             "gold_forecast",
+            # ADD GMI-HMM2-001 (ADR-051): the dual-HMM weekly fit is Sunday-gated
+            # (run_on_weekdays [6]) and has no daily dependent — the daily classify
+            # job scores with whatever model exists — so it is correctly skipped here.
+            "gold_hmm_macro_fit",
+            "gold_hmm_market_fit",      # same shape: Sunday-gated, no daily dependent
         }
         for layer in ("bronze", "silver", "gold"):
             for job_name in LAYER_JOB_NAMES[layer]:

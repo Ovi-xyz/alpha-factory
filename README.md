@@ -368,10 +368,10 @@ alpha-factory/
 │   │   ├── technical_signals.py    # active_ohlcv-filtered (Layer 1 only)
 │   │   ├── mtf_alignment.py · macro_regime.py · sector_rotation.py
 │   │   ├── screener.py · correlation_matrix.py · views.py
-│   │   └── hmm_regime.py           # Phase 2 regime detection (dependency present, not wired to a job yet)
+│   │   └── hmm/                    # ADR-051 dual-HMM regime engine (config, fred_pit, raw_macro, raw_market; more modules in progress)
 │   │
 │   ├── scheduler/
-│   │   ├── job_registry.py         # 27 jobs, DAILY_SEQUENCE (16) + WEEKLY_SEQUENCE (22)
+│   │   ├── job_registry.py         # 31 jobs, DAILY_SEQUENCE (20) + WEEKLY_SEQUENCE (28)
 │   │   ├── dependency_guard.py     # file-sentinel based, with staleness-window support
 │   │   └── pipeline_scheduler.py   # APScheduler upgrade path (not yet activated)
 │   │

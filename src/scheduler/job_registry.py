@@ -317,6 +317,61 @@ def _gold_forecast(run_date: date) -> None:
     forecast_run(run_date)
 
 
+def _gold_raw_macro(run_date: date) -> None:
+    """ADD GMI-HMM2-001 (ADR-051) — dual-HMM engine, macro branch, module 1.
+    PIT-gated, forward-filled FRED panel (5 domains). Silver FRED only; no
+    dependency on the CrossAssetEngine or the technical chain (ADR-051
+    Amendment 2 §A)."""
+    from src.gold.hmm.raw_macro import run as raw_macro_run
+    raw_macro_run(run_date)
+
+
+def _gold_raw_market(run_date: date) -> None:
+    """ADD GMI-HMM2-001 (ADR-051) — dual-HMM engine, market branch, module 2.
+    Silver-only market-behaviour panel (FRED market series + Layer 1 US-stock
+    breadth). Never reads a Gold store — in particular not gold_global_regime
+    (ADR-051 Amendment 2 §A)."""
+    from src.gold.hmm.raw_market import run as raw_market_run
+    raw_market_run(run_date)
+
+
+def _gold_hmm_macro_regime(run_date: date) -> None:
+    """ADD GMI-HMM2-001 (ADR-051) — dual-HMM engine, macro branch, module 3 (daily classify).
+    Scores raw_macro with the persisted per-domain models and appends new rows. Soft: with no
+    fitted model it writes nothing."""
+    from src.gold.hmm.hmm_macro_regime import run as hmm_macro_run
+    hmm_macro_run(run_date)
+
+
+def _gold_hmm_macro_fit(run_date: date) -> None:
+    """ADD GMI-HMM2-001 (ADR-051) — macro branch, module 3 (weekly fit, Sunday). Fits every
+    domain, persists the models, appends the rows the store lacks."""
+    from src.gold.hmm.hmm_macro_regime import run_fit as hmm_macro_fit
+    hmm_macro_fit(run_date)
+
+
+def _gold_hmm_market_regime(run_date: date) -> None:
+    """ADD GMI-HMM2-001 (ADR-051) — dual-HMM engine, market branch, module 4 (daily classify).
+    Scores raw_market with the persisted model and appends new rows. Soft: with no fitted
+    model it writes nothing."""
+    from src.gold.hmm.hmm_market_regime import run as hmm_market_run
+    hmm_market_run(run_date)
+
+
+def _gold_hmm_market_fit(run_date: date) -> None:
+    """ADD GMI-HMM2-001 (ADR-051) — market branch, module 4 (weekly fit, Sunday). Fits the
+    model, persists it, appends the rows the store lacks."""
+    from src.gold.hmm.hmm_market_regime import run_fit as hmm_market_fit
+    hmm_market_fit(run_date)
+
+
+def _gold_context_regime(run_date: date) -> None:
+    """ADD GMI-HMM2-001 (ADR-051) — module 5. Pure join of the macro and market regime stores
+    (market attached as-of, 5-day tolerance, explicit staleness); rebuilt every run."""
+    from src.gold.hmm.context_regime import run as context_regime_run
+    context_regime_run(run_date)
+
+
 def _health_report(run_date: date) -> None:
     from src.utils.health_reporter import run as health_run
     health_run(run_date)
@@ -771,6 +826,100 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "est_minutes": 2,
     },
 
+    # ADD GMI-HMM2-001 (ADR-051, Amendment 2 §A) — dual-HMM regime engine,
+    # macro branch, module 1 of 5 (raw_macro -> hmm_macro_regime -> ...).
+    # depends_on silver_macro ONLY (weekly cadence, hence stale_tolerance 7 —
+    # same FIX NEW-1 pattern as silver_validate/gold_regime). Deliberately NO
+    # dependency on any CrossAssetEngine or technical-chain job, and none of
+    # those depend on this one: the engine is one of three independent
+    # intelligence domains (ADR-053/ADR-051 A2 §A). layer="gold" per ADR-051;
+    # note this puts the job inside the Gatekeeper's gold scope — a per-domain
+    # scope is a named follow-up (ADR-055 E6 / RISK-36 item 7), not part of
+    # this ADR.
+    "gold_raw_macro": {
+        "description":     "Dual-HMM raw_macro — PIT-gated, forward-filled FRED panel, 5 domains (ADR-051)",
+        "fn":              _gold_raw_macro,
+        "depends_on":      ["silver_macro"],
+        "stale_tolerance": {"silver_macro": 7},
+        "layer":           "gold",
+        "est_minutes":     1,
+    },
+
+    # ADD GMI-HMM2-001 (ADR-051, Amendment 2 §A) — dual-HMM regime engine,
+    # market branch, module 2 of 5. Silver ONLY: silver_ohlcv (Layer 1 US-stock
+    # 1D bars) + silver_macro (FRED market series; weekly cadence, hence
+    # stale_tolerance 7). Deliberately NOT gold_global_regime or any other
+    # CrossAssetEngine / technical-chain job — that would double-count breadth
+    # into decision_xgboost and couple two intelligence domains.
+    "gold_raw_market": {
+        "description":     "Dual-HMM raw_market — Silver-only market-behaviour panel: FRED market series + Layer 1 US-stock breadth (ADR-051)",
+        "fn":              _gold_raw_market,
+        "depends_on":      ["silver_ohlcv", "silver_macro"],
+        "stale_tolerance": {"silver_macro": 7},
+        "layer":           "gold",
+        "est_minutes":     2,
+    },
+
+    # ADD GMI-HMM2-001 (ADR-051) — dual-HMM macro branch, module 3 of 5.
+    # Daily classify: depends ONLY on gold_raw_macro. Deliberately NO hard dependency on the
+    # fit job below — a stale-but-present model still scores (visible via <domain>_model_fit_date)
+    # and with no model at all the job writes nothing (soft degrade), so a failed or skipped
+    # weekly fit can never block the daily chain.
+    "gold_hmm_macro_regime": {
+        "description":     "Dual-HMM macro regime — score raw_macro with the persisted per-domain models, append rows (ADR-051)",
+        "fn":              _gold_hmm_macro_regime,
+        "depends_on":      ["gold_raw_macro"],
+        "layer":           "gold",
+        "est_minutes":     1,
+    },
+
+    # Weekly fit (Sunday only — run_on_weekdays [6]; --force to bypass, e.g. the first live run).
+    # Sits in the WEEKLY_SEQUENCE prefix, i.e. BEFORE that day's gold_raw_macro, so it depends on
+    # the most recent raw_macro sentinel within 3 days (Fri/Sat) — the cross-cadence
+    # stale_tolerance pattern of FIX NEW-1.
+    "gold_hmm_macro_fit": {
+        "description":     "Dual-HMM macro fit — per-domain GaussianHMM (weekly, Sunday), persist models, append history (ADR-051)",
+        "fn":              _gold_hmm_macro_fit,
+        "depends_on":      ["gold_raw_macro"],
+        "stale_tolerance": {"gold_raw_macro": 3},
+        "run_on_weekdays": [6],
+        "layer":           "gold",
+        "est_minutes":     3,
+    },
+
+    # ADD GMI-HMM2-001 (ADR-051) — dual-HMM market branch, module 4 of 5. Same shape as the macro
+    # pair above: the daily classify depends ONLY on gold_raw_market (no hard dependency on the
+    # fit job — a stale-but-present model still scores, visible via market_model_fit_date, and
+    # with no model at all it writes nothing), and the Sunday fit is cross-cadence tolerant.
+    "gold_hmm_market_regime": {
+        "description":     "Dual-HMM market regime — score raw_market with the persisted model, append rows (ADR-051)",
+        "fn":              _gold_hmm_market_regime,
+        "depends_on":      ["gold_raw_market"],
+        "layer":           "gold",
+        "est_minutes":     1,
+    },
+
+    "gold_hmm_market_fit": {
+        "description":     "Dual-HMM market fit — GaussianHMM over raw_market (weekly, Sunday), persist model, append history (ADR-051)",
+        "fn":              _gold_hmm_market_fit,
+        "depends_on":      ["gold_raw_market"],
+        "stale_tolerance": {"gold_raw_market": 3},
+        "run_on_weekdays": [6],
+        "layer":           "gold",
+        "est_minutes":     3,
+    },
+
+    # ADD GMI-HMM2-001 (ADR-051) — module 5 of 5: context regime = (macro regime, market regime).
+    # A pure join with no model and therefore no fit job; it hard-depends on both daily classify
+    # jobs and on nothing else — in particular on nothing outside the HMM engine.
+    "gold_context_regime": {
+        "description":     "Dual-HMM context regime — join macro + market regime stores, market as-of with staleness (ADR-051)",
+        "fn":              _gold_context_regime,
+        "depends_on":      ["gold_hmm_macro_regime", "gold_hmm_market_regime"],
+        "layer":           "gold",
+        "est_minutes":     1,
+    },
+
     # ── UTILITIES ─────────────────────────────────────────────────────────────
 
     # ADD GMI-GATE-001 (ADR-050): cascading Bronze -> Silver -> Gold health
@@ -871,6 +1020,17 @@ DAILY_SEQUENCE: list[str] = [
     "gold_sector",
     "gold_screener",
 
+    # ADD GMI-HMM2-001 (ADR-051): dual-HMM engine. Positioned AFTER gold_screener
+    # and BEFORE gatekeeper on purpose — the runner stops at the first failing
+    # job and this engine is in burn-in, so it must not block the production
+    # chain above; the position carries no ordering meaning (the engine is
+    # independent of that chain).
+    "gold_raw_macro",
+    "gold_hmm_macro_regime",
+    "gold_raw_market",
+    "gold_hmm_market_regime",
+    "gold_context_regime",      # after BOTH classify jobs — the only hard ordering inside the engine
+
     # Util
     # ADD GMI-GATE-001 (ADR-050): immediately before health_report so it
     # reads that day's completed sentinels/checks, and health_report can
@@ -912,6 +1072,12 @@ WEEKLY_SEQUENCE: list[str] = [
     # VAR forecast, depends on gold_lead_lag above. Gate 1 closed this
     # session — see broad_dollar.py.
     "gold_forecast",
+
+    # ADD GMI-HMM2-001 (ADR-051) — dual-HMM macro fit, Sunday only (run_on_weekdays [6]).
+    # Last in the weekly prefix: it needs a recent raw_macro sentinel (stale_tolerance 3) and
+    # nothing downstream depends on it — the daily classify job scores with whatever model exists.
+    "gold_hmm_macro_fit",
+    "gold_hmm_market_fit",      # same: needs a raw_market sentinel within 3 days, nothing depends on it
 
     # Lanjutkan dengan DAILY_SEQUENCE setelah ini (per SOP §14.4.2)
 ] + DAILY_SEQUENCE

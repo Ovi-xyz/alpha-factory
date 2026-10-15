@@ -3567,7 +3567,93 @@ hooks: 4 failed).
 
 ---
 
-*Last updated: v1.20.0 — ADR-050 follow-up (29 Sep 2026): points 1-5 of RISK-35
+## RISK-36 (NEW): ADR-051 dual-HMM regime engine — built and unit-tested in sandbox only, never run against live Silver/FRED on the M1; first-pass calibration (market weights, macro label rule, join tolerance), PIT availability partly estimated, append-only store keeps degraded rows
+
+**Status:** 🟡 **OPEN (accepted, 14 Oct 2026).** v1.21.0. All five modules
+(`raw_macro`, `raw_market`, `hmm_macro_regime`, `hmm_market_regime`,
+`context_regime`) plus the shared `hmm_core` exist in the repo with tests;
+nothing has been run on the live M1 and the engine is in burn-in — no consumer
+reads `context_regime` yet. Same class of caveat as RISK-31 / RISK-33 / RISK-35.
+
+**Reference:** ADR-051 (+ Amendment 2 §A–F), ADR-055 (cutover, exit criteria
+E1–E7), `hmm-gatekeeper-xgboost.md`, RISK-35 (Gatekeeper).
+
+### What is accepted, and why
+
+1. **Nothing has run on the M1.** First-run order (ADR-055 E7): `gold_raw_macro`,
+   `gold_raw_market`, `gold_hmm_macro_fit --force`, `gold_hmm_market_fit --force`,
+   then `gold_hmm_macro_regime`, `gold_hmm_market_regime`, `gold_context_regime`.
+   Not run: breadth on the full 542-symbol Layer 1 universe. Until it has, treat
+   every number below as sandbox/synthetic or single-session evidence.
+2. **Market feature weights are first-pass.** VIX / dispersion / RMS of the
+   median return are oriented negative, share-up / median return positive.
+   FX (`DEXUSEU`, `DEXJPUS`) and yield changes (`DGS5`, `DGS10`, `T10Y2Y`) are
+   `0.0` — in the emission model, out of the state ordering — because their sign
+   flips with the macro regime. A wrong orientation would mislabel states
+   (risk_on ↔ risk_off) without any error; the synthetic recovery test proves
+   the mechanism (99.8% of a known chain, correct label order), not these weights
+   on real markets. Review against known dates (E7).
+3. **Macro label rule (§F) is first-pass and measured to miss.** From the
+   previous session's run on the live FRED panel: the 2001 recession is not
+   labelled; only 56% of NBER-recession months are labelled "recession"; COVID
+   detection lags to mid-May 2020 (PIT-correct — UNRATE only becomes available
+   then); the 2008 "recession" label persists ~10 months past the NBER end;
+   "slowdown" covers 29% of rows. ADR-053 should consume domain scores /
+   posteriors, not the label. These figures are carried forward from that
+   session's summary; the run itself was not repeated here.
+4. **PIT basis `recorded` is mostly `estimated` today.** Only 0.4% of Silver
+   rows are live-recorded; 99.6% are the 2026-08-20 backfill, which stays on the
+   estimated lag. Recorded lags measured earlier disagree with the estimates for
+   some series (NFCI 15 d vs 7, CPI 61 vs 45, UNRATE 57.5 vs 45): the live tail
+   will be staler than the training window for those series until live history
+   accumulates. Each row carries `avail_basis__*` so this is auditable.
+5. **Append-only stores keep degraded rows.** A row scored while the breadth
+   guard had nulled the US-stock features (a thin or partial latest day) is
+   computed on fewer features (`n_features_observed` < 10) and is **not**
+   recomputed when the late bars arrive: an out-of-sample row is never
+   overwritten (that is the point of `in_sample`). Consumers training on the
+   store should filter on `in_sample` and may want `n_features_observed` = full.
+   The alternative (rewrite the latest row) was rejected as it breaks the
+   insert-only guarantee.
+6. **`context_regime` is deliberately thin.** It carries `macro_label`,
+   activity/momentum, the market label/probability/score, staleness and
+   `in_sample` — not the per-domain macro states. ADR-055's legacy-regime
+   projection (STAGFLATION / REFLATION / DISINFLATION need inflation and growth
+   states) will probably need them. It is rebuilt every run, so adding columns
+   later is free; deferred until ADR-055 D1 is confirmed. `MARKET_TOLERANCE_DAYS`
+   = 5 is first-pass.
+7. **No per-domain Gatekeeper scope yet.** The HMM jobs sit in the `gold` scope;
+   ADR-055 E6 uses sentinel presence (≥ 95% of burn-in days) as the interim.
+8. **Shared engine moved, not rewritten — and tests re-created.** `hmm_core` was
+   extracted from `hmm_macro_regime` with the function bodies unchanged, gated by
+   a golden master (5 model JSONs byte-identical, 900-row store equal). The
+   Phase C tests from the previous session were lost with its sandbox and were
+   re-written from the module; that session's ~60-mutant result is not carried
+   over (25 fresh mutants: 25 killed). The live repo itself held stale
+   HMM tests (98 failures against the refined source) until this release.
+9. **3 environmental test failures, not caused by this work.** 2×
+   `test_check_poetry_env` (no poetry binary in the sandbox) and 1×
+   `test_ohlcv_processor::TestNormalizeTimestampsUtf8Fallback` (polars version
+   difference in the sandbox) fail identically on a pristine GitHub `main`
+   clone; expected to pass on the M1.
+
+### Verification
+
+1952 → 2420 collected; 2417 passed, 3 failed (item 9). 5 new test files (core
+44, macro 51, market config 40, market regime 32, context 39), 4 stale files
+rewritten, independence tests extended. Mutation: 25 / 25 killed (one survivor
+on the first pass — the `n == short_history_min_obs` boundary — closed with a
+new test). Full detail: CHANGELOG.md v1.21.0, dev-log/2026-10-14-adr051-engine-completion.md.
+
+---
+
+*Last updated: v1.21.0 — ADR-051 (14 Oct 2026): dual-HMM regime engine completed —
+`hmm_core` (shared engine, extracted verbatim, golden-master gated),
+`hmm_market_regime`, `context_regime`, market model config, 3 new jobs; stale
+HMM tests on live rewritten (RISK-36). 1952 -> 2420 collected, 25/25 mutants
+killed. Full detail: CHANGELOG.md v1.21.0,
+dev-log/2026-10-14-adr051-engine-completion.md.
+Prior entry (29 Sep 2026): v1.20.0 — ADR-050 follow-up: points 1-5 of RISK-35
 replayed against 280 real sentinels (5-28 Sep) via new `scripts/replay_gatekeeper.py` — weekly-job
 detection lag fixed (day+14 -> day+7), `run_on_failure` added so `--job all` reaches `gatekeeper`
 on a failed day, `src/gold/cross_asset/history.py` added (additive PIT history for the 3

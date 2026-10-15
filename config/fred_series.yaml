@@ -72,6 +72,225 @@ regime_inputs:
   financial_stress: NFCI
   credit_spread:    BAMLH0A0HYM2
 
+# ── ADR-051 (GMI-HMM2-001) — raw_macro routing ───────────────────────────────────────────
+# Per-series routing for the dual-HMM regime engine's macro branch
+# (src/gold/hmm/raw_macro.py). Replaces the `domains.*._meta.contributes_to`
+# idea of ADR-050 for this consumer (ADR-051 Amendment 2 §B): that block is
+# keyed by this registry's own `domain:` vocabulary and cannot express the
+# routing below (e.g. registry domain `credit` alone feeds four different
+# HMM destinations). The ADR-050 block above is deliberately left EMPTY.
+#
+# Schema (validated by src/gold/hmm/config.py::macro_config — a malformed or
+# collinear block fails loudly at load time, never silently at fit time):
+#   domains                  HMM macro domains (one GaussianHMM each — ADR-051)
+#   pit.basis                recorded | estimated — REQUIRED, no default. `recorded`: a
+#                            value is usable on as_of_date D iff D >= the UTC date this
+#                            pipeline first recorded it (Silver `_ingested_at`), an actual
+#                            timestamp, for every row NOT in its series' first-ingest
+#                            (backfill) batch; backfilled history falls back to the
+#                            estimate below. `estimated`: the estimate everywhere.
+#                            Rule + measured evidence: src/gold/hmm/fred_pit.py.
+#   pit.frequency_floor_days ESTIMATED publication lag per registry `frequency:`
+#                            (fallback for backfilled history; Amendment 2 §C: daily 1 /
+#                            weekly 7 / monthly 45 / quarterly 120):
+#                            available_on = max(release_date, observation_date + lag).
+#   pit.series_lag_days      per-series ESTIMATED-lag override — series the registry
+#                            labels `daily` that FRED actually posts in a
+#                            weekly step (Fed H.10 batch for DEXUSEU/DEXJPUS,
+#                            EIA weekly posting for DCOILWTICO). Shared by
+#                            raw_macro and raw_market (one fred_pit.py).
+#   features                 one entry per model feature:
+#       feature   column name in raw_macro.parquet
+#       series    source series id (registry)          } exactly one of
+#       derived   {op: subtract, left, right}          } series / derived
+#       domain    one of `domains`
+#       transform level | pct_change_12m (monthly series only, in percent)
+#
+# REALYIELD5Y/10Y are DERIVED (x = f - k, y = h - l in hmm-gatekeeper-xgboost.md),
+# computed on the daily panel from the two legs after each leg is PIT-gated
+# separately. Collinearity guard (enforced by config.validate): a domain may
+# never contain a derived feature together with BOTH of its legs. As routed,
+# monetary holds DGS5/DGS10 + the REAL YIELDs, inflation holds T5YIE/T10YIE —
+# no domain sees all three legs of either identity.
+#
+# NFCI is the correct series id — the source note's `NFCL` is a typo.
+# BAMLH0A0HYM2 has only ~3 years of Silver history (from 2023-08-21): the
+# stress domain is fitted but flagged short_history downstream (ADR-051 A2).
+#
+# MODEL SETTINGS (hmm_macro_regime, ADR-051 phase C; validated by config.macro_model_config —
+# raw_macro neither reads nor depends on any of them):
+#   labels       the 3 state labels per domain, ascending along its oriented axis (state 0 =
+#                the first label): monetary tightening/neutral/easing, growth low/normal/high,
+#                inflation low/stable/high, stress low/normal/high, liquidity tight/neutral/ease.
+#   weight       per feature, SIGNED: orients the domain axis so a higher composite = a later
+#                label; composite(state) = sum(weight x state mean, robust-scaled units). It
+#                ORDERS states and seeds the deterministic initialisation; 0.0 = in the emission
+#                model but OUT of the ordering. The emission model itself weighs every feature
+#                equally. FIRST-PASS: signs encode economic direction only (all magnitudes 1.0),
+#                to be reviewed against known macro dates (ADR-055 E7):
+#                  monetary   + = easier: DFF and real yields lower, steeper curve (T10Y2Y);
+#                             nominal DGS5/DGS10 at 0.0 (their level is already carried by the
+#                             real yields — avoids triple-counting the rate level)
+#                  growth     + = stronger: real GDP growth up, unemployment down
+#                  inflation  + = higher: breakevens, CPI YoY and WTI up
+#                  stress     + = more stress: HY spread wider
+#                  liquidity  + = easier: NFCI lower, 30Y mortgage rate lower
+#   fit          ADR-051 A2 §D/§E. Robust (median/MAD) scaling clipped at +/-scaler_clip; n_random_seeds
+#                random EM starts + one deterministic composite-score start compete on likelihood;
+#                a degenerate fit (a state below min_state_share) is refused and the previous model
+#                kept. short_history_min_obs is the ADR's 2,000. min_obs_to_fit, min_state_share,
+#                var_floor, tol, n_iter and n_random_seeds are FIRST-PASS values. model_version
+#                labels this whole specification (bump on any change; each model file and stored
+#                row also carries an automatic fingerprint of everything).
+#   macro_label  ADR-051 A2 §F, deterministic: activity = mean of the oriented domain scores over
+#                `axes` (short_history domains excluded; `required` must be present); momentum =
+#                activity change over momentum_window_bd weekdays; activity above +threshold ->
+#                expansion (slowdown if momentum below -momentum_threshold), below -threshold ->
+#                recession (recovery if momentum above +momentum_threshold), inside the band the
+#                previous label carries. FIRST-PASS calibration.
+hmm:
+  version: "1"
+  domains: [monetary, growth, inflation, stress, liquidity]
+  pit:
+    basis: recorded
+    frequency_floor_days: {daily: 1, weekly: 7, monthly: 45, quarterly: 120}
+    series_lag_days: {DEXUSEU: 10, DEXJPUS: 10, DCOILWTICO: 8}
+  features:
+    # monetary
+    - {feature: DFF,          series: DFF,    domain: monetary,  transform: level, weight: -1.0}
+    - {feature: T10Y2Y,       series: T10Y2Y, domain: monetary,  transform: level, weight:  1.0}
+    - {feature: DGS5,         series: DGS5,   domain: monetary,  transform: level, weight:  0.0}
+    - {feature: DGS10,        series: DGS10,  domain: monetary,  transform: level, weight:  0.0}
+    - {feature: REALYIELD5Y,  domain: monetary, weight: -1.0, derived: {op: subtract, left: DGS5,  right: T5YIE}}
+    - {feature: REALYIELD10Y, domain: monetary, weight: -1.0, derived: {op: subtract, left: DGS10, right: T10YIE}}
+    # growth
+    - {feature: A191RL1Q225SBEA, series: A191RL1Q225SBEA, domain: growth, transform: level, weight:  1.0}
+    - {feature: UNRATE,          series: UNRATE,          domain: growth, transform: level, weight: -1.0}
+    # inflation (WTI routed here, matching score_inflation_pressure)
+    - {feature: T5YIE,        series: T5YIE,      domain: inflation, transform: level, weight: 1.0}
+    - {feature: T10YIE,       series: T10YIE,     domain: inflation, transform: level, weight: 1.0}
+    - {feature: CPIAUCSL_YOY, series: CPIAUCSL,   domain: inflation, transform: pct_change_12m, weight: 1.0}
+    - {feature: DCOILWTICO,   series: DCOILWTICO, domain: inflation, transform: level, weight: 1.0}
+    # stress
+    - {feature: BAMLH0A0HYM2, series: BAMLH0A0HYM2, domain: stress, transform: level, weight: 1.0}
+    # liquidity
+    - {feature: NFCI,         series: NFCI,         domain: liquidity, transform: level, weight: -1.0}
+    - {feature: MORTGAGE30US, series: MORTGAGE30US, domain: liquidity, transform: level, weight: -1.0}
+  labels:
+    monetary:  [tightening, neutral, easing]
+    growth:    [low, normal, high]
+    inflation: [low, stable, high]
+    stress:    [low, normal, high]
+    liquidity: [tight, neutral, ease]
+  fit:
+    model_version: "1"
+    n_states: 3
+    n_random_seeds: 8
+    n_iter: 200
+    tol: 1.0e-4
+    min_obs_to_fit: 250
+    short_history_min_obs: 2000
+    min_state_share: 0.02
+    var_floor: 1.0e-4
+    scaler_clip: 4.0
+  macro_label:
+    axes: {growth: 1, liquidity: 1, stress: -1}
+    required: growth
+    activity_threshold: 0.10
+    momentum_threshold: 0.25
+    momentum_window_bd: 63
+
+# ── ADR-051 (GMI-HMM2-001) — raw_market routing ────────────────────────────────────────────
+# Feature routing for the dual-HMM engine's MARKET branch
+# (src/gold/hmm/raw_market.py), validated by config.market_config. Separate
+# block from `hmm:` on purpose (ADR-051 Amendment 2 §B): different branch,
+# different feature sources. The PIT availability rule (floors + per-series
+# overrides) is NOT repeated here — it is shared with the macro branch from
+# `hmm.pit` above (one fred_pit.py, one rule, one basis).
+#
+# `source` is a WHITELIST — exactly two sources exist and neither is a Gold
+# store (Amendment 2 §A: the market branch reads Silver only, never
+# gold_global_regime or any other CrossAssetEngine / technical-chain output;
+# market_config rejects anything else, naming the offending feature):
+#   fred            a FRED series, PIT-gated like the macro branch
+#                   keys: feature, source, series, transform
+#   silver_breadth  cross-sectional behaviour of the Layer 1 US-stock 1D bars
+#                   keys: feature, source, metric
+#                   metrics: share_up (share of symbols with a positive log
+#                   return), median_return, dispersion (cross-sectional std of
+#                   log returns), rms_median_return (root-mean-square of the
+#                   cross-sectional MEDIAN log return over the last `rms_window`
+#                   valid trading days — zero-mean by construction, no mean
+#                   estimated; NOT a volatility of a tradable portfolio)
+#
+# Transforms: level | log_change_20 (ln over the 20th previous OBSERVATION) |
+# diff_1 (change vs the previous observation).
+#
+# breadth.* guards (FIRST-PASS calibration — to be reviewed against the first
+# live run, ADR-055 E7; nothing here is an empirical optimum). A date is VALID iff
+# BOTH guards pass; the decision is reproducible from the stored row alone
+# (us_n_symbols, us_n_eligible, us_coverage_ratio) plus these versioned values:
+#   min_symbols            guard A: fewer clean Layer 1 returns than this nulls
+#                          the date's breadth features (garbage-in guard)
+#   min_coverage_ratio     guard B: clean returns / ELIGIBLE symbols (those whose
+#                          first clean return is on or before the date, so
+#                          later-listed names don't count against early years)
+#                          below this is a PARTIAL day (e.g. a late ingest of the
+#                          latest bar): nulled
+#   rms_window             valid trading days in the median-return RMS
+#   guard_version          label of THIS threshold set — bump it whenever a value
+#                          above changes. raw_market also writes an automatic
+#                          fingerprint of every field, so an edit that forgot the
+#                          bump is still visible in the data.
+# Rows are US trading days (dates with at least one clean Layer 1 return), not
+# weekdays; FRED features are carried to them as-of (with their PIT lag).
+hmm_market:
+  version: "1"
+  features:
+    # FRED market series
+    - {feature: VIXCLS,             source: fred, series: VIXCLS, transform: level,          weight: -1.0}
+    - {feature: DEXUSEU_LOGCHG20,   source: fred, series: DEXUSEU, transform: log_change_20, weight:  0.0}
+    - {feature: DEXJPUS_LOGCHG20,   source: fred, series: DEXJPUS, transform: log_change_20, weight:  0.0}
+    - {feature: DGS5_D1,            source: fred, series: DGS5,   transform: diff_1,         weight:  0.0}
+    - {feature: DGS10_D1,           source: fred, series: DGS10,  transform: diff_1,         weight:  0.0}
+    - {feature: T10Y2Y_D1,          source: fred, series: T10Y2Y, transform: diff_1,         weight:  0.0}
+    # Layer 1 US-stock cross-section (Silver)
+    - {feature: us_share_up,         source: silver_breadth, metric: share_up,          weight:  1.0}
+    - {feature: us_median_ret,       source: silver_breadth, metric: median_return,     weight:  1.0}
+    - {feature: us_dispersion,       source: silver_breadth, metric: dispersion,        weight: -0.5}
+    - {feature: us_median_ret_rms,   source: silver_breadth, metric: rms_median_return, weight: -1.0}
+  breadth:
+    market: us_stocks
+    timeframe: 1D
+    min_symbols: 100
+    min_coverage_ratio: 0.8
+    rms_window: 20
+    guard_version: "1"
+  # Market MODEL (hmm_market_regime). FIRST-PASS calibration — review per ADR-055 E7.
+  #   weight   signed ordering weight: states are ordered ascending along
+  #            sum(weight x scaled state mean), so state 0 is always the first label
+  #            (risk_off) and the last state the last label (risk_on). Only features with an
+  #            unambiguous risk direction carry one: VIX / dispersion / RMS of the median
+  #            return rising = stress (negative); share-up / median return rising = risk-on
+  #            (positive). FX moves and yield changes are 0.0 — in the emission model, out of
+  #            the ordering — because their sign flips with the macro regime (a yield rise is
+  #            a growth scare in one episode and an inflation scare in the next; USD/EUR and
+  #            USD/JPY moves are carry-on in one and flight-to-safety in another).
+  #   labels   state vocabulary, ascending along that axis.
+  #   fit      same schema and meaning as hmm.fit; the market model has its own model_version.
+  labels: [risk_off, mixed, risk_on]
+  fit:
+    model_version: "1"
+    n_states: 3
+    n_random_seeds: 8
+    n_iter: 200
+    tol: 1.0e-4
+    min_obs_to_fit: 250
+    short_history_min_obs: 2000
+    min_state_share: 0.02
+    var_floor: 1.0e-4
+    scaler_clip: 4.0
+
 series:
   # ── 1. Monetary Policy & Rates (18) ──────────────────────────────────────
   - {id: FEDFUNDS,     domain: monetary_policy, frequency: monthly, cadence: weekly,  regime_input: true,  description: Federal Funds Effective Rate}

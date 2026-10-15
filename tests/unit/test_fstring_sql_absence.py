@@ -243,17 +243,12 @@ class TestNoFStringSQLInSourceCode:
     # precedent as RISK-11's retirement of tests whose entire premise no
     # longer held once their target was archived.
 
-    def test_hmm_regime_no_fstring_sql(self):
-        """Spot check: hmm_regime.py (1 violation pre-fix)."""
-        violations = _scan_fstring_sql_violations(SRC_ROOT / "gold")
-        hmm_violations = [
-            (p, ln, s) for p, ln, s in violations
-            if "hmm_regime" in str(p)
-        ]
-        assert len(hmm_violations) == 0, (
-            f"GLD-003: hmm_regime.py masih mengandung f-string SQL:\n"
-            + "\n".join(f"  :{ln} → {s!r}" for _, ln, s in hmm_violations)
-        )
+    # test_hmm_regime_no_fstring_sql RETIRED (ADR-051, GMI-HMM2-001): hmm_regime.py
+    # was archived to archive/hmm_regime_orphan_2026_09/ — the spot check would
+    # now vacuously pass (file absent from SRC_ROOT/"gold") rather than test
+    # anything real. Same precedent as the correlation_matrix.py retirement above.
+    # The successor package src/gold/hmm/ is covered by this file's directory-wide
+    # scans (test_no_fstring_sql_in_gold_layer, test_no_fstring_sql_anywhere_in_src).
 
 
 # TestSymbolInjectionFixed RETIRED (FIX GMI-CORR-RETIRE-01, RISK-31, 20 Sep

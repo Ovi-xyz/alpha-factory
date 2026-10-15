@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.20.0"
+version = "1.21.0"
 # FIX GMI-JR-004 (RISK-34, chat thread, 25 Sep 2026): gold_cross_asset_
 # correlation/gold_lead_lag/gold_forecast had no run_on_weekdays guard —
 # identical gap to RISK-23 (31 Aug 2026, bronze_macro_weekly/

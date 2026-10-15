@@ -1,5 +1,93 @@
 # CHANGELOG — Data Platform
 
+## v1.21.0 — ADR-051: Dual-HMM Regime Engine — lima modul, mesin HMM bersama, dan 98 tes lama yang usang diperbarui (GMI-HMM2-001, Oktober 2026)
+
+Implementasi ADR-051 (+ Amendment 2) selesai: lima modul di `src/gold/hmm/`,
+masing-masing dengan input, store, dan job sendiri, hand-off hanya lewat
+Parquet — `raw_macro` → `hmm_macro_regime`, `raw_market` →
+`hmm_market_regime`, dan `context_regime` (join murni). Fase A–C sudah ada di
+repo live (sumber, yaml, registry) tetapi tes-nya belum di-mirror; fase D–E,
+mesin bersama, dan seluruh tes dikerjakan di sandbox hasil clone GitHub `main`
++ overlay file HMM live. **Belum dijalankan terhadap data live M1** (lihat
+RISK-36).
+
+**Temuan awal sesi — 98 tes HMM di live usang.** `test_hmm_config`,
+`test_hmm_fred_pit`, `test_hmm_raw_macro`, `test_hmm_raw_market` masih menguji
+kontrak sebelum lima refinement (`date`→`as_of_date`, `age__`→tiga kolom
+tanggal `obs_date__`/`available_on__`/`avail_basis__`, `partial_day_window`→
+`min_coverage_ratio`, `realized_vol`→`rms_median_return`, `pit.basis` wajib).
+Semuanya diperbarui ke kontrak sekarang, ditambah tes baru untuk availability
+`recorded` vs `estimated` vs `mixed`, lineage `backfilled`, dan fingerprint
+guard. Test `hmm_macro_regime` (Fase C) tidak ada sama sekali di live — ditulis
+ulang.
+
+**`hmm_core.py` (baru) — satu mesin HMM untuk kedua cabang.** Scaler robust,
+fit (start komposit deterministik vs start acak, fit degenerate ditolak),
+forward filter (null di-marginalkan), kolom `<prefix>_label/_probability/
+_score/_post_*`, dan helper persistensi dipindah **verbatim** dari
+`hmm_macro_regime.py`; `fit_model()` dan `append_store()` diekstrak agar cabang
+market tidak menyalin ~80 baris. Pemindahan dijaga *golden master*: fit 5
+domain + 900 baris store pada panel sintetis menghasilkan JSON model yang
+byte-identik sebelum/sesudah. `hmm_macro_regime` me-re-export semua nama yang
+dipindah (permukaan publik tidak berubah). Lint menangkap satu regresi dari
+edit sendiri (`import math` terhapus) sebelum tes dijalankan.
+
+**Konfigurasi model market.** Blok `hmm_market:` mendapat `weight` bertanda per
+fitur, `labels` (`risk_off, mixed, risk_on`), dan `fit` (skema sama dengan
+`hmm.fit`, `model_version` sendiri). `_validate_fit()` dipakai bersama dengan
+validator macro. Bobot **first-pass**: VIX/dispersion/RMS negatif, share-up/
+median-return positif; FX dan perubahan yield **0,0** (masuk model emisi, di
+luar urutan state) karena tandanya berubah menurut regime. Fingerprint model
+mencakup routing + bobot + label + fit + definisi breadth + basis PIT.
+
+**`hmm_market_regime.py`.** GaussianHMM 3-state diagonal; store append-only
+`market_regime.parquet` (`date`, `market_label/probability/score`, tiga
+posterior, `market_short_history`, `market_model_fit_date`,
+`n_features_observed`, `in_sample`, lineage). `n_features_observed` membuat
+baris dengan breadth yang di-null guard (hari tipis/parsial) terlihat — filter
+memarginalkan fitur hilang secara eksak. Dua job: fit mingguan (Minggu) dan
+classify harian tanpa hard-dependency ke fit (model basi tetap men-skor; tanpa
+model sama sekali tidak menulis apa pun).
+
+**`context_regime.py`.** Join murni, dibangun ulang tiap run: tulang punggung
+= store macro; market dilampirkan *as-of* (backward) dengan toleransi 5 hari
+kalender, kolom `market_age_days` eksplisit; di luar toleransi seluruh kolom
+market null (bukan carry basi). `in_sample` = OR dari sisi yang dipakai.
+Sengaja tipis (ADR-051 Consequences) — tanpa schema append-only, menambah
+kolom nanti gratis. Path-nya sama dengan yang dibaca
+`PITDataLoader.get_context_regime` (diuji round-trip lewat accessor asli).
+Store yang hilang → tidak menulis apa pun dan tidak menimpa file lama.
+
+**Registry.** Tiga job baru: `gold_hmm_market_regime` (daily, dep
+`gold_raw_market`), `gold_hmm_market_fit` (Minggu, `stale_tolerance`
+`gold_raw_market: 3`, prefix WEEKLY_SEQUENCE), `gold_context_regime` (daily,
+dep kedua classify job). Posisi: setelah `gold_screener`, sebelum
+`gatekeeper`. Tes independensi diperluas (HMM_JOBS, guard drift berdasarkan
+konvensi nama, mirror makro↔market, join tanpa fit job di hulu).
+
+**Perbaikan kecil.** `append_new_rows` (macro) kini memeriksa kolom yang
+dibaca (`macro_label`, `macro_activity`) *sebelum* membacanya — store lama
+yang kehilangan kolom itu memunculkan `MacroRegimeError` yang menjelaskan,
+bukan `ColumnNotFoundError` polars mentah.
+
+**Pengujian.** 1952 → 2420 collected; 2417 passed, 3 gagal — ketiganya
+lingkungan, sudah ada sebelum perubahan ini dan gagal juga di `main` murni di
+container sandbox (2× `test_check_poetry_env` karena binary poetry tidak ada;
+1× `test_ohlcv_processor::...Utf8Fallback` karena perbedaan versi polars).
+Tes baru: `test_hmm_core` (44), `test_hmm_macro_regime` (51),
+`test_hmm_market_model_config` (40), `test_hmm_market_regime` (32),
+`test_hmm_context_regime` (39). **Mutation testing: 25 mutan di core/market/
+context/macro, 25 terbunuh** (satu selamat pada pass pertama — batas
+`n == short_history_min_obs` — tes batas ditambahkan, mutan terbunuh).
+Catatan jujur: mutation testing Fase C dari sesi sebelumnya (~60 mutan) tidak
+ikut terbawa karena sandbox hilang; sebagai gantinya 25 mutan di atas
+dijalankan ulang terhadap kode & tes yang sekarang.
+
+**Mirror.** Sandbox sempat hilang di antara sesi (container di-reset): dibangun
+ulang dari GitHub `main` (v1.20.0) + overlay file HMM live. `tests/COUNT_BASELINE.txt`
+2149 → 2420 (live tidak punya file tes yang tidak ada di sandbox; mirror
+menambah tepat 5 file tes baru).
+
 ## v1.20.0 — ADR-050: Gatekeeper, perluasan PITDataLoader, pemisahan konfigurasi macro-series, dan penyelesaian temuan implementasi (GMI-FSR-001, GMI-PIT-001, GMI-GATE-001, September 2026)
 
 Implementasi ADR-050 (status PROPOSED, 27 September 2026) — fondasi yang

@@ -156,7 +156,7 @@ class TestGLD003NoFStringSQLIntegration:
         "src/gold/screener.py",
         # correlation_matrix.py retired (FIX GMI-CORR-RETIRE-01, RISK-31,
         # 20 Sep 2026) — archived to archive/gold_correlation_retirement_2026_09/.
-        "src/gold/hmm_regime.py",
+        # hmm_regime.py retired (ADR-051) — archived to archive/hmm_regime_orphan_2026_09/.
         "src/gold/macro_regime.py",
     ]
 
