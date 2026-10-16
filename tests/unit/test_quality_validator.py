@@ -8,6 +8,34 @@ import pytest
 from src.silver.quality_validator import QualityValidator
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_silver_roots(tmp_path, monkeypatch):
+    """
+    FIX QV-TEST-ISO-01 [chat thread, 16 Oct 2026]: QualityValidator reads
+    SILVER_OHLCV_PATH / SILVER_MACRO_PATH, which default to CWD-relative
+    data/silver/... — the real Silver tree whenever pytest runs from a repo
+    checkout that holds live data (Ovi's M1; a pristine clone or CI has no
+    data/, which is why this never showed up there). Every "graceful no data"
+    test below assumed that tree was empty and used date(2099, 1, 1) as a
+    stand-in for "no data". It is not: with real data on disk, a far-future
+    run_date means "everything is infinitely stale", so freshness_check and
+    coverage_check correctly return False, and the run_date-independent
+    context_gap_detection simply reports whatever the live Layer 2 history
+    holds (72 isolated gaps on 16 Oct 2026). Same failure class conftest.py
+    already isolates for the cross-asset history root and Gatekeeper's
+    quarantine glob.
+
+    Redirects both roots to paths that do not exist (never created), so each
+    check takes its genuine "no data yet" branch. Also stops tests such as
+    test_outlier_check_graceful_no_data from running the is_clean writeback
+    against the real Silver files. Tests that need data keep passing their
+    own tmp_path via monkeypatch.setattr — that override still wins.
+    """
+    import src.silver.quality_validator as qv_mod
+    monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path / "_no_silver_ohlcv")
+    monkeypatch.setattr(qv_mod, "SILVER_MACRO_PATH", tmp_path / "_no_silver_macro")
+
+
 class TestQualityValidatorRun:
 
     def test_run_returns_dict(self):
@@ -159,6 +187,67 @@ class TestCheckMethods:
 
     def test_context_freshness_graceful_no_data(self):
         assert QualityValidator()._check_context_freshness(date(2099, 1, 1)) is True
+
+
+class TestAmbientSilverTreeIsIgnored:
+    """
+    FIX QV-TEST-ISO-01 regression guard: the hermetic fixture above must
+    actually keep a real, stale-looking Silver tree in the working directory
+    out of reach. Reproduces the exact shape that broke on the M1 — a
+    CWD-relative data/silver/market_ohlcv holding real bars — inside a scratch
+    CWD, so the repo's own data/ is never touched. Without the autouse
+    fixture each assertion below fails (freshness lag, 0% coverage, and 60
+    isolated gaps respectively); with it, every check sees "no data yet".
+    """
+
+    @staticmethod
+    def _write(path, symbol, timestamps):
+        import polars as pl
+        n = len(timestamps)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "symbol": [symbol] * n, "timestamp": timestamps,
+            "open": [100.0] * n, "high": [105.0] * n, "low": [95.0] * n,
+            "close": [102.0] * n, "volume": [1_000_000] * n,
+            "is_clean": [True] * n, "log_return": [0.001] * n,
+        }).write_parquet(path)
+
+    @pytest.fixture
+    def ambient_cwd(self, tmp_path, monkeypatch):
+        from datetime import timedelta
+        # Warm the InstrumentLoader singleton BEFORE chdir: it reads
+        # config/*.yaml CWD-relative, and a failed lazy load inside a check's
+        # try/except would turn this guard into a false pass.
+        from src.config.instrument_loader import get_loader
+        get_loader().count_context(include_deferred=False)
+
+        root = tmp_path / "ambient"
+        ohlcv = root / "data" / "silver" / "market_ohlcv"
+        recent = [date(2026, 10, 15) - timedelta(days=i) for i in range(30)][::-1]
+        self._write(ohlcv / "us_stocks" / "symbol=AAPL" / "AAPL_1D_silver.parquet",
+                    "AAPL", recent)
+        # VIX is the sole member of its context_category -> no peers -> every
+        # gap stays "isolated"; 60 of them exceeds the >50 WARNING threshold.
+        d, vix = date(2016, 1, 1), []
+        for _ in range(60):
+            vix += [d, d + timedelta(days=1)]
+            d += timedelta(days=9)
+        vix += recent
+        self._write(ohlcv / "context" / "symbol=VIX" / "VIX_1D_silver.parquet",
+                    "VIX", vix)
+        monkeypatch.chdir(root)
+        return root
+
+    def test_layer1_freshness_ignores_ambient_tree(self, ambient_cwd):
+        assert QualityValidator()._check_freshness(date(2099, 1, 1)) is True
+
+    def test_context_freshness_and_coverage_ignore_ambient_tree(self, ambient_cwd):
+        qv = QualityValidator()
+        assert qv._check_context_freshness(date(2099, 1, 1)) is True
+        assert qv._check_context_coverage(date(2099, 1, 1)) is True
+
+    def test_context_gap_detection_ignores_ambient_tree(self, ambient_cwd):
+        assert QualityValidator()._check_context_gap_detection(date(2099, 1, 1)) is True
 
 
 class TestQVL2MaskingBugsFixed:
