@@ -81,6 +81,7 @@ from loguru import logger
 from src.config.instrument_loader import get_loader
 from src.utils.atomic_io import atomic_write_parquet
 from src.utils.silver_scope import layer1_globs
+from src.utils.trade_date import with_trade_date  # FIX TS-DATE-01
 
 SILVER_OHLCV_ROOT  = Path("data/silver/market_ohlcv")
 GOLD_MTF_PATH       = Path("data/gold/mtf")
@@ -262,12 +263,12 @@ def _check_data_freshness(run_date: date) -> None:
         con = duckdb.connect()
         # FIX GLD-003: $name parameterized query — f-string SQL dilarang GD §17.7
         result = con.execute(
-            """
+            with_trade_date("""
             SELECT COUNT(DISTINCT symbol) AS fresh_count
             FROM read_parquet($glob, hive_partitioning=true)
-            WHERE CAST(timestamp AS DATE) >= CAST($run_date AS DATE) - INTERVAL (CAST($freshness_days AS INTEGER)) DAY
+            WHERE __TRADE_DATE__ >= CAST($run_date AS DATE) - INTERVAL (CAST($freshness_days AS INTEGER)) DAY
               AND is_clean = TRUE
-            """,
+            """),
             {
                 "glob":          silver_1d_globs,
                 "run_date":      str(run_date),

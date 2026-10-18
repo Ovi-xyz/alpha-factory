@@ -841,3 +841,306 @@ class TestRunContextEntryPoint:
 
         layer1_ckpt = ProgressCheckpoint("silver_ohlcv_p1", date(2025, 6, 1))
         assert not layer1_ckpt.is_done("VIX", timeframe="1D")
+
+
+class TestBronzeSchemaDrift:
+    """
+    FIX SIL-BRZ-SCHEMA-01 [chat thread, 17 Oct 2026]: regression guard for the
+    CNH silent drop. Bronze is append-only, so a symbol whose adapter changed
+    its `timestamp` dtype (String until 8 Sep 2026, Date from 9 Sep — FIX
+    AV-CNH-01) carries both on disk. `pl.scan_parquet(glob)` over the mix raises
+    SchemaError and the former bare `except Exception` in run()/run_context()
+    recorded that as "no Bronze data" -> no Silver file, no error.
+
+    Fixtures mirror the live CNH shape measured on 17 Oct 2026: String
+    timestamp + Null volume (AlphaVantage FX has no volume) in the old files,
+    Date timestamp + Null volume in the new ones.
+    """
+
+    @staticmethod
+    def _write(tmp_path, market, tf, symbol, fname, ts, close_dtype=pl.Float64,
+               source="alphavantage", volume_null=True):
+        from src.silver.ohlcv_processor import BRONZE_OHLCV_PATH
+        n = len(ts)
+        df = pl.DataFrame(
+            {
+                "timestamp": ts,
+                "open":   [6.70 + i * 0.001 for i in range(n)],
+                "high":   [6.72 + i * 0.001 for i in range(n)],
+                "low":    [6.68 + i * 0.001 for i in range(n)],
+                "close":  pl.Series([6.71 + i * 0.001 for i in range(n)]).cast(close_dtype),
+                "volume": pl.Series([None] * n, dtype=pl.Null) if volume_null
+                          else pl.Series([1000] * n, dtype=pl.Int64),
+                "_source": [source] * n,
+            }
+        )
+        out_dir = (
+            tmp_path / BRONZE_OHLCV_PATH / market / f"timeframe={tf}"
+            / f"source={source}" / f"symbol={symbol}" / "year=2026" / "month=09"
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        df.write_parquet(out_dir / fname)
+        return out_dir / fname
+
+    @staticmethod
+    def _pattern(tmp_path, market, tf, symbol):
+        from src.silver.ohlcv_processor import BRONZE_OHLCV_PATH
+        return str(
+            tmp_path / BRONZE_OHLCV_PATH / market / f"timeframe={tf}"
+            / "**" / f"symbol={symbol}" / "**" / "*.parquet"
+        )
+
+    def _write_cnh_mixed(self, tmp_path, tf="1D"):
+        """8 'old' String-era rows then 'new' Date-era rows, one file each."""
+        old = [f"2026-08-{d:02d}" for d in range(20, 28)]
+        new = [date(2026, 8, 28) + timedelta(days=i) for i in range(10)]
+        self._write(tmp_path, "context", tf, "CNH", "CNH_raw_20260908.parquet", old)
+        self._write(tmp_path, "context", tf, "CNH", "CNH_raw_20260909.parquet", new)
+        return len(old) + len(new)
+
+    # ── _read_bronze_symbol ────────────────────────────────────────────────────────────
+
+    def test_mixed_string_and_date_reproduces_original_failure(self, tmp_path):
+        """Pins the root cause: the OLD read raises SchemaError on this fixture."""
+        self._write_cnh_mixed(tmp_path)
+        with pytest.raises(pl.exceptions.SchemaError):
+            pl.scan_parquet(self._pattern(tmp_path, "context", "1D", "CNH")).collect()
+
+    def test_no_files_returns_none(self, tmp_path):
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        assert _read_bronze_symbol(self._pattern(tmp_path, "context", "1D", "NOPE")) is None
+
+    def test_mixed_string_and_date_is_reconciled(self, tmp_path):
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        n = self._write_cnh_mixed(tmp_path)
+        df = _read_bronze_symbol(self._pattern(tmp_path, "context", "1D", "CNH"))
+        assert df is not None and len(df) == n, "no Bronze row may be dropped by reconciliation"
+        assert df.schema["timestamp"] == pl.Datetime("us")
+        assert df["timestamp"].null_count() == 0
+        assert df["timestamp"].min().date() == date(2026, 8, 20)
+        assert df["timestamp"].max().date() == date(2026, 9, 6)
+
+    def test_uniform_schema_takes_fast_path_unchanged(self, tmp_path):
+        """A symbol with one dtype must come back exactly as scan_parquet returns it
+        (Date stays Date) — the fix may not alter symbols that already work."""
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        self._write(tmp_path, "context", "1D", "EUR", "a.parquet",
+                    [date(2026, 9, 1) + timedelta(days=i) for i in range(5)])
+        self._write(tmp_path, "context", "1D", "EUR", "b.parquet",
+                    [date(2026, 9, 6) + timedelta(days=i) for i in range(5)])
+        pat = self._pattern(tmp_path, "context", "1D", "EUR")
+        got = _read_bronze_symbol(pat)
+        assert got.schema["timestamp"] == pl.Date
+        assert got.equals(pl.scan_parquet(pat).collect())
+
+    def test_non_numeric_price_after_reconciliation_raises(self, tmp_path):
+        """String `close` in one file + Float64 in another must NOT be relaxed to a
+        String price column and passed on as if it were fine."""
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        self._write(tmp_path, "context", "1D", "BAD", "a.parquet",
+                    [date(2026, 9, 1) + timedelta(days=i) for i in range(3)])
+        self._write(tmp_path, "context", "1D", "BAD", "b.parquet",
+                    ["2026-09-10", "2026-09-11", "2026-09-12"], close_dtype=pl.Utf8)
+        with pytest.raises((ValueError, pl.exceptions.PolarsError)):
+            _read_bronze_symbol(self._pattern(tmp_path, "context", "1D", "BAD"))
+
+    def test_corrupt_file_raises_instead_of_looking_like_no_data(self, tmp_path):
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        f = self._write(tmp_path, "context", "1D", "CRP", "a.parquet",
+                        [date(2026, 9, 1) + timedelta(days=i) for i in range(3)])
+        f.write_bytes(b"not a parquet file")
+        with pytest.raises(Exception):
+            _read_bronze_symbol(self._pattern(tmp_path, "context", "1D", "CRP"))
+
+    # ── run_context() ────────────────────────────────────────────────────────────────
+
+    def _ctx_instrument(self, symbol="CNH", timezone="UTC"):
+        return TestRunContextEntryPoint._fake_context_instrument(symbol, timezone=timezone)
+
+    def test_run_context_produces_silver_for_mixed_dtype_bronze(self, tmp_path, monkeypatch):
+        """THE CNH regression: all three context TFs, String-era + Date-era Bronze."""
+        import src.silver.ohlcv_processor as ohlcv_mod
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "src.config.instrument_loader.get_loader",
+            lambda: TestRunContextEntryPoint._fake_loader([self._ctx_instrument()]),
+        )
+        n = 0
+        for tf in ohlcv_mod._RUN_CONTEXT_TFS:
+            n = self._write_cnh_mixed(tmp_path, tf=tf)
+
+        ohlcv_mod.run_context(date(2026, 10, 17))
+
+        silver_dir = tmp_path / ohlcv_mod.SILVER_OHLCV_PATH / "context" / "symbol=CNH"
+        for tf in ohlcv_mod._RUN_CONTEXT_TFS:
+            out = silver_dir / f"CNH_{tf}_silver.parquet"
+            assert out.exists(), f"CNH {tf} silently dropped — original bug"
+        d1 = pl.read_parquet(silver_dir / "CNH_1D_silver.parquet")
+        assert len(d1) == n
+        assert d1["timestamp"].dtype.time_zone == "UTC"
+        # CNH tz is UTC: both eras must land on the SAME midnight convention.
+        assert d1["timestamp"].dt.hour().unique().to_list() == [0]
+        assert d1["timestamp"].is_unique().all()
+
+    def test_run_context_corrupt_bronze_is_marked_failed_not_done(self, tmp_path, monkeypatch):
+        import src.silver.ohlcv_processor as ohlcv_mod
+        from src.utils.progress_checkpoint import ProgressCheckpoint
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "src.config.instrument_loader.get_loader",
+            lambda: TestRunContextEntryPoint._fake_loader([self._ctx_instrument("CRP")]),
+        )
+        f = self._write(tmp_path, "context", "1D", "CRP", "a.parquet",
+                        [date(2026, 9, 1) + timedelta(days=i) for i in range(3)])
+        f.write_bytes(b"not a parquet file")
+
+        ohlcv_mod.run_context(date(2026, 10, 17))   # must not raise out of the job
+
+        ckpt = ProgressCheckpoint("silver_ohlcv_context", date(2026, 10, 17))
+        assert not ckpt.is_done("CRP", timeframe="1D")
+        assert [r["symbol"] for r in ckpt.failed_report()] == ["CRP"]
+
+    # ── Layer 1 run() shares the same helper ────────────────────────────────────────────────
+
+    def test_run_layer1_produces_silver_for_mixed_dtype_bronze(self, tmp_path, monkeypatch):
+        import src.silver.ohlcv_processor as ohlcv_mod
+
+        monkeypatch.chdir(tmp_path)
+        inst = TestRunEntryPoint._fake_instrument("EUR_USD", market="forex")
+        monkeypatch.setattr(
+            "src.config.instrument_loader.get_loader",
+            lambda: TestRunEntryPoint._fake_loader([inst]),
+        )
+        old = [f"2026-08-{d:02d}" for d in range(20, 28)]
+        new = [date(2026, 8, 28) + timedelta(days=i) for i in range(10)]
+        self._write(tmp_path, "forex", "1D", "EUR_USD", "a.parquet", old, source="yfinance")
+        self._write(tmp_path, "forex", "1D", "EUR_USD", "b.parquet", new, source="alphavantage")
+
+        ohlcv_mod.run(date(2026, 10, 17))
+
+        out = tmp_path / ohlcv_mod.SILVER_OHLCV_PATH / "forex" / "symbol=EUR_USD" / "EUR_USD_1D_silver.parquet"
+        assert out.exists(), "Layer 1 PASS 1 shares the swallow bug — must be fixed too"
+        assert len(pl.read_parquet(out)) == len(old) + len(new)
+
+
+class TestBronzePolygonNaiveVsYfinanceTzAware:
+    """
+    FIX SIL-BRZ-SCHEMA-01, second finding (census 18 Oct 2026): us_stocks/LHX 1M
+    has 46 yfinance files (tz-aware Datetime[ms, America/New_York], local
+    midnight) plus ONE polygon file from the day yfinance had none (naive
+    Datetime[ms], volume Float64, extra vwap). tz-aware + naive has no supertype,
+    so LHX stayed without Silver (loudly, after the first fix). The polygon
+    adapter writes pd.Timestamp(ms, unit="ms") = naive EPOCH-UTC, measured as
+    04:00:00 on 1 Aug/1 Sep 2026 (= New York midnight under EDT).
+    """
+
+    NY = "America/New_York"
+
+    @staticmethod
+    def _yf(tmp_path, fname, stamps, close):
+        from datetime import datetime
+        from src.silver.ohlcv_processor import BRONZE_OHLCV_PATH
+        n = len(stamps)
+        ts = pl.Series("timestamp", [datetime(*s) for s in stamps],
+                       dtype=pl.Datetime("ms")).dt.replace_time_zone("America/New_York")
+        df = pl.DataFrame({
+            "timestamp": ts, "open": [100.0] * n, "high": [101.0] * n, "low": [99.0] * n,
+            "close": [close] * n, "volume": pl.Series([1_000_000] * n, dtype=pl.Int64),
+            "_source": ["yfinance"] * n,
+        })
+        d = (tmp_path / BRONZE_OHLCV_PATH / "us_stocks" / "timeframe=1D" / "source=yfinance"
+             / "symbol=LHX" / "year=2026" / "month=09")
+        d.mkdir(parents=True, exist_ok=True)
+        df.write_parquet(d / fname)
+
+    @staticmethod
+    def _poly(tmp_path, fname, stamps, close, source="polygon"):
+        from datetime import datetime
+        from src.silver.ohlcv_processor import BRONZE_OHLCV_PATH
+        n = len(stamps)
+        df = pl.DataFrame({
+            "timestamp": pl.Series("timestamp", [datetime(*s) for s in stamps], dtype=pl.Datetime("ms")),
+            "open": [100.0] * n, "high": [101.0] * n, "low": [99.0] * n,
+            "close": [close] * n, "volume": pl.Series([2_000_000.0] * n, dtype=pl.Float64),
+            "vwap": [100.0] * n, "_source": [source] * n,
+        })
+        d = (tmp_path / BRONZE_OHLCV_PATH / "us_stocks" / "timeframe=1D" / f"source={source}"
+             / "symbol=LHX" / "year=2026" / "month=09")
+        d.mkdir(parents=True, exist_ok=True)
+        df.write_parquet(d / fname)
+
+    @staticmethod
+    def _pattern(tmp_path):
+        from src.silver.ohlcv_processor import BRONZE_OHLCV_PATH
+        return str(tmp_path / BRONZE_OHLCV_PATH / "us_stocks" / "timeframe=1D"
+                   / "**" / "symbol=LHX" / "**" / "*.parquet")
+
+    def _write_lhx_shape(self, tmp_path):
+        # polygon: winter bar (05:00 UTC = 00:00 EST), Aug + Sep bars (04:00 UTC = 00:00 EDT)
+        self._poly(tmp_path, "LHX_raw_20260911.parquet",
+                   [(2026, 1, 1, 5), (2026, 8, 1, 4), (2026, 9, 1, 4)], close=111.0)
+        # yfinance: same Sep bar at local midnight, later files win on equal keys
+        self._yf(tmp_path, "LHX_raw_20260910.parquet", [(2026, 9, 1)], close=222.0)
+        self._yf(tmp_path, "LHX_raw_20260912.parquet", [(2026, 9, 1)], close=333.0)
+
+    def test_polygon_naive_utc_lands_on_the_same_instant_as_yfinance(self, tmp_path):
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        self._write_lhx_shape(tmp_path)
+        df = _read_bronze_symbol(self._pattern(tmp_path), tz_hint=self.NY)
+        assert df.schema["timestamp"].time_zone == self.NY
+        local = df["timestamp"].dt.replace_time_zone(None)       # wall clock in New York
+        assert local.dt.hour().unique().to_list() == [0], "every bar must be NY-local midnight (EST and EDT)"
+        sep = df.filter(pl.col("_source") == "polygon").filter(pl.col("timestamp").dt.month() == 9)
+        yf = df.filter(pl.col("_source") == "yfinance")
+        assert sep["timestamp"][0] == yf["timestamp"][0], "same instant -> dedupe key collides"
+
+    def test_reconciled_bars_dedupe_to_one_per_month_and_yfinance_wins(self, tmp_path):
+        from src.silver.ohlcv_processor import _read_bronze_symbol, OHLCVProcessor
+        self._write_lhx_shape(tmp_path)
+        df = _read_bronze_symbol(self._pattern(tmp_path), tz_hint=self.NY)
+        out = OHLCVProcessor().process_symbol(
+            df=df, symbol="LHX", market="us_stocks", timeframe="1D", tz_hint=self.NY)
+        assert len(out) == 3, "Jan, Aug, Sep — no duplicate Sep bar from the polygon file"
+        assert out["timestamp"].is_unique().all()
+        sep_close = out.filter(pl.col("timestamp").dt.month() == 9)["close"][0]
+        assert sep_close == 333.0, "primary source (latest yfinance file) must win over polygon"
+
+    def test_without_the_source_rule_naive_would_be_mislabelled(self, tmp_path):
+        """Pins WHY the rule exists: the processor's own naive branch localises 04:00
+        as New York time (-> 08:00 UTC) and misses the yfinance instant (04:00 UTC)."""
+        from datetime import datetime, timezone
+        from src.silver.ohlcv_processor import OHLCVProcessor
+        naive = pl.DataFrame({"timestamp": pl.Series([datetime(2026, 9, 1, 4)], dtype=pl.Datetime("ms")),
+                              "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0]})
+        got = OHLCVProcessor._normalize_timestamps(naive, "us_stocks", self.NY)["timestamp"][0]
+        assert got == datetime(2026, 9, 1, 8, tzinfo=timezone.utc)
+        assert got != datetime(2026, 9, 1, 4, tzinfo=timezone.utc)
+
+    def test_naive_from_unknown_source_in_a_tz_aware_mix_still_raises(self, tmp_path):
+        """Only sources KNOWN to write epoch-UTC are reinterpreted; for any other the
+        meaning of a naive stamp is unknown and guessing would mis-stamp silently."""
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        self._poly(tmp_path, "a.parquet", [(2026, 9, 1, 4)], close=1.0, source="tvdatafeed")
+        self._yf(tmp_path, "b.parquet", [(2026, 9, 1)], close=2.0)
+        with pytest.raises(pl.exceptions.PolarsError):
+            _read_bronze_symbol(self._pattern(tmp_path), tz_hint=self.NY)
+
+    def test_run_layer1_lhx_shape_produces_silver(self, tmp_path, monkeypatch):
+        import src.silver.ohlcv_processor as ohlcv_mod
+
+        monkeypatch.chdir(tmp_path)
+        inst = TestRunEntryPoint._fake_instrument("LHX", market="us_stocks")
+        monkeypatch.setattr(
+            "src.config.instrument_loader.get_loader",
+            lambda: TestRunEntryPoint._fake_loader([inst]),
+        )
+        self._write_lhx_shape(tmp_path)
+
+        ohlcv_mod.run(date(2026, 10, 18))
+
+        out = tmp_path / ohlcv_mod.SILVER_OHLCV_PATH / "us_stocks" / "symbol=LHX" / "LHX_1D_silver.parquet"
+        assert out.exists(), "LHX shape (tz-aware yfinance + naive polygon) silently/loudly dropped"
+        silver = pl.read_parquet(out)
+        assert len(silver) == 3 and silver["timestamp"].is_unique().all()

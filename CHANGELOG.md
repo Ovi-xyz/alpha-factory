@@ -1,5 +1,151 @@
 # CHANGELOG — Data Platform
 
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.21.0) — FIX SIL-BRZ-SCHEMA-01: Silver tidak lagi membuang diam-diam simbol yang dtype Bronze-nya berubah (CNH hilang dari Silver; Oktober 2026)
+
+**Temuan.** Run `gold_forecast --force` 16 Okt 2026 mencatat
+`[broad_dollar] 1/14 BIS_WEIGHTS symbols missing from Silver data: ['CNH']`.
+Terukur 17 Okt: `data/silver/market_ohlcv/context/` hanya berisi 57 direktori simbol dari
+58 anchor Layer 2 — CNH tidak punya direktori Silver sama sekali, padahal Bronze
+CNH (AlphaVantage FX, ADR-048) ada setiap hari sejak 30 Agu. CNH adalah bobot BIS
+terbesar dari 14 simbol Broad Dollar (22,58 dari 68,67 = 32,9%), sehingga seri
+Broad Dollar kehilangan sepertiga keranjangnya.
+
+**Akar masalah (direproduksi, polars 1.42.1 dan 2.0.0).** Bronze append-only, dan
+kolom `timestamp` CNH berganti dtype di tengah riwayatnya: `String` sampai 8 Sep
+(sebelum FIX AV-CNH-01), `Date` mulai 9 Sep (diukur pada file 1D: 30 Agu & 8 Sep
+String, 9 Sep & 16 Okt Date). `pl.scan_parquet(glob)` atas campuran itu melempar
+`SchemaError: data type mismatch for column timestamp: incoming: Date != target:
+String`. Dua defek bertumpuk:
+(1) pembaca tidak toleran terhadap drift dtype antar-file;
+(2) `except Exception` telanjang di sekitar pembacaan menganggap error apa pun
+sebagai "belum ada data Bronze" → `mark_done`, tanpa file Silver, tanpa error, tanpa
+baris `failed` di checkpoint. `context_coverage_check` tetap hijau (57/58 = 98,3%
+terhadap `COVERAGE_MIN_PCT` = 95). PASS 1 Layer 1 `run()` memakai pasangan
+baca/except yang identik, jadi simbol Layer 1 dengan drift serupa (mis. forex
+yfinance → fallback AlphaVantage) terdampak oleh mekanisme yang sama — jumlahnya
+belum diketahui sampai census dijalankan.
+
+**Fix.** `src/silver/ohlcv_processor.py`: helper tunggal `_read_bronze_symbol(pattern)`
+dipakai kedua call site (satu implementasi, bukan dua salinan — preseden GAP-6).
+Jalur cepat tetap `pl.scan_parquet(pattern).collect()` persis seperti sebelumnya,
+sehingga simbol yang skemanya seragam dibaca identik. Hanya saat `SchemaError`:
+scan per file (lazy — guard SIL-RPQ-001 tetap berlaku), `timestamp` diseragamkan ke
+naive `Datetime(us)` (String di-parse `strict=False`, Date → tengah malam),
+`concat(how="diagonal_relaxed")`, lalu hasil yang kolom harganya bukan numerik
+ditolak dengan `ValueError` (supertype String tidak boleh lolos sebagai harga).
+Semantik error diperbaiki: hanya "tidak ada file" yang berarti `mark_done`; semua
+kegagalan baca lain naik ke jalur `mark_failed` + `logger.error` yang sudah ada,
+sehingga tampil di `failed_report()`. Log WARNING menyebut kolom dan dtype yang
+berbeda.
+
+**Diverifikasi pada data live.** Empat file Bronze CNH 1D asli (30 Agu, 8 Sep, 9 Sep,
+16 Okt) → 10.426 baris mentah → 2.640 baris Silver (2016-09-02..2026-10-15),
+`timestamp` UTC tengah malam di kedua era (timezone instrumen CNH = UTC), `is_clean`
+99,3%; VWAP null karena AlphaVantage tidak menyediakan volume (sama seperti
+sebelumnya, tidak ada konsumen VWAP CNH).
+
+**Alat census (baru, read-only).** `scripts/audit_bronze_schema_drift.py` membaca
+footer parquet Bronze, melaporkan grup (market, tf, simbol) dengan skema tidak
+seragam dan grup Bronze yang tidak punya file Silver; exit 1 jika ada temuan.
+
+**Sengaja tidak diubah.** (a) `_check_context_coverage` — ambang persen 95% tidak
+bisa melihat satu anchor yang hilang; pemeriksaan "anchor terdaftar tanpa file
+Silver sama sekali" mengubah keluaran validator yang masuk ke histeresis Gatekeeper,
+jadi dicatat sebagai keputusan D2 di RISK-31, bukan dimasukkan diam-diam.
+(b) Keputusan D1 (RISK-37) tidak disentuh; CNH berstempel UTC tengah malam sehingga
+tidak menambah sensitivitas penanggalan baru.
+
+**Tes.** `tests/unit/test_ohlcv_processor.py::TestBronzeSchemaDrift` (+9) dan
+`tests/unit/test_audit_bronze_schema_drift.py` (+4); `tests/COUNT_BASELINE.txt`
+2486 → 2499. Tiga tes end-to-end (run_context campuran String/Date, run_context
+file korup ditandai failed bukan done, run() Layer 1 campuran) gagal terhadap source
+lama dan lulus setelah fix; satu tes mengunci reproduksi `SchemaError` asal-usul bug.
+Sandbox (clone GitHub HEAD + file live `ohlcv_processor.py`): 2434 collected, 2432
+lulus, 2 gagal (`test_check_poetry_env`, gagal identik pada HEAD murni — lingkungan
+sandbox tanpa poetry). Suite penuh di M1 (18 Okt 2026, setelah run mingguan): 2499 passed, 0 failed.
+
+**Temuan kedua, mekanisme sama (census M1, 18 Okt 2026).** `audit_bronze_schema_drift.py`
+memindai 2546 grup (118.727 file): drift pada CNH 1D/1W/1M (masing-masing 46 file,
+`date32` vs `large_string` — mengonfirmasi dugaan 1W/1M) dan `us_stocks/LHX 1M`; satu-satunya
+grup tanpa Silver adalah LHX 1M. CNH tidak lagi tercantum sebagai gap, dan peringatan
+`[broad_dollar]` tidak muncul di run `gold_forecast --force` 18 Okt.
+LHX 1M: 46 file yfinance (tz-aware `America/New_York`, tengah malam lokal) dan tepat satu
+file polygon (11 Sep, hari ketika yfinance tidak punya file): naive `Datetime[ms]`, volume
+`Float64` (bukan `Int64`), kolom `vwap` ekstra. tz-aware + naive tidak punya supertype,
+sehingga reconcile versi pertama tetap melempar — keras (`PASS 1 FAILED`), bukan lagi
+diam-diam — tetapi LHX 1M tetap tanpa Silver. Adapter polygon memakai
+`pd.Timestamp(r["t"], unit="ms")` = naive epoch-UTC (terukur: 04:00:00 pada 1 Agu/1 Sep =
+tengah malam New York saat EDT), bukan waktu lokal. Cabang naive `_normalize_timestamps`
+akan menganggap 04:00 sebagai waktu New York (bergeser 4-5 jam) dan tidak akan bertabrakan
+dengan bar yfinance saat dedupe.
+Fix (aturan sengaja sempit): stempel naive dari adapter yang DIKETAHUI menulis UTC
+(`_UTC_NAIVE_SOURCES = {"polygon"}`) dibaca sebagai UTC lalu dikonversi ke zona instrumen
+sehingga jatuh pada instan yang sama dengan bar yfinance; naive dari sumber lain dalam
+campuran tetap raise. `_read_bronze_symbol(pattern, tz_hint=None)`; kedua call site
+meneruskan `inst.timezone`. Dedupe: path `source=polygon` terurut sebelum `source=yfinance`,
+jadi yfinance (sumber utama) menang pada kunci yang sama. Diverifikasi pada 3 file LHX asli:
+Polygon 04:00 UTC -> 00:00 EDT, dua bar Silver (satu per bulan). Tes: +5
+(`TestBronzePolygonNaiveVsYfinanceTzAware`; 4 gagal terhadap source sebelumnya);
+`tests/COUNT_BASELINE.txt` 2499 -> 2504. Teks keterangan skrip census diperbarui.
+
+**Risiko laten yang ditemukan, tidak diubah.** Cabang naive `_normalize_timestamps`
+memperlakukan semua Datetime naive sebagai waktu lokal `tz_source`; untuk bar polygon itu
+keliru. Dampak live saat ini nol: dari simbol ber-direktori polygon (1D dan 1M; 1W tidak
+dicek) hanya LHX yang masih terdaftar, dan LHX kini terbaca lewat jalur yang benar. Akan
+berdampak bila suatu simbol terdaftar suatu hari seluruhnya bersumber dari polygon (jalur
+cepat, skema seragam). Perbaikan = cabang naive sadar-sumber; itu perubahan perilaku
+lintas-sumber, jadi dicatat di RISK-31 sebagai keputusan, bukan diubah di sini.
+
+**Masih harus dijalankan ulang.** `gold_cross_asset_correlation` dan `gold_lead_lag`:
+keluaran live masih `computation_date` 2026-10-16 tanpa CNH (251 simbol; 56 leader).
+
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.21.0) — FIX TS-DATE-01: tanggal bar Silver 1D tidak lagi bergantung pada timezone sesi DuckDB (Oktober 2026)
+
+**Temuan (terukur pada file Silver 1D live, 16 Okt 2026).** Stempel waktu Silver 1D
+adalah 00:00 waktu *lokal bursa* di zona masing-masing instrumen — AAPL dan AU
+`America/New_York`, BBCA `Asia/Jakarta`, EUR_USD `Europe/London`, VIX
+`America/Chicago` — tetap bertipe tz-aware. Bukan UTC seperti tertulis di GD §4.3.
+Tanggal milik stempel itu sendiri adalah tanggal perdagangan; zona tidak boleh
+dikonversi (konversi ke UTC atau New York memundurkan BBCA 2494 dari 2494 baris).
+
+**Akar masalah.** DuckDB membaca kolom ini sebagai `TIMESTAMP WITH TIME ZONE` dan
+membuang nama zonanya, sehingga `CAST(timestamp AS DATE)` diam-diam berpindah ke
+zona *sesi* — zona mesin host. Di M1 (WIB, UTC+7) hasilnya benar untuk zona ≤ +7
+(US, IDX, forex) tetapi mundur satu hari untuk enam indeks Layer 2 Asia-Pasifik
+(N225, KOSPI, HSI, SSEC, TWSE, AXJO); di host UTC (CI/server) mundur satu hari
+untuk seluruh IDX dan forex saat BST; di host New York untuk IDX dan semua forex.
+Pada PIT guard `< trade_date` ini berarti lookahead satu hari (bar bertanggal D
+dibaca sebagai D-1 dan ikut terbaca untuk trade_date D). Terbukti empiris:
+sandbox menghasilkan tepat angka di atas untuk tiga zona sesi.
+
+**Fix.** Modul baru `src/utils/trade_date.py`: untuk kolom TIMESTAMPTZ, instan
+dilihat di zona tetap UTC+14 (`Etc/GMT-14`) lalu diambil tanggalnya — benar untuk
+setiap stempel tengah-malam-lokal pada offset > −10 jam, apa pun zona sesinya;
+kolom non-TIMESTAMPTZ (naive/Date) tetap memakai CAST biasa. SQL tetap literal
+statis (token `__TRADE_DATE__` + `with_trade_date()`, bukan f-string — GD §17.7).
+17 kemunculan di 6 modul dikonversi: `pit_data` (PIT guard, 4), `quality_validator`
+(8), `active_symbols` (2), `screener` (1), `technical_signals` (1),
+`global_index_regime` (1). Di M1, selama tidak ada file Layer 1 berstempel zona di timur +7
+(census belum dilakukan), hasil Layer 1 tidak berubah; yang berubah hanya
+backfill `--date` pada `gold_global_regime` (sebelumnya bisa membaca bar Asia
+bertanggal run_date+1) dan semua jalur di host non-WIB. Docstring
+`OHLCVProcessor._normalize_timestamps` diperbaiki (ringkasannya hanya
+menggambarkan cabang naive); perilakunya tidak diubah.
+
+**Sengaja tidak diubah.** Empat modul CrossAssetEngine (`correlation_module`,
+`lead_lag_module`, `forecast_module`, `broad_dollar`; 12 kemunculan) mem-pivot
+return pada indeks tanggal lintas pasar. Mengganti ke tanggal-stempel mengubah
+semantik lag dan hasil yang sudah dikalibrasi (XAE-CAL-01, ekspektasi "TWSE → IXIC
+pada lag 1") — itu keputusan metodologi, bukan perbaikan bug. Dicatat sebagai
+keputusan D1 di RISK-37; daftar `PENDING_DECISION_D1` di tes menjaganya eksplisit.
+
+**Tes.** `tests/unit/test_trade_date.py` (+65, 2421 → 2486): kontrak helper di 10
+zona × 4 zona sesi × tanggal sekitar DST, kolom naive/Date, PIT guard dan freshness
+QV di bawah zona sesi UTC/New York, serta guard statis yang melarang
+`CAST(timestamp AS DATE)` baru di `src/`. 7 tes gagal terhadap source lama dan
+lulus setelah fix; 385 tes modul tersentuh tetap hijau. **Belum dijalankan
+terhadap seluruh ±640 file Silver live** (hanya 5 file diukur) — lihat RISK-37.
+
 ## v1.21.0 — ADR-051: Dual-HMM Regime Engine — lima modul, mesin HMM bersama, dan 98 tes lama yang usang diperbarui (GMI-HMM2-001, Oktober 2026)
 
 Implementasi ADR-051 (+ Amendment 2) selesai: lima modul di `src/gold/hmm/`,

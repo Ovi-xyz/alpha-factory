@@ -505,7 +505,7 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "depends_on":  [],
         "layer":       "bronze",
         "est_minutes": 2,
-        "run_on_day_of_month": list(range(10, 16)),   # hari 10-15
+        "run_on_day_of_month": list(range(10, 16)),   # day 10-15
     },
 
     "bronze_bls_nfp": {
@@ -634,11 +634,11 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
     # ── GOLD LAYER ────────────────────────────────────────────────────────────
 
     "gold_signals": {
-        "description": "Technical indicators — 643 symbols x 7 timeframes",
+        "description": "Technical indicators — ~190 symbols x 5 timeframes",
         "fn":          _gold_signals,
         "depends_on":  ["silver_ohlcv", "silver_validate", "silver_active_symbols"],
         "layer":       "gold",
-        "est_minutes": 90,
+        "est_minutes": 27,
     },
 
     "gold_mtf": {

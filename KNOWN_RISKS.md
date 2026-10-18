@@ -3181,6 +3181,94 @@ place — a materially bigger, separate gap than the one dangling
 reference this fix removed, noted in that file's own docstring rather
 than silently left inconsistent.
 
+### Update — 17 Oct 2026: CNH missing from Silver → Broad Dollar lost 32.9% of its basket — FIX SIL-BRZ-SCHEMA-01 (code fixed; live re-run pending)
+
+**Trigger.** First live `gold_forecast --force` (16 Oct) logged
+`[broad_dollar] 1/14 BIS_WEIGHTS symbols missing from Silver data: ['CNH']` — "contributing 0".
+
+**Measured (17 Oct).** Silver `context/` has 57 symbol directories, no `symbol=CNH`.
+Bronze `context/timeframe=1D/source=alphavantage/symbol=CNH/` has daily files 30 Aug → 16 Oct;
+`timestamp` is `String` in the 30 Aug and 8 Sep files and `Date` in the 9 Sep and 16 Oct
+files (4 files inspected; the full per-file count was not enumerated). `pl.scan_parquet`
+over that mix raises `SchemaError` (reproduced, polars 1.42.1 and 2.0.0). CNH weighs
+22.58 / 68.67 = 32.9% — the largest of the 14 BIS symbols — so the Broad Dollar series
+the ForecastModule PCA consumed was missing a third of its basket, widening the DXY scale
+gap the warning itself describes.
+
+**Why it was silent.** The Silver read was wrapped in a bare `except Exception` that
+meant "no Bronze data yet" → `mark_done`: no file, no error, no `failed` checkpoint row.
+`context_coverage_check` stayed green (57/58 = 98.3% vs `COVERAGE_MIN_PCT` 95). Same
+pair in Layer 1 PASS 1. CNH Silver *did* exist on 5 Sep (58 Layer 2 files, v1.17.8); the
+Date-era Bronze began 9 Sep. Which Silver run or rebuild removed/never re-created the file
+was not determined — the mechanism above explains why no later run could restore it.
+
+**Fix.** One helper `_read_bronze_symbol()` for both call sites: unchanged fast path;
+per-file lazy reconcile only on `SchemaError`; non-numeric price result refused;
+only "no files" means done, every other failure goes to `mark_failed`. Verified on real
+CNH Bronze (10,426 raw rows → 2,640 Silver rows, 2016-09-02..2026-10-15, UTC midnight,
+`is_clean` 99.3%). Details: CHANGELOG "Unreleased — FIX SIL-BRZ-SCHEMA-01".
+
+**Still to do on the M1 (not run from the sandbox):**
+1. Full suite — expect 2499 collected (2486 + 13).
+2. Re-process: clear today's symbol checkpoint, then
+   `python src/runner.py --job silver_ohlcv_context --force`
+   (a plain re-run skips CNH — its checkpoint for today says done). Do it before the
+   Sunday weekly CrossAssetEngine run, which otherwise still lacks CNH.
+3. Census: `python scripts/audit_bronze_schema_drift.py` — expect CNH 1D (and likely
+   1W/1M) under DRIFT and nothing under BRONZE WITHOUT SILVER afterwards; any other
+   Layer 1/Layer 2 symbol listed was silently dropped by the same mechanism.
+4. `gold_forecast --force` (Broad Dollar and PCA inputs change); weekly correlation /
+   lead-lag pick CNH up on their own Sunday run.
+
+**Decision D2 (open, not made here).** `context_coverage_check` cannot see one missing
+anchor at a 95% threshold. Proposal: additionally fail (WARNING tier) when any registered,
+non-deferred anchor has *no* Silver 1D file at all — "never produced" is categorically
+different from "stale". Not implemented: it changes validator output that feeds Gatekeeper
+hysteresis (RISK-35), so it needs an explicit yes.
+
+**Relation to RISK-37 / D1.** None for the fix. CNH is stamped UTC midnight in both Bronze
+eras (instrument timezone UTC), so its calendar date is right under any session zone from
+UTC eastward — the M1 included — and always right through `__TRADE_DATE__`. D1 stays open.
+
+
+### Update — 18 Oct 2026: CNH closed on M1 evidence; second finding LHX 1M fixed; correlation / lead-lag re-run pending
+
+**M1 results (after the Sunday run).** `pytest`: 2499 passed, 0 failed (= 2486 + 13).
+`audit_bronze_schema_drift.py`: 2546 groups / 118,727 files; drift in CNH 1D, 1W, 1M (46 files
+each, `date32` vs `large_string` — confirms 1W/1M) and `us_stocks/LHX 1M`; the only group without
+Silver is LHX 1M, so CNH Silver exists for all three timeframes. `gold_forecast --force`: no
+`[broad_dollar]` warning in the log (195 symbols x 5 horizons, 0 unstable-VAR rows). The logs do
+not show which run recreated CNH Silver.
+
+**Second finding, same mechanism: LHX 1M.** 46 yfinance files (tz-aware `America/New_York`, local
+midnight) + exactly one polygon file (11 Sep, the day yfinance had none): naive `Datetime[ms]`,
+volume `Float64`, extra `vwap`. tz-aware + naive has no supertype, so the first reconcile still
+raised (loudly: `PASS 1 FAILED LHX`) and LHX 1M stayed without Silver. The polygon adapter writes
+`pd.Timestamp(r["t"], unit="ms")` = naive epoch-UTC (measured 04:00:00 on 1 Aug / 1 Sep = New York
+midnight under EDT), not local time. Fix: naive stamps from a source KNOWN to write UTC
+(`_UTC_NAIVE_SOURCES = {"polygon"}`) are read as UTC and converted to the instrument's zone
+(`_read_bronze_symbol(pattern, tz_hint)`), landing on the same instant as the yfinance bar;
+naive stamps from any other source in a tz-aware mix still raise. On the three real LHX files:
+Polygon 04:00 UTC -> 00:00 EDT, two Silver bars (one per month), yfinance wins on equal keys.
++5 tests (4 fail against the previous source), baseline 2499 -> 2504.
+
+**Latent, not changed.** `_normalize_timestamps` treats every naive Datetime as local `tz_source`
+time. For polygon bars (naive UTC) that is 4-5 h late and would not collide with a yfinance bar on
+the dedupe key (pinned by `test_without_the_source_rule_naive_would_be_mislabelled`). No live
+impact today: of the symbols with a polygon directory (1D and 1M checked, 1W not) only LHX is still
+registered. It bites if a registered symbol ever becomes polygon-only (uniform schema, fast path).
+Fix = a source-aware naive branch; cross-source behaviour change, so it needs an explicit yes (D3).
+
+**Still to run.** Within one Sunday run `WEEKLY_SEQUENCE` precedes `silver_ohlcv_context`, and the
+live `cross_asset_corr.parquet` / `lead_lag_matrix.parquet` still have `computation_date`
+2026-10-16 with no `2026-10-18` history snapshot: correlation has 251 symbols and no CNH, lead-lag
+has 56 leaders and no CNH (HKD is present). Re-run `gold_cross_asset_correlation --force` and
+`gold_lead_lag --force`. `gold_forecast` was already re-run on 18 Oct.
+
+**D2 still open** — the census script now gives the detection on demand; the always-on check is
+still the proposal.
+
+
 ---
 
 ## RISK-32 (NEW): SIL-MACRO-DEDUP-01 remediation reset the macro Silver PIT revision chain — ACCEPTED (documented gap, not further fixable)
@@ -3645,9 +3733,95 @@ rewritten, independence tests extended. Mutation: 25 / 25 killed (one survivor
 on the first pass — the `n == short_history_min_obs` boundary — closed with a
 new test). Full detail: CHANGELOG.md v1.21.0, dev-log/2026-10-14-adr051-engine-completion.md.
 
+## RISK-37 (NEW): Silver 1D timestamps are local-exchange midnight (not UTC); DuckDB `CAST(timestamp AS DATE)` depended on the host timezone — PARTLY RESOLVED (FIX TS-DATE-01); CrossAssetEngine day alignment OPEN (decision D1)
+
+**Status:** 🟡 **PARTLY RESOLVED (16 Oct 2026, no version bump; `pyproject.toml` stays 1.21.0).**
+Seventeen read sites fixed; four CrossAssetEngine modules deliberately left (D1).
+
+**Reference:** Grand Design §4.3 (erratum below), `src/utils/trade_date.py`,
+`tests/unit/test_trade_date.py`, CHANGELOG "Unreleased — FIX TS-DATE-01".
+
+### What was measured (live Silver 1D, 16 Oct 2026, 5 files)
+
+| File | Stored dtype | Hour seen | `CAST(ts AS DATE)` wrong under UTC session | under WIB (M1) |
+|---|---|---|---|---|
+| AAPL (us_stocks) | `Datetime[ms, America/New_York]` | 0 | 0 | 0 |
+| AU (commodity) | same dtype as AAPL; stamp check only, DuckDB not run | 0 | — | — |
+| VIX (context) | `Datetime[ms, America/Chicago]` | 0 | 0 | 0 |
+| BBCA (idx) | `Datetime[ms, Asia/Jakarta]` | 0 | 2494 / 2494 | 0 |
+| EUR_USD (forex) | `Datetime[ms, Europe/London]` | 0 | 1563 / 2639 | 0 |
+
+Every file is 00:00 in its own instrument's zone, so the stamp's own date is the
+trading date (Polars `.dt.date()` is already correct). DuckDB reads the column as
+`TIMESTAMP WITH TIME ZONE`, drops the zone name, and the date cast converts into
+the session zone. A synthetic sweep (10 zones × 6 dates incl. DST edges) shows
+that on the M1 (WIB) the plain cast is also wrong, on all 6 dates, for the
+Asia-Pacific zones with offset > +7: Tokyo, Seoul, Hong Kong, Shanghai, Taipei,
+Sydney — i.e. N225, KOSPI, HSI, SSEC, TWSE, AXJO.
+
+### What was fixed
+
+`__TRADE_DATE__` / `with_trade_date()` — view the instant in fixed UTC+14, take
+that date (valid for stamp offsets > −10h; universe spans −6h..+11h). Converted:
+`pit_data` (PIT guard — was a one-day look-ahead under UTC/New York sessions),
+`quality_validator`, `active_symbols`, `screener` freshness, `technical_signals`
+VIX lookup, `global_index_regime`. On the M1, provided no Layer 1 file is stamped in a zone east of +7 (census
+pending, below), Layer 1 results are unchanged; the user-visible change is `gold_global_regime --date <past>` no longer reading an
+Asia-Pacific bar stamped run_date+1. A static guard test now forbids new raw
+casts in `src/`.
+
+### Open — decision D1 (CrossAssetEngine day alignment)
+
+`correlation_module`, `lead_lag_module`, `forecast_module`, `broad_dollar`
+(12 casts) still use the session-zone cast and pivot returns on that day across
+markets. On the M1 the six Asia-Pacific series are therefore labelled one day
+early relative to US/IDX/forex. This is not obviously a defect: TWSE/ASX close
+before NYSE *on the same calendar date*, and the early label is what makes the
+documented "TWSE → IXIC at lag 1" appear (lags 1–5 only are tested). Switching to
+own-date alignment makes that relationship contemporaneous (lag 0, untested) and
+changes every Asia-Pacific lead-lag/correlation row. **Recommendation:** convert
+all four modules to own-date alignment AND define lag by close-time ordering
+(or test lag 0) in one ADR amendment, then recalibrate; do not convert one
+module alone (the four share a pivot convention). Until decided, outputs depend
+on the host zone only through these four modules, and are stable on a WIB host.
+`PENDING_DECISION_D1` in the test file fails if an entry outlives its casts.
+
+### Still unverified
+
+- Census: only 5 of ~640 Silver 1D files were inspected. Any file stamped
+  differently (naive datetime, `Date`, UTC midnight from a non-yfinance adapter)
+  must be found with a full dtype/hour census before declaring this closed.
+- Frames returned by DuckDB (`PITDataLoader.get_ohlcv*`) carry `timestamp` in the
+  *session* zone, so Polars `.dt.date()` on them is host-dependent. Consumers
+  that need a date must derive it in SQL (`__TRADE_DATE__`), not from that column.
+- Grand Design §4.3 still says `timestamp: Datetime (UTC)`. Erratum text:
+  "Datetime, tz-aware, 00:00 local exchange time in the instrument's own IANA
+  zone (America/New_York, Asia/Jakarta, Europe/London, ...); the stamp's own
+  calendar date is the trading date; never convert the zone." The .docx itself
+  has not been edited.
+
+### Update — 17 Oct 2026 (note only, D1 unchanged)
+
+CNH re-enters Layer 2 via FIX SIL-BRZ-SCHEMA-01 (RISK-31 update). Its Silver 1D stamp is
+UTC midnight (not "own-zone": the instrument timezone *is* UTC), hence correct under the
+M1's WIB session cast and under `__TRADE_DATE__`; it is not one of the six early-labelled
+Asia-Pacific series. The forecast log's all-member-NaN counts per category
+(`context_dollar` 36, `context_volatility` 35, …) are the D1 calendar mixing already
+described above, not a new defect.
+
 ---
 
-*Last updated: v1.21.0 — ADR-051 (14 Oct 2026): dual-HMM regime engine completed —
+*Last updated: unreleased (18 Oct 2026, no version bump) — FIX SIL-BRZ-SCHEMA-01 second finding:
+LHX 1M (polygon naive-UTC vs yfinance tz-aware) fixed, CNH closed on M1 evidence, correlation /
+lead-lag re-run pending (D2, D3 open). 2499 -> 2504 collected.
+Prior entry (17 Oct 2026, no version bump) — FIX SIL-BRZ-SCHEMA-01: CNH
+silently dropped from Silver by a Bronze String→Date `timestamp` drift behind a bare
+`except`; shared dtype-tolerant reader, loud failures, census script (RISK-31 update;
+decision D2 open). 2486 -> 2499 collected.
+Prior entry (16 Oct 2026, no version bump) — FIX TS-DATE-01: Silver 1D
+timestamps are local-exchange midnight; session-zone date casts replaced at 17 sites;
+CrossAssetEngine alignment left open as decision D1 (RISK-37). 2421 -> 2486 collected.
+Prior entry (14 Oct 2026): v1.21.0 — ADR-051 (14 Oct 2026): dual-HMM regime engine completed —
 `hmm_core` (shared engine, extracted verbatim, golden-master gated),
 `hmm_market_regime`, `context_regime`, market model config, 3 new jobs; stale
 HMM tests on live rewritten (RISK-36). 1952 -> 2420 collected, 25/25 mutants

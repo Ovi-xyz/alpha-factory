@@ -86,6 +86,7 @@ from src.utils.silver_scope import (  # FIX QV-L2-01, ADD GAP-PEER-01
     layer1_globs,
     layer1_peer_groups,
 )
+from src.utils.trade_date import with_trade_date  # FIX TS-DATE-01
 
 SILVER_OHLCV_PATH  = Path("data/silver/market_ohlcv")
 SILVER_MACRO_PATH  = Path("data/silver/macro_enriched")
@@ -334,11 +335,11 @@ class QualityValidator:
                 return True
             start_5d  = (run_date - timedelta(days=5)).isoformat()
             result = con.execute(
-                """
+                with_trade_date("""
                 SELECT COUNT(DISTINCT symbol) AS symbol_count
                 FROM read_parquet($globs, hive_partitioning=true)
-                WHERE CAST(timestamp AS DATE) >= $start_date
-                """,  # FIX SIL-SQL-001
+                WHERE __TRADE_DATE__ >= $start_date
+                """),  # FIX SIL-SQL-001
                 {"globs": globs_1d, "start_date": start_5d},
             ).fetchone()
 
@@ -374,27 +375,27 @@ class QualityValidator:
         single glob string (Layer 2) or a list of globs (Layer 1) — DuckDB
         read_parquet() handles both identically."""
         return con.execute(
-            """
+            with_trade_date("""
             WITH gaps AS (
                 SELECT
                     symbol,
-                    LAG(CAST(timestamp AS DATE)) OVER (
+                    LAG(__TRADE_DATE__) OVER (
                         PARTITION BY symbol ORDER BY timestamp
                     ) AS prev_ts,
-                    CAST(timestamp AS DATE) AS ts,
+                    __TRADE_DATE__ AS ts,
                     DATEDIFF(
                         'day',
-                        LAG(CAST(timestamp AS DATE)) OVER (
+                        LAG(__TRADE_DATE__) OVER (
                             PARTITION BY symbol ORDER BY timestamp
                         ),
-                        CAST(timestamp AS DATE)
+                        __TRADE_DATE__
                     ) AS day_gap
                 FROM read_parquet($src, hive_partitioning=true)
             )
             SELECT symbol, prev_ts, ts, day_gap
             FROM gaps
             WHERE day_gap > $threshold
-            """,  # FIX SIL-SQL-001
+            """),  # FIX SIL-SQL-001
             {"src": glob_or_globs, "threshold": threshold_days},
         ).fetchall()
 
@@ -716,10 +717,10 @@ class QualityValidator:
             if not globs_1d:
                 return True
             result = con.execute(
-                """
-                SELECT MAX(CAST(timestamp AS DATE)) AS latest_date
+                with_trade_date("""
+                SELECT MAX(__TRADE_DATE__) AS latest_date
                 FROM read_parquet($globs, hive_partitioning=true)
-                """,  # FIX SIL-SQL-001
+                """),  # FIX SIL-SQL-001
                 {"globs": globs_1d},
             ).fetchone()
 
@@ -912,11 +913,11 @@ class QualityValidator:
                 return True
             start_5d = (run_date - timedelta(days=5)).isoformat()
             result = con.execute(
-                """
+                with_trade_date("""
                 SELECT COUNT(DISTINCT symbol) AS symbol_count
                 FROM read_parquet($glob, hive_partitioning=true)
-                WHERE CAST(timestamp AS DATE) >= $start_date
-                """,
+                WHERE __TRADE_DATE__ >= $start_date
+                """),
                 {"glob": glob, "start_date": start_5d},
             ).fetchone()
 
@@ -1056,10 +1057,10 @@ class QualityValidator:
             if glob is None:
                 return True
             result = con.execute(
-                """
-                SELECT MAX(CAST(timestamp AS DATE)) AS latest_date
+                with_trade_date("""
+                SELECT MAX(__TRADE_DATE__) AS latest_date
                 FROM read_parquet($glob, hive_partitioning=true)
-                """,
+                """),
                 {"glob": glob},
             ).fetchone()
 

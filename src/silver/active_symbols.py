@@ -77,6 +77,7 @@ from loguru import logger
 
 from src.config.instrument_loader import get_loader
 from src.config.pipeline_config import get_config
+from src.utils.trade_date import with_trade_date  # FIX TS-DATE-01
 
 
 # ── Resolver version — bump when logic changes (AS-6) ────────────────────────
@@ -118,7 +119,7 @@ _ALWAYS_IN_MARKETS: tuple[str, ...] = ("forex", "commodity", "index")
 # AS-5: UNION policy — always_in never hits LIMIT
 # AS-10: m.market IS NOT NULL guard (unknown market filtered before eligible check)
 # AS-11: hive_partitioning=false (Supp. Design G2 convention)
-_RESOLVE_QUERY = """
+_RESOLVE_QUERY = with_trade_date("""
 WITH ohlcv AS (
     -- AS-1: $name placeholders  |  AS-11: hive_partitioning=false
     -- AS-4: is_clean=TRUE at source — affects ALL downstream CTEs
@@ -127,11 +128,11 @@ WITH ohlcv AS (
         m.market,
         s.close * s.volume          AS dollar_volume,
         s.close                     AS last_close,
-        CAST(s.timestamp AS DATE)   AS ts_date
+        __TRADE_DATE(s.timestamp)__   AS ts_date
     FROM read_parquet($path, hive_partitioning=false) s
     LEFT JOIN market_lookup m ON s.symbol = m.symbol
     -- AS-10: market NULL guard applied before aggregation
-    WHERE CAST(s.timestamp AS DATE) BETWEEN $run_date - INTERVAL 45 DAYS AND $run_date
+    WHERE __TRADE_DATE(s.timestamp)__ BETWEEN $run_date - INTERVAL 45 DAYS AND $run_date
       AND m.market IS NOT NULL
       AND s.is_clean = TRUE
 ),
@@ -187,7 +188,7 @@ FROM always_in
 UNION ALL
 SELECT symbol, market, dollar_volume_20d, clean_days, last_close, eligibility_reason
 FROM screened
-"""
+""")
 
 
 class ActiveSymbolsResolver:

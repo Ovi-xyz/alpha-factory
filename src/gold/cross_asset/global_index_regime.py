@@ -83,6 +83,7 @@ from src.config.instrument_loader import get_loader
 from src.gold.indicators.core_indicators import add_ema
 from src.utils.atomic_io import atomic_write_parquet
 from src.utils.silver_scope import context_glob
+from src.utils.trade_date import with_trade_date  # FIX TS-DATE-01
 
 SILVER_OHLCV_PATH        = Path("data/silver/market_ohlcv")
 GOLD_CROSS_ASSET_PATH    = Path("data/gold/cross_asset")
@@ -191,14 +192,14 @@ class GlobalIndexRegimeModule:
         con.execute("SET memory_limit='2GB'; SET threads=4;")
         try:
             df = con.execute(
-                """
+                with_trade_date("""
                 SELECT symbol, timestamp, close
                 FROM read_parquet($glob, hive_partitioning=true)
                 WHERE is_clean = TRUE
                   AND symbol = ANY($symbols)
-                  AND CAST(timestamp AS DATE) <= $run_date
+                  AND __TRADE_DATE__ <= $run_date
                 ORDER BY symbol, timestamp
-                """,
+                """),
                 {"glob": glob, "symbols": symbols, "run_date": run_date},
             ).pl()
         except Exception as e:

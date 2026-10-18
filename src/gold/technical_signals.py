@@ -64,6 +64,7 @@ from src.gold.indicators.pandas_indicators import add_adx, add_bbands
 from src.utils.atomic_io import atomic_write_parquet
 from src.utils.progress_checkpoint import ProgressCheckpoint
 from src.utils.silver_scope import layer1_globs  # FIX GLD-L2-01
+from src.utils.trade_date import with_trade_date  # FIX TS-DATE-01
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -140,14 +141,14 @@ def _get_latest_vix(run_date: date) -> float | None:
         con = duckdb.connect()
         # FIX GLD-003: $name parameterized query — f-string SQL dilarang GD §17.7
         result = con.execute(
-            """
+            with_trade_date("""
             SELECT close
             FROM read_parquet($glob, hive_partitioning=true)
-            WHERE CAST(timestamp AS DATE) <= $run_date
+            WHERE __TRADE_DATE__ <= $run_date
               AND is_clean = TRUE
             ORDER BY timestamp DESC
             LIMIT 1
-            """,
+            """),
             {"glob": vix_ohlcv_glob, "run_date": run_date},
         ).fetchone()
         if result and result[0] is not None:

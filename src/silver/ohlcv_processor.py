@@ -22,6 +22,7 @@ Processing Steps:
 
 from __future__ import annotations
 
+import glob as _glob  # FIX SIL-BRZ-SCHEMA-01
 import math
 from datetime import date
 from pathlib import Path
@@ -152,6 +153,18 @@ class OHLCVProcessor:
         IDX: WIB (UTC+7) → UTC
         US:  ET (America/New_York) → UTC
         Forex: sudah UTC
+
+        FIX TS-DATE-01 [chat thread, 16 Oct 2026]: the summary above describes
+        only the NAIVE branch. By input dtype:
+          - tz-aware Datetime: passed through UNTOUCHED, keeping its own zone.
+            yfinance daily bars arrive this way (local-exchange midnight), which
+            is why live Silver 1D stamps are 00:00 in each instrument's OWN zone
+            (AAPL New York, BBCA Jakarta, EUR_USD London, VIX Chicago) — NOT UTC,
+            contrary to Grand Design §4.3.
+          - naive Datetime / str: localised to `tz_source`, converted to UTC.
+          - Date: UTC midnight.
+        Consumers must take a 1D bar's own calendar date WITHOUT a zone
+        conversion — see src/utils/trade_date.py. Behaviour unchanged here.
         """
         if "timestamp" not in df.columns:
             return df
@@ -650,6 +663,157 @@ _RUN_BRONZE_TFS = ["5m", "15m", "1H", "1D", "1W", "1M"]
 _RUN_CONTEXT_TFS = ["1D", "1W", "1M"]
 
 
+# FIX SIL-BRZ-SCHEMA-01 [chat thread, 17 Oct 2026] — no version bump.
+#
+# Root cause of "[broad_dollar] 1/14 BIS_WEIGHTS symbols missing ... ['CNH']"
+# (gold_forecast run, 16 Oct 2026): Bronze is append-only (GD §3.1), so a
+# symbol whose adapter changed its output dtype carries BOTH dtypes on disk
+# forever. CNH (AlphaVantage FX) 1D Bronze has `timestamp: String` files from
+# before FIX AV-CNH-01 (30 Aug-8 Sep) and `timestamp: Date` files from 9 Sep
+# onward (measured 17 Oct 2026; 1W/1M expected identical — run
+# scripts/audit_bronze_schema_drift.py to confirm). `pl.scan_parquet(glob)` over
+# that mix raises SchemaError ("incoming: Date != target: String"), and the bare
+# `except Exception` around it treated the error as "no Bronze data yet" ->
+# ckpt.mark_done -> no Silver file, no error, no failed-checkpoint row. Silver
+# context then held 57 of 58 anchors (98.3% vs COVERAGE_MIN_PCT=95, so
+# context_coverage_check stayed green) and Broad Dollar lost CNH's ~32.9% share
+# of the BIS weights. Layer 1 PASS 1 had the identical read/except pair.
+#
+# Two defects, both fixed here, one helper for both call sites (GAP-6
+# precedent: one implementation, not two drifting copies):
+#   1. reader: reconcile per-file dtype drift instead of failing on it;
+#   2. swallow: "no files" is the ONLY condition that means "nothing to do";
+#      every other read failure now propagates to the caller's mark_failed +
+#      logger.error path.
+#
+# Second finding, same mechanism (census of 18 Oct 2026): us_stocks/LHX 1M has
+# 46 yfinance files (tz-aware Datetime[ms, America/New_York], local midnight)
+# and exactly ONE polygon file (11 Sep, the day yfinance had none): naive
+# Datetime[ms], volume Float64 instead of Int64, extra `vwap`. A tz-aware/naive
+# mix has no supertype, so the first version of the reconcile still raised —
+# loudly, but LHX 1M stayed without Silver. The polygon adapter builds its stamp
+# with pd.Timestamp(r["t"], unit="ms"), i.e. a naive EPOCH-UTC instant (measured:
+# 04:00:00 on 1 Aug/1 Sep = New York midnight under EDT). It is NOT local time,
+# so it must not take the processor's naive branch (which would localise 04:00
+# as New York time, 4-5 h late, and leave a duplicate beside the yfinance bar).
+# Rule, deliberately narrow: naive stamps from an adapter KNOWN to write epoch
+# UTC are read as UTC and converted to the instrument's own zone; naive stamps
+# from any other source in a mixed group keep raising, because their meaning is
+# unknown and guessing would mis-stamp silently.
+_UTC_NAIVE_SOURCES = frozenset({"polygon"})
+_BRONZE_PRICE_COLS = ("open", "high", "low", "close")
+
+
+def _bronze_source_of(path: str) -> Optional[str]:
+    """`source=NAME` path segment of a Bronze file (Hive layout), else None."""
+    for part in Path(path).parts:
+        if part.startswith("source="):
+            return part.split("=", 1)[1]
+    return None
+
+
+def _harmonise_bronze_timestamp(
+    lf: pl.LazyFrame,
+    source: Optional[str] = None,
+    target_tz: Optional[str] = None,
+) -> pl.LazyFrame:
+    """Bring one Bronze file's `timestamp` to a form that concatenates with the
+    other files of the same (symbol, tf). String -> parsed (strict=False,
+    unparseable -> null, same contract as _normalize_timestamps' Utf8 branch) to
+    naive Datetime(us); Date -> naive midnight. Naive Datetime from a source in
+    _UTC_NAIVE_SOURCES (polygon) -> read as UTC, then converted to `target_tz`
+    (the instrument's zone) so it lands on the same instant as the tz-aware
+    yfinance bar. Anything else is left as it is — a tz-aware/naive mix from an
+    unknown source still raises, on purpose.
+    Lazy on purpose (SIL-RPQ-001: no eager read on the M1's 8 GB)."""
+    schema = lf.collect_schema()
+    if "timestamp" not in schema:
+        return lf
+    dtype = schema["timestamp"]
+    if dtype == pl.Utf8:
+        return lf.with_columns(pl.col("timestamp").str.to_datetime(strict=False))
+    if dtype == pl.Date:
+        return lf.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
+    if dtype == pl.Datetime and dtype.time_zone is None and source in _UTC_NAIVE_SOURCES:
+        ts = pl.col("timestamp").dt.replace_time_zone("UTC")
+        if target_tz:
+            ts = ts.dt.convert_time_zone(target_tz)
+        return lf.with_columns(ts.alias("timestamp"))
+    return lf
+
+
+def _describe_schema_drift(files: list[str]) -> str:
+    """Human-readable `column: {dtype, dtype}` summary of the columns whose dtype
+    (or presence) differs between files — for the audit log line only."""
+    schemas = [pl.read_parquet_schema(f) for f in files]
+    seen: dict[str, set[str]] = {}
+    for schema in schemas:
+        for col, dtype in schema.items():
+            seen.setdefault(col, set()).add(str(dtype))
+    parts = [
+        f"{c}: {{{', '.join(sorted(t))}}}"
+        for c, t in sorted(seen.items()) if len(t) > 1
+    ]
+    parts += [
+        f"{c}: missing in some files"
+        for c in sorted(seen) if sum(c in sc for sc in schemas) < len(schemas)
+    ]
+    return "; ".join(parts) or "no column-level difference found"
+
+
+def _read_bronze_symbol(
+    pattern: str, tz_hint: Optional[str] = None
+) -> Optional[pl.DataFrame]:
+    """Read every Bronze file matching `pattern` as one DataFrame.
+
+    Returns None ONLY when no file matches (nothing ingested yet — callers mark
+    the (symbol, tf) done). Any other failure raises, so the caller records it
+    as FAILED instead of silently skipping the symbol.
+
+    Fast path: the same `pl.scan_parquet(pattern).collect()` as before
+    (FIX SIL-RPQ-001), so a symbol with a uniform schema is read exactly as it
+    always was. Fallback, only on SchemaError: scan file by file, harmonise
+    `timestamp` (see _harmonise_bronze_timestamp; `tz_hint` = the instrument's
+    zone, needed to put polygon's naive-UTC stamps next to yfinance's tz-aware
+    ones), concat with diagonal_relaxed (dtype supertype + missing columns ->
+    null), then refuse a result whose price columns are not numeric (a relaxed
+    String/Float supertype would otherwise slip through as text).
+    """
+    files = sorted(_glob.glob(pattern, recursive=True))
+    if not files:
+        return None
+    try:
+        return pl.scan_parquet(pattern).collect()
+    except pl.exceptions.SchemaError:
+        pass
+
+    logger.warning(
+        f"[OHLCVProcessor] Bronze schema drift across {len(files)} files "
+        f"({pattern}) — reconciling per file | {_describe_schema_drift(files)}"
+    )
+    frames = [
+        _harmonise_bronze_timestamp(
+            pl.scan_parquet(f), source=_bronze_source_of(f), target_tz=tz_hint
+        )
+        for f in files
+    ]
+    df = pl.concat(frames, how="diagonal_relaxed").collect()
+    for col in _BRONZE_PRICE_COLS:
+        if col in df.columns and not df.schema[col].is_numeric():
+            raise ValueError(
+                f"Bronze drift reconciliation produced non-numeric '{col}' "
+                f"({df.schema[col]}) for {pattern} — refusing to continue"
+            )
+    if "volume" in df.columns and not (
+        df.schema["volume"].is_numeric() or df.schema["volume"] == pl.Null
+    ):
+        raise ValueError(
+            f"Bronze drift reconciliation produced non-numeric 'volume' "
+            f"({df.schema['volume']}) for {pattern} — refusing to continue"
+        )
+    return df
+
+
 def run(run_date: date) -> None:
     """
     Job entry point for 'silver_ohlcv' — dipanggil oleh job_registry.py.
@@ -724,10 +888,11 @@ def run(run_date: date) -> None:
                     / "**"
                     / "*.parquet"
                 )
-                try:
-                    # FIX SIL-RPQ-001: lazy scan → collect avoids full eager load on M1 8GB
-                    df = pl.scan_parquet(pattern).collect()
-                except Exception:
+                # FIX SIL-BRZ-SCHEMA-01: the old bare `except Exception` here also
+                # swallowed SchemaError from mixed-dtype Bronze (see helper above).
+                # None == no files (mark done); any other error -> mark_failed below.
+                df = _read_bronze_symbol(pattern, tz_hint=inst.timezone)
+                if df is None:
                     # No Bronze data for this symbol/TF yet — mark done, not failed.
                     ckpt.mark_done(inst.symbol, timeframe=tf)
                     continue
@@ -863,9 +1028,11 @@ def run_context(run_date: date) -> None:
                     / "**"
                     / "*.parquet"
                 )
-                try:
-                    df = pl.scan_parquet(pattern).collect()
-                except Exception:
+                # FIX SIL-BRZ-SCHEMA-01: sama dengan PASS 1 Layer 1 — bare except
+                # lama menelan SchemaError (CNH: Bronze timestamp String lalu Date).
+                # None == tidak ada file (mark done); error lain -> mark_failed.
+                df = _read_bronze_symbol(pattern, tz_hint=inst.timezone)
+                if df is None:
                     # Belum ada Bronze data untuk symbol/TF ini — mark done,
                     # bukan failed (konsisten dengan PASS 1 Layer 1).
                     ckpt.mark_done(inst.symbol, timeframe=tf)

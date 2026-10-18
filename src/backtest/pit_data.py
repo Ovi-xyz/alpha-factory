@@ -24,6 +24,7 @@ import polars as pl
 from loguru import logger
 
 from src.utils.silver_scope import layer1_globs
+from src.utils.trade_date import with_trade_date  # FIX TS-DATE-01
 
 # FIX ADR-022/RISK-6 (GMI_Decision_Document_v2.docx CI Gate G-8, 2026-07-11):
 # SILVER_OHLCV_PATH was an unfiltered "market_ohlcv/**/..." glob template —
@@ -113,7 +114,7 @@ class PITDataLoader:
         try:
             # FIX BCK-SQL-001: $name parameterized (GD §17.7) — prevents SQL injection
             return self._con.execute(
-                """
+                with_trade_date("""
                 SELECT
                     symbol, timestamp, timeframe,
                     open, high, low, close, volume,
@@ -121,11 +122,11 @@ class PITDataLoader:
                     is_adjusted, adj_factor, is_clean, data_source
                 FROM read_parquet($path, hive_partitioning=true)
                 WHERE symbol    = $symbol
-                  AND CAST(timestamp AS DATE) >= $start
-                  AND CAST(timestamp AS DATE) <  $trade_date   -- PIT guard
+                  AND __TRADE_DATE__ >= $start
+                  AND __TRADE_DATE__ <  $trade_date   -- PIT guard
                   AND is_clean  = TRUE
                 ORDER BY timestamp ASC
-                """,
+                """),
                 {"path": paths, "symbol": symbol,
                  "start": start.isoformat(), "trade_date": trade_date.isoformat()},
             ).pl()
@@ -154,18 +155,18 @@ class PITDataLoader:
             # FIX BCK-SQL-001: fully parameterized — DuckDB supports list param
             # via = ANY($param) operator (avoids f-string SQL, GD §17.7)
             return self._con.execute(
-                """
+                with_trade_date("""
                 SELECT
                     symbol, timestamp,
                     open, high, low, close, volume,
                     log_return, vwap, is_adjusted, adj_factor, is_clean
                 FROM read_parquet($path, hive_partitioning=true)
                 WHERE symbol = ANY($symbols)
-                  AND CAST(timestamp AS DATE) >= $start
-                  AND CAST(timestamp AS DATE) <  $trade_date
+                  AND __TRADE_DATE__ >= $start
+                  AND __TRADE_DATE__ <  $trade_date
                   AND is_clean = TRUE
                 ORDER BY symbol, timestamp ASC
-                """,
+                """),
                 {"path": paths, "symbols": symbols,
                  "start": start.isoformat(), "trade_date": trade_date.isoformat()},
             ).pl()
