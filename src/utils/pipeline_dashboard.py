@@ -137,7 +137,7 @@ def _section_layer_coverage() -> None:
          [layer2_ohlcv_glob] if layer2_ohlcv_glob else [], BLUE),
         ("Silver Macro",  ["data/silver/macro_enriched/**/*.parquet"], BLUE),
         ("Gold Signals",  ["data/gold/signals/*.parquet"], "\033[38;5;220m"),
-        ("Gold Regime",   ["data/gold/macro/regime_store.parquet"], "\033[38;5;220m"),
+        ("Gold Regime",   ["data/gold/hmm/context_regime.parquet"], "\033[38;5;220m"),   # ADR-055 v2: dual-HMM context regime
         ("Gold Watchlist", ["data/gold/screener/*.parquet"], "\033[38;5;220m"),
     ]
 
@@ -246,7 +246,7 @@ def _section_data_freshness() -> None:
         ("Silver 1D (AAPL)",
          "data/silver/market_ohlcv/us_stocks/symbol=AAPL/*_1D_silver.parquet"),
         ("Gold Regime",
-         "data/gold/macro/regime_store.parquet"),
+         "data/gold/hmm/context_regime.parquet"),   # ADR-055 v2
         ("Gold Watchlist",
          "data/gold/screener/watchlist_*.parquet"),
         ("Active Symbols",

@@ -36,6 +36,7 @@ import polars as pl
 import pytest
 
 import src.gold.cross_asset.lead_lag_module as llm
+import src.gold.cross_asset.regime_tag as regime_tag
 from src.gold.cross_asset.lead_lag_module import LeadLagModule, run
 from src.silver.active_symbols import ActiveSymbolsResolver
 
@@ -62,7 +63,7 @@ class _FakeLoader:
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "SILVER_OHLCV_PATH", tmp_path / "silver" / "market_ohlcv")
-    monkeypatch.setattr(llm, "REGIME_STORE_PATH", tmp_path / "gold" / "macro" / "regime_store.parquet")
+    monkeypatch.setattr(regime_tag, "GLOBAL_REGIME_PATH", tmp_path / "gold" / "cross_asset" / "global_regime.parquet")
     monkeypatch.setattr(llm, "GOLD_CROSS_ASSET_PATH", tmp_path / "gold" / "cross_asset")
     monkeypatch.setattr(llm, "LEAD_LAG_STORE_PATH", tmp_path / "gold" / "cross_asset" / "lead_lag_matrix.parquet")
 

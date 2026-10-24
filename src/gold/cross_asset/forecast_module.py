@@ -163,11 +163,11 @@ from src.config.instrument_loader import get_loader
 from src.gold.cross_asset.broad_dollar import compute_broad_dollar, load_fx_returns
 from src.silver.active_symbols import ActiveSymbolsResolver
 from src.utils.atomic_io import atomic_write_parquet
+from src.gold.cross_asset.regime_tag import current_regime_tag
 from src.gold.cross_asset.history import FORECAST_HISTORY_NAME, write_history_snapshot
 from src.utils.silver_scope import context_glob, layer1_globs
 
 SILVER_OHLCV_PATH     = Path("data/silver/market_ohlcv")
-REGIME_STORE_PATH     = Path("data/gold/macro/regime_store.parquet")
 GOLD_CROSS_ASSET_PATH = Path("data/gold/cross_asset")
 FORECAST_STORE_PATH   = GOLD_CROSS_ASSET_PATH / "cross_asset_forecast.parquet"
 
@@ -639,17 +639,8 @@ class ForecastModule:
 
     @staticmethod
     def _get_current_regime(run_date: date) -> str:
-        if not REGIME_STORE_PATH.exists():
-            return "UNKNOWN"
-        try:
-            df = pl.read_parquet(REGIME_STORE_PATH)
-            prior = df.filter(pl.col("date") <= str(run_date)).sort("date", descending=True)
-            if prior.is_empty():
-                return "UNKNOWN"
-            return prior.row(0, named=True)["regime"]
-        except Exception as e:
-            logger.debug(f"[gold_forecast] Could not read regime: {e}")
-            return "UNKNOWN"
+        """The engine's own regime tag — see regime_tag.py (ADR-055 v2, R3)."""
+        return current_regime_tag(run_date)
 
 
 def run(run_date: date) -> None:

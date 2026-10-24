@@ -10,7 +10,7 @@ Daily module (unlike CorrelationModule/LeadLagModule/ForecastModule,
 which are weekly per Architecture v2.0 §6.1) that reads the Layer 2
 global equity indices (context_equity_dm + context_equity_em,
 instruments_taxonomy.yaml) and derives a supplementary regime signal,
-independent of macro_regime.py's VIX/rates-based classification
+independent of the (retired) macro_regime.py's VIX/rates-based classification and of the dual-HMM regime engine
 (GD §8.1) and independent of the rest of CrossAssetEngine, none of
 which exists yet.
 

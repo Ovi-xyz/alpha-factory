@@ -12,7 +12,7 @@ Closes a real coverage gap: check_fred_commodity_series.py (RISK-15, 8 Aug
 thread. The other 62 series in config/fred_series.yaml — monetary_policy
 (18), inflation (9), growth (8), labor (8), credit (9), housing (9),
 volatility (1, VIXCLS) — have never had a live preflight check at all,
-including the 7 series wired into macro_regime.py's regime computation via
+including the 7 series that fed the retired macro_regime.py's regime computation (archived, ADR-055 v2) via
 `regime_inputs:` (VIXCLS, T10Y2Y, CPIAUCSL, A191RL1Q225SBEA, DEXUSEU, NFCI,
 BAMLH0A0HYM2) — the single highest-consequence subset in the whole FRED
 registry, since a silent FRED schema/ID change there degrades regime
@@ -56,7 +56,7 @@ load_dotenv()
 FRED_OBSERVATIONS_ENDPOINT = "https://api.stlouisfed.org/fred/series/observations"
 FRED_REGISTRY_PATH = Path(__file__).resolve().parents[2] / "config" / "fred_series.yaml"
 
-# The 7 series feeding macro_regime.py's regime computation directly
+# The 7 series that fed the retired macro_regime.py's regime computation (kept: still the core daily FRED regime inputs)
 # (config/fred_series.yaml's own `regime_inputs:` block) — flagged in
 # output, not treated as a separate check, since they're a subset of
 # whatever --domain/--series filter is already active.
@@ -120,7 +120,7 @@ def main() -> int:
     parser.add_argument("--series", default=None, help="Only check one series ID (e.g. VIXCLS)")
     parser.add_argument(
         "--regime-only", action="store_true",
-        help="Only check the 7 series feeding macro_regime.py's regime_inputs",
+        help="Only check the 7 regime_input series (formerly macro_regime.py's inputs)",
     )
     parser.add_argument(
         "--include-commodity", action="store_true",

@@ -43,7 +43,12 @@ SILVER_OHLCV_ROOT  = Path("data/silver/market_ohlcv")
 SILVER_MACRO_PATH  = "data/silver/macro_enriched/**/*_silver.parquet"
 GOLD_SIGNALS_PATH  = "data/gold/signals/tech_signals_{tf}.parquet"
 GOLD_MTF_PATH      = "data/gold/mtf/mtf_alignment_*.parquet"
-GOLD_REGIME_PATH   = "data/gold/macro/regime_store.parquet"
+# GOLD_REGIME_PATH / get_regime() REMOVED (ADR-055 v2, GMI-HMM2-CUT-001): the rule-based
+# regime_store.parquet is no longer produced. The platform's regime is the dual-HMM context regime
+# — get_context_regime() below (GOLD_CONTEXT_REGIME_PATH).
+# MTF files written before the cutover carry two columns the technical engine no longer produces;
+# get_mtf_score() never returns them (see LEGACY_MTF_REGIME_COLUMNS).
+LEGACY_MTF_REGIME_COLUMNS = frozenset({"regime_compatible", "active_regime"})
 
 # FIX GMI-PIT-001 (ADR-050): read paths for every Gold output that was
 # previously unreachable from the backtest/PIT path — GMI Wave 1 Cycle 4's
@@ -85,7 +90,7 @@ class PITDataLoader:
     Usage in backtest:
         loader = PITDataLoader()
         ohlcv  = loader.get_ohlcv("AAPL", "1D", trade_date)
-        regime = loader.get_regime(trade_date)
+        regime = loader.get_context_regime(trade_date)
         macro  = loader.get_macro_series("T10Y2Y", trade_date)
     """
 
@@ -206,30 +211,6 @@ class PITDataLoader:
             logger.debug(f"[PITLoader] Macro {series_id} not available: {e}")
             return pl.DataFrame()
 
-    def get_regime(self, trade_date: date) -> Optional[dict]:
-        """
-        Return macro regime as of trade_date.
-        PIT: uses regime computed on or before trade_date.
-        """
-        try:
-            # FIX BCK-SQL-001: $name parameterized
-            result = self._con.execute(
-                """
-                SELECT *
-                FROM read_parquet($path)
-                WHERE CAST(date AS DATE) <= $trade_date
-                ORDER BY date DESC
-                LIMIT 1
-                """,
-                {"path": GOLD_REGIME_PATH, "trade_date": trade_date.isoformat()},
-            ).pl()
-
-            if not result.is_empty():
-                return result.row(0, named=True)
-        except Exception as e:
-            logger.debug(f"[PITLoader] Regime not available for {trade_date}: {e}")
-        return None
-
     def get_signals(
         self,
         symbol: str,
@@ -267,13 +248,22 @@ class PITDataLoader:
         symbol: str,
         trade_date: date,
     ) -> Optional[dict]:
-        """Return most recent MTF alignment score as of trade_date."""
+        """
+        Return most recent MTF alignment score as of trade_date.
+
+        ADR-055 v2: union_by_name=true — mtf_alignment_*.parquet files written before the
+        cutover carry `regime_compatible` / `active_regime`, files after it do not, and a plain
+        glob over the mix fails with a schema mismatch (this method swallows the error and would
+        return None for every symbol — silently). The two legacy columns are also dropped from
+        the returned row, so the retired rule-based regime can never reach a model's input via a
+        historical MTF file (the technical domain stays regime-free — ADR-055 v1 F3).
+        """
         try:
             # FIX BCK-SQL-001: $name parameterized
             result = self._con.execute(
                 """
                 SELECT *
-                FROM read_parquet($path, hive_partitioning=false)
+                FROM read_parquet($path, hive_partitioning=false, union_by_name=true)
                 WHERE symbol = $symbol
                   AND date   <= $trade_date
                 ORDER BY date DESC
@@ -284,7 +274,8 @@ class PITDataLoader:
             ).pl()
 
             if not result.is_empty():
-                return result.row(0, named=True)
+                row = result.row(0, named=True)
+                return {k: v for k, v in row.items() if k not in LEGACY_MTF_REGIME_COLUMNS}
         except Exception as e:
             logger.debug(f"[PITLoader] MTF not available for {symbol}: {e}")
         return None
@@ -298,8 +289,8 @@ class PITDataLoader:
         """
         Return the global equity-index breadth regime
         (gold_global_regime / global_index_regime.py) as of trade_date.
-        Same single-row idiom as get_regime() — 'date' column, most recent
-        row on or before trade_date.
+        Single-row idiom — 'date' column, most recent row on or before
+        trade_date.
         """
         try:
             result = self._con.execute(
@@ -331,7 +322,7 @@ class PITDataLoader:
         (see module header) and returns exactly ONE snapshot — never several
         weeks concatenated. Empty if trade_date predates the earliest
         retained snapshot. Multi-row by nature (a matrix), unlike the
-        single-row get_regime()/get_mtf_score().
+        single-row get_context_regime()/get_mtf_score().
 
         Static SQL only (two fixed branches, no string building) — the
         project's no-f-string-SQL rule (GD §17.7) applies to fragments too.
@@ -493,14 +484,10 @@ class PITDataLoader:
 
     def get_context_regime(self, trade_date: date) -> Optional[dict]:
         """
-        Return the dual-HMM context regime (ADR-051, context_regime.py —
-        NOT YET BUILT) as of trade_date. Same single-row idiom as
-        get_regime(). Returns None today, and will keep returning None
-        until ADR-051 ships and starts writing context_regime.parquet —
-        there is nothing else to special-case here: the existing
-        try/except around a read_parquet() of a not-yet-existing path
-        already degrades exactly the way every other method in this class
-        does when its own Gold producer hasn't run yet.
+        Return the dual-HMM context regime (ADR-051, context_regime.py) — the platform's
+        regime since ADR-055 v2 — as of trade_date: the latest row on or before it (single-row
+        idiom, 'date' column). Rows carry `in_sample`; anything judging the regime's accuracy
+        must filter on it. Returns None when the store does not exist yet (no HMM fit has run).
         """
         try:
             result = self._con.execute(

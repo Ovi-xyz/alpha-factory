@@ -1,6 +1,42 @@
 """
 screener.py — GD §5.2.4 (Gold Screener & Watchlist)
-DuckDB query join: MTF + Regime + Sector + Correlation.
+DuckDB query join: MTF + Correlation + Context Regime (+ cross-asset / signal aggregation).
+
+ADR-055 v2 (GMI-HMM2-CUT-001) — THE DESIGNATED INTERFACE OF THE (FUTURE) TRADING ENGINE. The Gold layer is organised as
+four engines — technical (gold_signals, gold_mtf, signal_aggregation), cross-asset
+(gold_global_regime, gold_cross_asset_correlation, gold_lead_lag, gold_forecast), dual-HMM regime
+(gold_raw_macro/market, gold_hmm_macro/market_regime, gold_context_regime + two fit jobs) and the
+specialist/decision intelligence on top (ADR-052..054) — and this module is where they meet:
+gold_screener is the one output the Trading Engine contract will point at. No Trading Engine
+exists yet — the Gold layer is still unstable and unfinished — so this schema is provisional and
+nothing outside the repo depends on it; the contract is formalised when the Gold layer is done
+(ADR-054). The retired rule-based
+regime (macro_regime.py / regime_store.parquet: regime, regime_composite, regime_confidence,
+regime_transition, transition_alert) is replaced by the dual-HMM context regime, joined as-of from
+data/gold/hmm/context_regime.parquet (soft source, same degrade-to-NULL idiom as every other
+optional source here):
+
+    context_date, context_age_days      which context row, and how stale it is vs run_date
+                                        (beyond CONTEXT_REGIME_TOLERANCE_DAYS -> all NULL, never a
+                                        silently month-old state)
+    macro_label, macro_activity, macro_momentum
+                                        expansion | slowdown | recession | recovery (ENVIRONMENT)
+    market_label, market_probability, market_score, market_age_days
+                                        risk_off | mixed | risk_on (BEHAVIOUR)
+    context_label                       "<macro_label>/<market_label>"
+    context_transition, context_transition_alert
+                                        the label changed vs the previous known one (data, not a
+                                        decision — GD §0.3)
+    regime_in_sample                    True if the row lies inside a model's training window;
+                                        anything judging the regime's accuracy must filter on it
+
+Also gone, for the same reason: `sector_weight_adj`, the sector concentration guard built on it,
+and the `sector` column itself. `gold_sector` (regime -> sector weights) was archived with
+macro_regime.py — regime-free it had nothing left to do — and the watchlist carries no sector
+label (Ovi, 21 Oct 2026). The sector *breadth* columns (`sector_breadth_pct`, `sector_momentum`)
+still arrive from signal_aggregation, joined by symbol.
+The screener is the only job allowed to read the HMM engine's store besides the HMM engine itself
+and PITDataLoader: it is the synthesis tip, not one of the three independent domains.
 
 FIX ADR-043/ADR-044 (GMI_Decision_Document_v10.docx): Finnhub retired in
 full — _enrich_earnings() and _enrich_sentiment() (and their call sites)
@@ -18,7 +54,7 @@ ADD GMI Wave 1 Cycle 4 — CrossAssetEngine integration (Architecture v2.0
 §5.3, §9.1 Phase 5, §10.1 roadmap item "gold_screener: integrate
 CrossAssetEngine outputs"). Three new optional sources, following the
 EXACT same soft-dependency, graceful-degrade-to-NULL pattern already
-established here for sector_tbl/active_tbl/regime_tbl — never a filter
+established here for active_tbl/regime_tbl — never a filter
 or ranking input, purely informational DATA fields (Section 0.2/0.3
 Separation of Concerns: pipeline supplies data, Trading Engine decides),
 same treatment as days_to_earnings/sentiment_score before Finnhub's
@@ -48,7 +84,7 @@ None of these three are in gold_screener's depends_on (job_registry.py) —
 deliberately, matching silver_active_symbols' own precedent (feeds
 active_tbl, also not a hard dependency): all three degrade to empty/NULL
 via the same has_X / try-except / _empty_*_df() idiom already used for
-sector_tbl/active_tbl/regime_tbl, so a missing or stale (weekly, possibly
+active_tbl/regime_tbl, so a missing or stale (weekly, possibly
 several days old within the week) CrossAssetEngine output never blocks
 the screener the way a missing gold_mtf does.
 
@@ -85,8 +121,7 @@ from src.utils.trade_date import with_trade_date  # FIX TS-DATE-01
 
 SILVER_OHLCV_ROOT  = Path("data/silver/market_ohlcv")
 GOLD_MTF_PATH       = Path("data/gold/mtf")
-GOLD_REGIME_PATH    = Path("data/gold/macro/regime_store.parquet")
-GOLD_SECTOR_PATH    = Path("data/gold/sector/sector_regime_weights.parquet")
+GOLD_CONTEXT_REGIME_PATH = Path("data/gold/hmm/context_regime.parquet")   # ADR-055 v2: replaces regime_store
 GOLD_CORR_PATH      = Path("data/gold/correlation/correlation_clusters.parquet")
 GOLD_SCREENER_PATH  = Path("data/gold/screener")
 # ADD GMI Wave 1 Cycle 4 — CrossAssetEngine outputs (see module docstring).
@@ -116,7 +151,9 @@ SILVER_ACTIVE_SYMBOLS_ROOT = Path("data/silver/active_symbols")
 # recalibrated grade table.
 MIN_MTF_SCORE      = 3       # |score| >= 3 → grade A or B only
 MIN_DOLLAR_VOLUME  = 1_000_000   # USD 1M/day
-MIN_SECTOR_WEIGHT  = 0.5     # Exclude sectors in RISK_OFF penalty
+# MIN_SECTOR_WEIGHT removed (ADR-055 v2): the sector concentration guard needed the regime-keyed
+# sector_weight_adj, which no longer exists (gold_sector archived); the `sector` column is gone too.
+CONTEXT_REGIME_TOLERANCE_DAYS = 5   # first-pass: same as context_regime.MARKET_TOLERANCE_DAYS
 TOP_N_WATCHLIST    = 20
 MAX_PER_CLUSTER    = 2       # Correlation concentration guard (GD §15.1)
 
@@ -126,24 +163,64 @@ MAX_PER_CLUSTER    = 2       # Correlation concentration guard (GD §15.1)
 # di f-string SQL. Arrow table registration ke DuckDB memungkinkan LEFT JOIN
 # terhadap tabel kosong tanpa perlu f-string conditional path logic.
 
-def _empty_regime_df() -> pl.DataFrame:
-    """Placeholder regime DataFrame dengan schema minimal."""
+# Columns the screener reads from context_regime.parquet (ADR-055 v2), in output order.
+CONTEXT_REGIME_READ_COLUMNS = (
+    "date", "macro_label", "macro_activity", "macro_momentum",
+    "market_label", "market_probability", "market_score", "market_age_days",
+    "context_label", "context_transition", "context_transition_alert", "in_sample",
+)
+
+
+def _empty_context_regime_df() -> pl.DataFrame:
+    """Placeholder context-regime DataFrame (typed, zero rows) — ADR-055 v2."""
     return pl.DataFrame({
-        "regime":            pl.Series([], dtype=pl.Utf8),
-        "composite_score":   pl.Series([], dtype=pl.Float64),
-        "confidence":        pl.Series([], dtype=pl.Float64),
-        "regime_transition": pl.Series([], dtype=pl.Boolean),
-        "transition_alert":  pl.Series([], dtype=pl.Utf8),
+        "context_date":             pl.Series([], dtype=pl.Date),
+        "context_age_days":         pl.Series([], dtype=pl.Int32),
+        "macro_label":              pl.Series([], dtype=pl.Utf8),
+        "macro_activity":           pl.Series([], dtype=pl.Float64),
+        "macro_momentum":           pl.Series([], dtype=pl.Float64),
+        "market_label":             pl.Series([], dtype=pl.Utf8),
+        "market_probability":       pl.Series([], dtype=pl.Float64),
+        "market_score":             pl.Series([], dtype=pl.Float64),
+        "market_age_days":          pl.Series([], dtype=pl.Int32),
+        "context_label":            pl.Series([], dtype=pl.Utf8),
+        "context_transition":       pl.Series([], dtype=pl.Boolean),
+        "context_transition_alert": pl.Series([], dtype=pl.Utf8),
+        "regime_in_sample":         pl.Series([], dtype=pl.Boolean),
     })
 
 
-def _empty_sector_df() -> pl.DataFrame:
-    """Placeholder sector DataFrame dengan schema minimal."""
-    return pl.DataFrame({
-        "symbol":           pl.Series([], dtype=pl.Utf8),
-        "sector":           pl.Series([], dtype=pl.Utf8),
-        "sector_weight_adj": pl.Series([], dtype=pl.Float64),
-    })
+def _load_context_regime(run_date: date) -> pl.DataFrame:
+    """
+    The latest context_regime row on or before run_date, within CONTEXT_REGIME_TOLERANCE_DAYS
+    (as-of, PIT-safe), shaped for the main query. Zero rows when the store is missing, empty
+    before run_date, too stale, or unreadable (the last two are logged — a schema problem must
+    not look like a missing file).
+    """
+    if not GOLD_CONTEXT_REGIME_PATH.exists():
+        return _empty_context_regime_df()
+    try:
+        df = (pl.read_parquet(GOLD_CONTEXT_REGIME_PATH)
+              .select(CONTEXT_REGIME_READ_COLUMNS)
+              .with_columns(pl.col("date").cast(pl.Date))
+              .filter(pl.col("date") <= run_date)
+              .sort("date", descending=True)
+              .head(1))
+    except Exception as e:
+        logger.warning(f"[gold_screener] context_regime unreadable ({e}) — regime columns will be NULL")
+        return _empty_context_regime_df()
+    if df.is_empty():
+        return _empty_context_regime_df()
+    age = (run_date - df["date"][0]).days
+    if age > CONTEXT_REGIME_TOLERANCE_DAYS:
+        logger.warning(
+            f"[gold_screener] latest context_regime row is {age} days old "
+            f"(> {CONTEXT_REGIME_TOLERANCE_DAYS}) — regime columns will be NULL"
+        )
+        return _empty_context_regime_df()
+    return (df.rename({"date": "context_date", "in_sample": "regime_in_sample"})
+              .with_columns(pl.lit(age).cast(pl.Int32).alias("context_age_days"))
+              .select(_empty_context_regime_df().columns))
 
 
 def _empty_active_df() -> pl.DataFrame:
@@ -323,37 +400,15 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     # Menggantikan /dev/null injection pattern yang tidak cross-platform.
     # FIX GLD-003: tidak ada f-string SQL.
 
-    has_regime  = GOLD_REGIME_PATH.exists()
-    has_sector  = GOLD_SECTOR_PATH.exists()
     has_corr    = GOLD_CORR_PATH.exists()
     active_sym_path = (
         SILVER_ACTIVE_SYMBOLS_ROOT / f"active_{run_date.isoformat()}.parquet"
     )
     has_active_symbols = active_sym_path.exists()
 
-    # Regime table
-    if has_regime:
-        try:
-            regime_df = pl.read_parquet(GOLD_REGIME_PATH).filter(
-                pl.col("date").cast(pl.Utf8) == str(run_date)
-            ).head(1)
-        except Exception:
-            regime_df = _empty_regime_df()
-    else:
-        regime_df = _empty_regime_df()
-    con.register("regime_tbl", regime_df.to_arrow())
-
-    # Sector table
-    if has_sector:
-        try:
-            sector_df = pl.read_parquet(GOLD_SECTOR_PATH).select(
-                ["symbol", "sector", "sector_weight_adj"]
-            )
-        except Exception:
-            sector_df = _empty_sector_df()
-    else:
-        sector_df = _empty_sector_df()
-    con.register("sector_tbl", sector_df.to_arrow())
+    # Context regime (dual-HMM, ADR-055 v2) — one as-of row, broadcast via LEFT JOIN ... ON TRUE
+    # (GLD-SCR-001: a CROSS JOIN against a legitimately empty table would zero the watchlist).
+    con.register("context_regime_tbl", _load_context_regime(run_date).to_arrow())
 
     # Active symbols table (dollar_volume_20d) — FIX G-F01
     if has_active_symbols:
@@ -439,7 +494,7 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     con.register("signal_agg_tbl", signal_agg_df.to_arrow())
 
     # ── Parameterized query — no f-string SQL ─────────────────────────────────
-    # FIX GLD-003: read_parquet($mtf_path) + $min_mtf_score, $min_sector_weight,
+    # FIX GLD-003: read_parquet($mtf_path) + $min_mtf_score,
     # $min_dollar_volume, $run_date — semua via $name binding.
     QUERY = """
     WITH mtf AS (
@@ -447,7 +502,6 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
             symbol,
             mtf_score,
             signal_quality,
-            regime_compatible,
             entry_zone_low,
             entry_zone_high,
             stop_zone_1H,
@@ -466,14 +520,20 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
         m.stop_zone_1H,
         ROUND(m.reward_risk_ratio, 2)              AS reward_risk_ratio,
         m.last_close,
-        COALESCE(s.sector,            'Unknown')   AS sector,
-        COALESCE(s.sector_weight_adj, 1.0)         AS sector_weight_adj,
         COALESCE(a.dollar_volume_20d, 0)           AS dollar_volume_20d,
-        r.regime,
-        r.composite_score                          AS regime_composite,
-        r.confidence                               AS regime_confidence,
-        r.regime_transition,
-        r.transition_alert,
+        r.context_date,
+        r.context_age_days,
+        r.macro_label,
+        r.macro_activity,
+        r.macro_momentum,
+        r.market_label,
+        r.market_probability,
+        r.market_score,
+        r.market_age_days,
+        r.context_label,
+        r.context_transition,
+        r.context_transition_alert,
+        r.regime_in_sample,
         NULL::INTEGER                               AS days_to_earnings,
         NULL::DATE                                  AS next_earnings_date,
         (NULL::INTEGER) <= 3                        AS near_earnings_flag,
@@ -494,23 +554,22 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
         sa.breadth_divergence,
         $run_date                                  AS watchlist_date
     FROM mtf m
-    LEFT JOIN sector_tbl s ON m.symbol = s.symbol
     LEFT JOIN active_tbl  a ON m.symbol = a.symbol
     -- FIX GLD-SCR-001: was CROSS JOIN (SELECT * FROM regime_tbl LIMIT 1) r.
     -- CROSS JOIN against a subquery that legitimately produces ZERO rows
-    -- (regime_store.parquet missing, or present but with no row for this
-    -- exact run_date — e.g. --force run ahead of gold_regime, or a
-    -- backfill date regime detection never covered) is a Cartesian
+    -- (context_regime.parquet missing, or present but with no row within
+    -- tolerance of this run_date — e.g. a first run before the HMM fit
+    -- jobs, or a backfill date the regime engine never covered) is a Cartesian
     -- product with an empty relation, which is empty by definition — it
     -- silently discarded the ENTIRE watchlist regardless of how many
-    -- valid MTF/sector/active candidates existed. Empirically reproduced
+    -- valid MTF/active candidates existed. Empirically reproduced
     -- with a standalone DuckDB query (0 rows out with CROSS JOIN, 2/2
     -- preserved with LEFT JOIN ... ON TRUE, r.* correctly NULL rather
     -- than dropping rows) before this fix was written. LEFT JOIN ON TRUE
     -- is the correct "broadcast at most one row, degrade to NULL, never
     -- drop the left side" join — the same graceful-degrade contract
-    -- sector_tbl/active_tbl already get via LEFT JOIN + COALESCE above.
-    LEFT JOIN (SELECT * FROM regime_tbl LIMIT 1) r ON TRUE
+    -- active_tbl already gets via LEFT JOIN + COALESCE above.
+    LEFT JOIN (SELECT * FROM context_regime_tbl LIMIT 1) r ON TRUE
     -- ADD GMI Wave 1 Cycle 4: global_regime_tbl is the same "single row
     -- for this run_date, or legitimately zero rows" shape as regime_tbl
     -- above — same LEFT JOIN ... ON TRUE broadcast, same reasoning.
@@ -519,8 +578,7 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     LEFT JOIN forecast_tbl  f ON m.symbol = f.symbol
     -- ADD GMI-SIGAGG-001: same per-symbol LEFT JOIN shape as forecast_tbl.
     LEFT JOIN signal_agg_tbl sa ON m.symbol = sa.symbol
-    WHERE COALESCE(s.sector_weight_adj, 1.0) > $min_sector_weight
-      AND COALESCE(a.dollar_volume_20d, 1e9) > $min_dollar_volume
+    WHERE COALESCE(a.dollar_volume_20d, 1e9) > $min_dollar_volume
     ORDER BY ABS(m.mtf_score) DESC,
              COALESCE(m.reward_risk_ratio, 0) DESC
     """
@@ -531,7 +589,6 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
             {
                 "mtf_path":          str(mtf_path),
                 "min_mtf_score":     MIN_MTF_SCORE,
-                "min_sector_weight": MIN_SECTOR_WEIGHT,
                 "min_dollar_volume": MIN_DOLLAR_VOLUME,
                 "run_date":          str(run_date),
             },

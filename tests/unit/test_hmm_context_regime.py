@@ -255,3 +255,56 @@ class TestIndependence:
         tree = ast.parse(pathlib.Path(cr.__file__).read_text())
         mods = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
         assert mods <= {"__future__", "datetime", "pathlib", "polars", "loguru", "src.gold.hmm", "src.utils.atomic_io"}, mods
+
+
+# ═══ transition signal (ADR-055 v2) ══════════════════════════════════════════
+
+class TestTransitionSignal:
+    """context_transition / context_transition_alert replace the retired regime_store's
+    regime_transition / transition_alert as a data fact for downstream consumers (GD §5.2.1)."""
+
+    @staticmethod
+    def _built(macro_labels, market_labels):
+        days = [D(2 + i) for i in range(len(macro_labels))]
+        macro = _macro([(d, m, 0.4, 0.1, False) for d, m in zip(days, macro_labels)])
+        market = _market([(d, k, 0.9, 0.8, False, 10) for d, k in zip(days, market_labels) if k is not None])
+        return cr.build(macro, market, RUN)
+
+    def test_columns_and_dtypes(self):
+        out = self._built(["expansion"], ["risk_on"])
+        assert {"context_transition", "context_transition_alert"} <= set(cr.COLUMNS)
+        assert out.schema["context_transition"] == pl.Boolean
+        assert out.schema["context_transition_alert"] == pl.String
+
+    def test_processing_version_marks_the_schema_change(self):
+        assert cr.PROCESSING_VERSION == "1.1"
+        assert self._built(["expansion"], ["risk_on"])["processing_version"][0] == "1.1"
+
+    def test_first_known_label_is_not_a_transition(self):
+        out = self._built(["expansion"], ["risk_on"])
+        assert out["context_transition"].to_list() == [False]
+        assert out["context_transition_alert"].to_list() == [None]
+
+    def test_change_in_either_axis_is_a_transition_with_a_readable_alert(self):
+        out = self._built(["expansion", "expansion", "slowdown", "slowdown"],
+                          ["risk_on", "mixed", "mixed", "mixed"])
+        assert out["context_transition"].to_list() == [False, True, True, False]
+        assert out["context_transition_alert"].to_list() == [
+            None, "expansion/risk_on -> expansion/mixed", "expansion/mixed -> slowdown/mixed", None]
+
+    def test_unchanged_label_is_never_a_transition(self):
+        out = self._built(["recession"] * 4, ["risk_off"] * 4)
+        assert not any(out["context_transition"].to_list())
+
+    def test_rows_without_a_label_neither_start_nor_end_a_transition(self):
+        """With tolerance 0 the market side is missing on D3/D4 -> context_label is null those days.
+        The next known label (D5) is compared with the last KNOWN one (D2), not with null; the
+        null days themselves are never a transition."""
+        days = [D(2), D(3), D(4), D(5)]
+        macro = _macro([(d, "expansion", 0.4, 0.1, False) for d in days])
+        market = _market([(D(2), "risk_on", 0.9, 0.8, False, 10), (D(5), "risk_off", 0.9, -0.8, False, 10)])
+        out = cr.build(macro, market, RUN, tolerance_days=0)
+        assert out["context_label"].to_list() == ["expansion/risk_on", None, None, "expansion/risk_off"]
+        assert out["context_transition"].to_list() == [False, False, False, True]
+        assert out["context_transition_alert"].to_list() == [
+            None, None, None, "expansion/risk_on -> expansion/risk_off"]

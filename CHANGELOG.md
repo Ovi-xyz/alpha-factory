@@ -1,5 +1,82 @@
 # CHANGELOG — Data Platform
 
+## v1.22.0 — ADR-055 v2: cutover total ke Dual-HMM Regime Engine — `macro_regime.py` dan `gold_sector` diarsipkan, Gold layer menjadi empat engine, `gold_screener` menjadi antarmuka Trading Engine yang dirancang (GMI-HMM2-CUT-001, Oktober 2026)
+
+Versi ini juga merilis dua entri "Unreleased" di bawahnya (FIX SIL-BRZ-SCHEMA-01 dan
+FIX TS-DATE-01), yang sebelumnya sengaja tidak menaikkan versi.
+
+**Keputusan (Ovi, 20 Okt 2026).** Cutover dimulai sekarang; kriteria E1 (60 hari
+out-of-sample) tidak diperlukan; `macro_regime.py` digantikan *seluruhnya* oleh Dual-HMM
+Regime Engine karena hasil deteksi regimenya tidak akurat. `gold_sector` ikut diarsipkan:
+tanpa `gold_regime` ia bebas-regime dan tidak punya pekerjaan tersisa. Ini menggantikan Opsi A
+di ADR-055 v1 (proyeksi `context_regime` ke skema `regime_store.parquet`, kosakata 5-state,
+shadow store, burn-in). Struktur Gold yang menjadi definisi "mengganti total": engine teknikal
+(gold_signals, gold_mtf, signal_aggregation), engine cross-asset (gold_global_regime,
+gold_cross_asset_correlation, gold_lead_lag, gold_forecast), engine dual-HMM (gold_raw_macro,
+gold_hmm_macro_regime, gold_raw_market, gold_hmm_market_regime, gold_context_regime,
+gold_hmm_macro_fit, gold_hmm_market_fit), lalu specialist intelligence (tiga xgboost) →
+decision_xgboost → `gold_screener`. Urutan fase: adr-050 → 051 → 055 → 052 → 053 → 054.
+Trading Engine belum ada karena Gold layer masih belum stabil dan belum selesai;
+`gold_screener` hanya antarmuka yang dirancang untuknya, skemanya sementara, dan kontraknya
+baru dirumuskan setelah Gold layer selesai.
+
+**Perubahan.**
+- `src/gold/macro_regime.py` + job `gold_regime` + `regime_store.parquet`, dan
+  `src/gold/sector_rotation.py` + job `gold_sector` + `sector_regime_weights.parquet`,
+  dihapus dari platform; modul, tes (`test_macro_regime*`, `test_sector_rotation`),
+  `config/regime_sector_weights.yaml` dan skemanya dipindahkan (`git mv`) ke
+  `archive/macro_regime_cutover_2026_10/` dengan README dan catatan rollback. Tidak ada
+  adapter proyeksi dan tidak ada `hmm_legacy_mapping.yaml`.
+- Label sektor: kolom `sector` dihapus dari watchlist `gold_screener` (Ovi, 21 Okt 2026).
+  `signal_aggregation` (pengelompokan breadth sektor) membaca labelnya langsung dari registry
+  (`inst.sector or inst.market`, aturan yang sama dengan kolom yang dulu diterbitkan
+  `gold_sector`) dan tidak membaca store Gold apa pun. Bobot sektor tidak di-*rekey* ke sumbu HMM: mesin teknikal tidak boleh membaca store HMM
+  (independensi tiga domain, ADR-051 A2 §A) dan tidak ada bukti empiris untuk ratusan bobot
+  baru (ADR-055 v1 F6). Interaksi regime × sektor adalah tugas decision_xgboost (ADR-054).
+- `mtf_alignment`: kolom `regime_compatible` dan `active_regime` dihapus.
+- `gold_screener`: sumber regime kini `context_regime.parquet` (as-of ≤ run_date,
+  toleransi 5 hari, lembut — NULL bila hilang/basi/rusak, tidak pernah menolkan
+  watchlist). Kolom lama (`regime`, `regime_composite`, `regime_confidence`,
+  `regime_transition`, `transition_alert`, `sector_weight_adj`, `sector`) diganti
+  `context_date`, `context_age_days`, `macro_label`, `macro_activity`, `macro_momentum`,
+  `market_label`, `market_probability`, `market_score`, `market_age_days`,
+  `context_label`, `context_transition`, `context_transition_alert`, `regime_in_sample`.
+  Guard konsentrasi sektor (bobot ≤ 0,5 dikeluarkan, GD §15.1) ikut hilang. `depends_on`
+  hanya `gold_mtf`.
+- `gold_context_regime` (`PROCESSING_VERSION` 1.1): kolom baru `context_transition` dan
+  `context_transition_alert` — fakta transisi tetap data pipeline, bukan keputusan (GD §0.3).
+- CrossAssetEngine: tag `regime` pada tiga modul mingguan kini memakai
+  `global_regime_label` milik engine itu sendiri (`cross_asset/regime_tag.py`, satu
+  implementasi menggantikan tiga salinan identik). Kosakata RISK_ON/RISK_OFF/MIXED/UNKNOWN.
+- `DAILY_SEQUENCE`: engine teknikal (gold_signals, gold_mtf, signal_aggregation), lalu engine
+  HMM (dipindah dari setelah `gold_screener`), lalu `gold_screener`; tidak ada dependensi
+  keras dari `gold_screener` ke HMM.
+- `PITDataLoader`: `get_regime`/`GOLD_REGIME_PATH` dihapus; `get_mtf_score` memakai
+  `union_by_name=true` dan tidak pernah mengembalikan dua kolom legacy. Views:
+  `v_macro_regime` → `v_context_regime`; `v_sector_weights` dihapus;
+  `union_by_name=true` pada glob `v_mtf_alignment`, `v_screener`, `v_watchlist_latest`.
+- `scripts/validate_instruments.py`: `COMMODITY_SUBCATEGORY_TO_WEIGHT_KEY` (penjaga untuk
+  tabel bobot yang sudah pensiun) dihapus; pengecekan enum adalah satu-satunya penjaga.
+  README dan Makefile tidak lagi menyebut `gold_regime`/`gold_sector`.
+
+**Temuan empiris selama implementasi.** Menghapus dua kolom dari file MTF baru membuat
+glob DuckDB atas file lama+baru gagal (schema mismatch) — dan `get_mtf_score` menelan
+exception lalu mengembalikan `None` untuk setiap simbol, diam-diam. Kelas yang sama
+dengan SIL-BRZ-SCHEMA-01. Diperbaiki di pembaca yang diketahui dan dipin dengan tes.
+
+**Sengaja tidak dilakukan.** E2–E7 dan `compare_regimes.py` (ADR-055 v1 menyebutnya
+"built", tetapi file itu dan `hmm_legacy_mapping.yaml` tidak ada di repo live maupun di
+GitHub `main`; tidak dibangun ulang karena tidak lagi diperlukan). Per-domain Gatekeeper
+scope (RISK-36 item 7), peninjauan bobot fitur terhadap tanggal makro (E7), dan
+`specialist/decision xgboost` (ADR-052..054) tetap di fase berikutnya.
+
+**Tes.** `tests/integration/test_regime_cutover_adr055.py` (baru, pin struktural: sumber,
+graf job, jadwal, arsip), `tests/unit/test_cross_asset_regime_tag.py` (baru), tambahan di `test_screener`, `test_hmm_context_regime`,
+`test_pit_data`, `test_views`; tes regime/sektor lama diarsipkan atau ditulis ulang.
+`tests/COUNT_BASELINE.txt` 2504 → 2595. Di sandbox: 3 kegagalan lingkungan yang sama seperti
+sebelumnya (2× `test_check_poetry_env`, 1× `test_ohlcv_processor::
+TestNormalizeTimestampsUtf8Fallback`), tidak terkait. Mutan pada tes baru: semua terbunuh.
+
 ## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.21.0) — FIX SIL-BRZ-SCHEMA-01: Silver tidak lagi membuang diam-diam simbol yang dtype Bronze-nya berubah (CNH hilang dari Silver; Oktober 2026)
 
 **Temuan.** Run `gold_forecast --force` 16 Okt 2026 mencatat

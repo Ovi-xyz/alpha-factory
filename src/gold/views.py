@@ -155,18 +155,23 @@ VIEW_DEFINITIONS = {
         )
     """,
 
-    "v_macro_regime": """
-        CREATE OR REPLACE VIEW v_macro_regime AS
+    # ADR-055 v2: v_macro_regime (regime_store.parquet, retired) is replaced by v_context_regime,
+    # the dual-HMM context regime — the platform's regime.
+    "v_context_regime": """
+        CREATE OR REPLACE VIEW v_context_regime AS
         SELECT * FROM read_parquet(
-            'data/gold/macro/regime_store.parquet'
+            'data/gold/hmm/context_regime.parquet'
         )
     """,
 
+    # union_by_name=true (ADR-055 v2): mtf_alignment files written before the cutover carry
+    # regime_compatible / active_regime, files after it do not — a plain glob over the mix fails.
     "v_mtf_alignment": """
         CREATE OR REPLACE VIEW v_mtf_alignment AS
         SELECT * FROM read_parquet(
             'data/gold/mtf/mtf_alignment_*.parquet',
-            hive_partitioning=false
+            hive_partitioning=false,
+            union_by_name=true
         )
     """,
 
@@ -188,12 +193,8 @@ VIEW_DEFINITIONS = {
         )
     """,
 
-    "v_sector_weights": """
-        CREATE OR REPLACE VIEW v_sector_weights AS
-        SELECT * FROM read_parquet(
-            'data/gold/sector/sector_regime_weights.parquet'
-        )
-    """,
+    # v_sector_weights REMOVED (ADR-055 v2): gold_sector and sector_regime_weights.parquet are
+    # archived; the sector label was registry data and no watchlist/view carries it any more.
 
     "v_correlation": """
         CREATE OR REPLACE VIEW v_correlation AS
@@ -202,11 +203,14 @@ VIEW_DEFINITIONS = {
         )
     """,
 
+    # union_by_name=true (ADR-055 v2): the watchlist schema changed at the cutover (regime /
+    # sector-weight columns replaced) and per-date files from before it persist on disk.
     "v_screener": """
         CREATE OR REPLACE VIEW v_screener AS
         SELECT * FROM read_parquet(
             'data/gold/screener/watchlist_*.parquet',
-            hive_partitioning=false
+            hive_partitioning=false,
+            union_by_name=true
         )
     """,
 
@@ -232,13 +236,15 @@ VIEW_DEFINITIONS = {
         SELECT w.*
         FROM read_parquet(
             'data/gold/screener/watchlist_*.parquet',
-            hive_partitioning=false
+            hive_partitioning=false,
+            union_by_name=true
         ) w
         WHERE w.watchlist_date = (
             SELECT MAX(watchlist_date)
             FROM read_parquet(
                 'data/gold/screener/watchlist_*.parquet',
-                hive_partitioning=false
+                hive_partitioning=false,
+                union_by_name=true
             )
         )
     """,

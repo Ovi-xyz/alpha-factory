@@ -39,6 +39,7 @@ import pytest
 
 import src.gold.cross_asset.broad_dollar as bd
 import src.gold.cross_asset.forecast_module as fm
+import src.gold.cross_asset.regime_tag as regime_tag
 from src.gold.cross_asset.forecast_module import ForecastModule, run
 from src.silver.active_symbols import ActiveSymbolsResolver
 
@@ -66,7 +67,7 @@ def paths(tmp_path, monkeypatch):
     silver_root = tmp_path / "silver" / "market_ohlcv"
     monkeypatch.setattr(fm, "SILVER_OHLCV_PATH", silver_root)
     monkeypatch.setattr(bd, "SILVER_OHLCV_PATH", silver_root)
-    monkeypatch.setattr(fm, "REGIME_STORE_PATH", tmp_path / "gold" / "macro" / "regime_store.parquet")
+    monkeypatch.setattr(regime_tag, "GLOBAL_REGIME_PATH", tmp_path / "gold" / "cross_asset" / "global_regime.parquet")
     monkeypatch.setattr(fm, "GOLD_CROSS_ASSET_PATH", tmp_path / "gold" / "cross_asset")
     monkeypatch.setattr(fm, "FORECAST_STORE_PATH", tmp_path / "gold" / "cross_asset" / "cross_asset_forecast.parquet")
 

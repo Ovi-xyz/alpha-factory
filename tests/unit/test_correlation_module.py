@@ -15,9 +15,9 @@ Test matrix:
       exactly 2 clusters via the max(2, n//2) heuristic), the two
       natural correlated groups land in different clusters and every
       member of a group shares its group's cluster_id.
-    - Regime tagging: current row of regime_store.parquet (most recent
-      date <= run_date) is attached to every output row; "UNKNOWN" if
-      the store is absent.
+    - Regime tagging: the engine's own global_regime_label (most recent row of
+      global_regime.parquet with date <= run_date; ADR-055 v2 R3) is attached to
+      every output row; "UNKNOWN" if the store is absent.
     - Output schema/shape: symbol_a < symbol_b (lexicographic, no
       self-pairs, no mirrored duplicates), row count == C(n, 2).
     - Insufficient history: a symbol with too few clean rows is dropped,
@@ -34,6 +34,7 @@ import polars as pl
 import pytest
 
 import src.gold.cross_asset.correlation_module as cmod
+import src.gold.cross_asset.regime_tag as regime_tag
 from src.gold.cross_asset.correlation_module import CorrelationModule, run
 from src.silver.active_symbols import ActiveSymbolsResolver
 from src.silver.context_anchors import ContextAnchorsResolver
@@ -47,7 +48,7 @@ DATES = [BASE_DATE + timedelta(days=i) for i in range(N_DAYS)]
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(cmod, "SILVER_OHLCV_PATH", tmp_path / "silver" / "market_ohlcv")
-    monkeypatch.setattr(cmod, "REGIME_STORE_PATH", tmp_path / "gold" / "macro" / "regime_store.parquet")
+    monkeypatch.setattr(regime_tag, "GLOBAL_REGIME_PATH", tmp_path / "gold" / "cross_asset" / "global_regime.parquet")
     monkeypatch.setattr(cmod, "GOLD_CROSS_ASSET_PATH", tmp_path / "gold" / "cross_asset")
     monkeypatch.setattr(cmod, "CROSS_ASSET_CORR_PATH", tmp_path / "gold" / "cross_asset" / "cross_asset_corr.parquet")
 
@@ -248,11 +249,11 @@ class TestRegimeTagging:
         for s in ["X", "Y"]:
             _write_l1_returns(tmp_path, s, rng.normal(0, 0.01, N_DAYS))
 
-        regime_path = tmp_path / "gold" / "macro" / "regime_store.parquet"
+        regime_path = tmp_path / "gold" / "cross_asset" / "global_regime.parquet"
         regime_path.parent.mkdir(parents=True, exist_ok=True)
         pl.DataFrame({
-            "date":   [str(RUN_DATE - timedelta(days=5)), str(RUN_DATE)],
-            "regime": ["RISK_OFF", "RISK_ON"],
+            "date":                [str(RUN_DATE - timedelta(days=5)), str(RUN_DATE)],
+            "global_regime_label": ["RISK_OFF", "RISK_ON"],
         }).write_parquet(regime_path)
 
         result = CorrelationModule().compute(RUN_DATE)

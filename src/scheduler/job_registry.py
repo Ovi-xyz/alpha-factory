@@ -251,14 +251,10 @@ def _gold_mtf(run_date: date) -> None:
     mtf_run(run_date)
 
 
-def _gold_regime(run_date: date) -> None:
-    from src.gold.macro_regime import run as regime_run
-    regime_run(run_date)
-
-
-def _gold_sector(run_date: date) -> None:
-    from src.gold.sector_rotation import run as sector_run
-    sector_run(run_date)
+# _gold_regime and _gold_sector REMOVED (ADR-055 v2, GMI-HMM2-CUT-001): macro_regime.py — the
+# rule-based regime producer of regime_store.parquet — and sector_rotation.py (regime -> sector
+# weights) are archived (archive/macro_regime_cutover_2026_10/). The platform's regime is the
+# dual-HMM engine's context_regime (gold_context_regime below).
 
 
 def _gold_screener(run_date: date) -> None:
@@ -280,7 +276,7 @@ def _signal_aggregation(run_date: date) -> None:
 def _gold_global_regime(run_date: date) -> None:
     """ADD GMI Wave 1 Cycle 4 — CrossAssetEngine's first module
     (Architecture v2.0 §6.5). Independent of the gold_signals -> gold_mtf
-    -> gold_regime -> gold_sector -> gold_screener chain; reads Layer 2
+    -> gold_screener chain; reads Layer 2
     equity-index Silver OHLCV only."""
     from src.gold.cross_asset.global_index_regime import run as global_regime_run
     global_regime_run(run_date)
@@ -561,7 +557,7 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         # check below would otherwise sys.exit(1) every time `--job silver` (or
         # `--job all` on a weekly-SOP day boundary) runs on a non-Sunday. This
         # mirrors the EXACT stale_tolerance pattern FIX NEW-1 already established
-        # for silver_validate/gold_regime's own dependency on the (also weekly)
+        # for silver_validate's (and the since-retired gold_regime's) own dependency on the (also weekly)
         # silver_macro two entries below — that precedent was never extended one
         # hop further up to silver_macro's own dependency on bronze_macro_weekly,
         # because bronze_macro_weekly previously had no schedule guard to make the
@@ -649,28 +645,15 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "est_minutes": 30,
     },
 
-    "gold_regime": {
-        "description": "Macro regime detection — RISK_ON/OFF + transition flag",
-        "fn":          _gold_regime,
-        "depends_on":  ["silver_macro", "silver_validate"],
-        # FIX NEW-1 [BLOCKING]: sama dengan silver_validate di atas — silver_macro
-        # cadence mingguan, butuh staleness window agar --job all tidak crash
-        # di hari Senin-Sabtu. Lihat komentar lengkap di entry silver_validate.
-        "stale_tolerance": {"silver_macro": 7},
-        "layer":       "gold",
-        "est_minutes": 5,
-    },
-
-    "gold_sector": {
-        "description": "Sector rotation weights berdasarkan aktif regime",
-        "fn":          _gold_sector,
-        "depends_on":  ["gold_regime"],
-        "layer":       "gold",
-        "est_minutes": 2,
-    },
+    # gold_regime and gold_sector REMOVED (ADR-055 v2): archived with macro_regime.py
+    # (archive/macro_regime_cutover_2026_10/). gold_sector's only function was selecting sector
+    # weights by the legacy regime; regime-free it had nothing left to do, and its one remaining
+    # product — the sector label — is registry data that only signal_aggregation still reads (from
+    # the InstrumentLoader; the screener's `sector` column was dropped). Nothing in the registry
+    # depends on either job; the sentinel files they left in data/.sentinels/ are inert.
 
     "gold_screener": {
-        "description": "Watchlist top-20 — MTF + Regime + Sector",
+        "description": "Watchlist top-20 (designated future Trading Engine interface) — MTF + HMM context regime + cross-asset",
         "fn":          _gold_screener,
         # FIX ADR-043 (GMI_Decision_Document_v10.docx): "silver_sentiment" DIHAPUS
         # dari depends_on. Finnhub diretired penuh (sentiment + earnings/quotes) —
@@ -685,7 +668,12 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         # (FIX ADR-044) — kolom days_to_earnings/near_earnings_flag/sentiment_score/
         # buzz_score tetap ada di watchlist output, permanently NULL (Interface
         # Contract GD §0.4/§17.6 tidak berubah — hanya nilainya, bukan skema).
-        "depends_on":  ["gold_mtf", "gold_regime", "gold_sector"],
+        # ADR-055 v2: "gold_regime" removed. The HMM context regime is a SOFT source (screener.py
+        # reads it as-of, within tolerance, degrading to NULL) exactly like the CrossAssetEngine
+        # sources — so there is no hard edge here; DAILY_SEQUENCE orders the HMM engine before this
+        # job so the normal path is fresh, and the Gatekeeper's Gold scope (which contains every
+        # HMM job) flags the days it is not.
+        "depends_on":  ["gold_mtf"],
         "layer":       "gold",
         "est_minutes": 5,
     },
@@ -695,10 +683,11 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
     # breadth analytics. depends_on matches Architecture v2.0's own
     # §6.6 sketch for THIS job's genuinely load-bearing inputs:
     # gold_signals (tech_signals_{TF}.parquet) and silver_active_symbols
-    # (active_ohlcv universe). mtf_alignment (for breadth_divergence) and
-    # sector_regime_weights (for sector labels) are read directly by the
-    # module itself with a graceful degrade-to-null/fallback — NOT hard
-    # dependencies here, matching the soft-dependency pattern screener.py
+    # (active_ohlcv universe). mtf_alignment (for breadth_divergence) is
+    # read directly by the module itself with a graceful degrade-to-null
+    # (its sector labels come from the InstrumentLoader, not a Gold store;
+    # gold_sector is archived, ADR-055 v2) — NOT a hard
+    # dependency here, matching the soft-dependency pattern screener.py
     # already established for the CrossAssetEngine outputs (see that
     # module's docstring). Deliberately NOT added to gold_screener's own
     # depends_on either, for the identical reliability reason — see
@@ -828,8 +817,10 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
 
     # ADD GMI-HMM2-001 (ADR-051, Amendment 2 §A) — dual-HMM regime engine,
     # macro branch, module 1 of 5 (raw_macro -> hmm_macro_regime -> ...).
+    # ADR-055 v2: since the cutover this engine IS the platform's regime source (the retired
+    # rule-based gold_regime is gone) and runs BEFORE gold_screener in DAILY_SEQUENCE.
     # depends_on silver_macro ONLY (weekly cadence, hence stale_tolerance 7 —
-    # same FIX NEW-1 pattern as silver_validate/gold_regime). Deliberately NO
+    # same FIX NEW-1 pattern as silver_validate). Deliberately NO
     # dependency on any CrossAssetEngine or technical-chain job, and none of
     # those depend on this one: the engine is one of three independent
     # intelligence domains (ADR-053/ADR-051 A2 §A). layer="gold" per ADR-051;
@@ -999,37 +990,36 @@ DAILY_SEQUENCE: list[str] = [
     # silver_sentiment DIHAPUS — ADR-043 (Finnhub full retirement)
 
     # ADD GMI Wave 1 Cycle 4: independent of the gold_signals -> gold_mtf ->
-    # gold_regime -> gold_sector -> gold_screener chain below (depends only
+    # gold_screener chain below (depends only
     # on silver_ohlcv_context, already satisfied above) — positioned here
     # for SOP readability, not because of a real ordering requirement with
     # the jobs that follow it.
     "gold_global_regime",
 
-    # Gold — urutan KRITIS: regime -> sector -> screener
+    # Gold — organised as engines (ADR-055 v2). Order: technical engine, then the dual-HMM regime
+    # engine, then gold_screener (the synthesis tip / designated future Trading Engine interface). The three
+    # domains are independent of each other (ADR-051 A2 §A) — the only hard ordering inside this
+    # block is within the HMM engine (gold_context_regime after BOTH classify jobs); the HMM block
+    # sits after the technical engine so an HMM failure cannot stop the technical engine (the
+    # runner stops at the first failing job), and before the screener so the normal path is fresh.
+
+    # Gold technical engine: gold_signals, gold_mtf, signal_aggregation
     "gold_signals",
     "gold_mtf",
-    # ADD GMI-SIGAGG-001: positioned right after gold_mtf so its own soft
-    # read of mtf_alignment_{date}.parquet (for breadth_divergence) is
-    # normally satisfied in the scheduled path — not a hard ordering
-    # requirement (JOB_REGISTRY depends_on is gold_signals +
-    # silver_active_symbols only; module degrades breadth_divergence to
-    # null gracefully if mtf_alignment is unavailable — see that module's
-    # docstring). Independent of the regime -> sector -> screener chain.
+    # ADD GMI-SIGAGG-001: after gold_mtf so its soft read of mtf_alignment_{date}.parquet (for
+    # breadth_divergence) is normally satisfied in the scheduled path — not a hard ordering
+    # requirement (see that job's own entry).
     "signal_aggregation",
-    "gold_regime",        # dep: silver_macro — akan skip jika silver_macro tidak ada
-    "gold_sector",
-    "gold_screener",
 
-    # ADD GMI-HMM2-001 (ADR-051): dual-HMM engine. Positioned AFTER gold_screener
-    # and BEFORE gatekeeper on purpose — the runner stops at the first failing
-    # job and this engine is in burn-in, so it must not block the production
-    # chain above; the position carries no ordering meaning (the engine is
-    # independent of that chain).
+    # Gold dual-HMM regime engine (ADR-051; the platform's regime since ADR-055 v2).
     "gold_raw_macro",
     "gold_hmm_macro_regime",
     "gold_raw_market",
     "gold_hmm_market_regime",
     "gold_context_regime",      # after BOTH classify jobs — the only hard ordering inside the engine
+
+    # Gold screener — designated future Trading Engine interface (no consumer exists yet)
+    "gold_screener",
 
     # Util
     # ADD GMI-GATE-001 (ADR-050): immediately before health_report so it

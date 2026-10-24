@@ -260,9 +260,9 @@ class TestSectionDataFreshness:
 
     def test_recent_file_green(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
-        d = tmp_path / "data" / "gold" / "macro"
+        d = tmp_path / "data" / "gold" / "hmm"      # ADR-055 v2: context_regime replaced regime_store
         d.mkdir(parents=True)
-        (d / "regime_store.parquet").write_bytes(b"x")
+        (d / "context_regime.parquet").write_bytes(b"x")
         dash._section_data_freshness()
         out = capsys.readouterr().out
         assert "today" in out

@@ -72,7 +72,7 @@ tunable later, not asserted as the one true weighting scheme:
                      insufficient indicator warm-up history) get
                      composite_score = 0.0 (neutral default, matching this
                      codebase's existing fallback convention — e.g.
-                     sector_rotation.py's NEUTRAL_WEIGHTS, mtf_alignment's
+                     the sector label, mtf_alignment's
                      fill_null(0) for a missing TF trend) rather than
                      null, so that "no nulls for active symbols"
                      (Architecture v2.0 §10.2 testing requirement) holds
@@ -89,13 +89,12 @@ tunable later, not asserted as the one true weighting scheme:
                         active_ohlcv symbols in that sector with 1D data)
                         — Architecture v2.0 §5.3's literal "% symbols in
                         sector above EMA_50 (daily)" definition. Sector
-                        grouping reuses sector_rotation.py's own already-
-                        published 'sector' column (sector_regime_weights
-                        .parquet: GICS sector for us_stocks, else market
-                        name) rather than recomputing a second, competing
-                        sector definition — falls back to InstrumentLoader
-                        directly (same 'inst.sector or inst.market' rule)
-                        only if that file isn't available yet.
+                        grouping comes straight from the InstrumentLoader
+                        (GICS sector for us_stocks, else market name —
+                        'inst.sector or inst.market'). It used to read
+                        gold_sector's published column; ADR-055 v2 archived
+                        gold_sector (no regime left to select on), and the
+                        label was always registry data.
 
   sector_momentum   = sector_breadth_pct(run_date) minus the most recent
                         prior signal_aggregation_{date}.parquet's
@@ -127,9 +126,8 @@ gold_mtf as an input): job_registry.py's 'signal_aggregation' entry
 depends_on ONLY ['gold_signals', 'silver_active_symbols'] — the two
 genuinely load-bearing inputs (tech_signals_{TF}.parquet and the
 active_ohlcv universe list). mtf_alignment_{date}.parquet (for
-breadth_divergence) and sector_regime_weights.parquet (for sector
-labels) are read directly by this module with a try/except-and-degrade-
-to-null/fallback pattern — NOT registered as hard JOB_REGISTRY
+breadth_divergence) is read directly by this module with a try/except-and-degrade-
+to-null pattern (sector labels come from config, not a Gold store) — NOT registered as hard JOB_REGISTRY
 dependencies. This mirrors the graceful-degrade pattern screener.py
 already established for global_regime_tbl/lead_lag_tbl/forecast_tbl
 (see that module's own docstring): composite_score and sector_breadth_pct
@@ -170,7 +168,6 @@ from src.utils.progress_checkpoint import ProgressCheckpoint
 
 GOLD_SIGNALS_PATH    = Path("data/gold/signals")
 GOLD_MTF_PATH         = Path("data/gold/mtf")
-GOLD_SECTOR_PATH      = Path("data/gold/sector/sector_regime_weights.parquet")
 GOLD_SIGNAL_AGG_PATH  = Path("data/gold/signal_aggregation")
 
 AGG_VERSION = "1.0"
@@ -381,18 +378,13 @@ def _compute_composite_scores(
 
 def _load_sector_map() -> pl.DataFrame:
     """
-    Return symbol -> (market, sector) for the Layer 1 universe.
-    Primary: sector_regime_weights.parquet (gold_sector's own published
-    'sector' column — reuse, don't recompute a second definition).
-    Fallback: InstrumentLoader directly, same 'inst.sector or inst.market'
-    rule sector_rotation.py itself uses, if gold_sector hasn't run yet.
+    symbol -> (market, sector) for the Layer 1 universe, straight from the InstrumentLoader
+    ('inst.sector or inst.market': GICS sector for us_stocks, else market name) — the rule the
+    archived gold_sector job used to publish. ADR-055 v2: gold_sector is archived (it only selected
+    regime-keyed weights), so this module no longer reads any Gold store for sector labels; the
+    label is registry data and this is its only consumer (the screener's `sector` column was
+    dropped). Degrades to an empty typed frame — with a WARNING — if the registry is unreadable.
     """
-    if GOLD_SECTOR_PATH.exists():
-        try:
-            return pl.read_parquet(GOLD_SECTOR_PATH).select(["symbol", "market", "sector"])
-        except Exception as e:
-            logger.debug(f"[signal_aggregation] sector_regime_weights read failed: {e}")
-
     try:
         from src.config.instrument_loader import get_loader
         loader = get_loader()
@@ -402,7 +394,7 @@ def _load_sector_map() -> pl.DataFrame:
         ]
         return pl.DataFrame(rows) if rows else _empty_sector_map()
     except Exception as e:
-        logger.debug(f"[signal_aggregation] InstrumentLoader sector fallback failed: {e}")
+        logger.warning(f"[signal_aggregation] InstrumentLoader unreadable ({e}) — sector labels empty")
         return _empty_sector_map()
 
 

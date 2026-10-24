@@ -15,7 +15,7 @@ Keuntungan vs SQLite polling:
 FIX NEW-1 [BLOCKING] (audit_v1_7_3_uncovered_findings.docx, Section 2, Opsi A):
     check_dependencies() sebelumnya HANYA mengecek sentinel pada run_date PERSIS.
     Ini benar untuk dependency dengan cadence harian, tapi salah untuk dependency
-    lintas-cadence — silver_validate dan gold_regime (DAILY_SEQUENCE) hard-depend
+    lintas-cadence — silver_validate dan gold_raw_macro/gold_raw_market (DAILY_SEQUENCE) hard-depend
     pada silver_macro (cadence mingguan, GD §3.3.1, TIDAK ada di DAILY_SEQUENCE).
     Akibatnya `python runner.py --job all` selalu sys.exit(1) di hari Senin-Sabtu,
     bahkan jika silver_macro sudah pernah berjalan sukses Minggu lalu — sentinel
@@ -114,7 +114,7 @@ class DependencyGuard:
         dengan stale_tolerance=None, default) tetap memakai exact-date match
         via is_done() — perilaku tidak berubah untuk seluruh job existing.
         Hanya dependency yang eksplisit dikonfigurasi (mis. silver_macro untuk
-        silver_validate/gold_regime) yang mendapat staleness window.
+        silver_validate/gold_raw_macro/gold_raw_market) yang mendapat staleness window.
         """
         stale_tolerance = stale_tolerance or {}
         missing: list[str] = []

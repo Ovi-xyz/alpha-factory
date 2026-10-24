@@ -22,6 +22,8 @@ Output  data/gold/hmm/context_regime.parquet  (keyed on `date`; the path PITData
             market_in_sample            Boolean
             market_n_features_observed  Int32
             context_label               String  "<macro_label>/<market_label>" when both are known
+            context_transition          Boolean context_label differs from the previous row's known label
+            context_transition_alert    String  "<prev label> -> <label>" on a transition, else null
             in_sample                   Boolean OR of the sides actually used (see below)
             computation_date / processing_version
             macro_config_fingerprint / market_config_fingerprint   the models' own digests, per row
@@ -38,6 +40,14 @@ HONEST HISTORY
     in_sample = macro_in_sample OR (market_in_sample when a market row is attached). A row is
     out-of-sample only if EVERY side it uses is. Anything training on this table (ADR-053/054) must
     filter on it.
+
+TRANSITION SIGNAL (ADR-055 v2). The retired regime_store carried `regime_transition` /
+    `transition_alert` as DATA (GD §5.2.1 v1.2, meant for the future Trading Engine); with that store
+    gone the equivalent is produced here, where the regime is, and the screener (the designated
+    future Trading Engine interface — no consumer exists yet) stays a pure join. A transition compares a row's context_label with the most recent
+    EARLIER known label (a macro-only row before the market store begins neither starts nor ends
+    one). The first known label of the store is not a transition. Pipeline supplies the fact; the
+    Trading Engine decides what to do with it (GD §0.3).
 
 THIN BY DESIGN (ADR-051 Consequences). Per-domain macro states and the three-way posteriors stay in
 their own stores; this table carries the labels and scores a consumer needs to key on. It is
@@ -60,7 +70,7 @@ from src.gold.hmm import hmm_macro_regime, hmm_market_regime
 from src.utils.atomic_io import atomic_write_parquet
 
 CONTEXT_REGIME_PATH = Path("data/gold/hmm/context_regime.parquet")
-PROCESSING_VERSION = "1.0"
+PROCESSING_VERSION = "1.1"   # 1.1: + context_transition / context_transition_alert (ADR-055 v2)
 MARKET_TOLERANCE_DAYS = 5          # first-pass: covers the longest routine US market closure (holiday weekend)
 
 MACRO_COLS = ("date", "macro_label", "macro_activity", "macro_momentum", "in_sample", "model_config_fingerprint")
@@ -69,7 +79,8 @@ MARKET_COLS = ("date", "market_label", "market_probability", "market_score", "in
 
 COLUMNS = ["date", "macro_label", "macro_activity", "macro_momentum", "macro_in_sample",
            "market_date", "market_age_days", "market_label", "market_probability", "market_score",
-           "market_in_sample", "market_n_features_observed", "context_label", "in_sample",
+           "market_in_sample", "market_n_features_observed", "context_label",
+           "context_transition", "context_transition_alert", "in_sample",
            "computation_date", "processing_version", "macro_config_fingerprint", "market_config_fingerprint"]
 
 
@@ -101,6 +112,16 @@ def build(macro: pl.DataFrame, market: pl.DataFrame, run_date: date,
         (pl.col("macro_in_sample") | pl.col("market_in_sample").fill_null(False)).alias("in_sample"),
         pl.lit(run_date).alias("computation_date"),
         pl.lit(PROCESSING_VERSION).alias("processing_version"),
+    )
+    # Transition vs the most recent EARLIER known label (forward-fill, then shift one row).
+    prev_known = pl.col("context_label").forward_fill().shift(1)
+    is_transition = (pl.col("context_label").is_not_null() & prev_known.is_not_null()
+                     & (pl.col("context_label") != prev_known)).fill_null(False)
+    out = out.with_columns(
+        is_transition.alias("context_transition"),
+        pl.when(is_transition)
+        .then(pl.concat_str([prev_known, pl.lit(" -> "), pl.col("context_label")]))
+        .otherwise(None).alias("context_transition_alert"),
     )
     return out.select(COLUMNS)
 

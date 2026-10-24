@@ -135,13 +135,15 @@ class TestJobRegistryCompleteness:
         deps = set(JOB_REGISTRY["gold_screener"]["depends_on"])
         assert not (retired & deps), f"gold_screener still depends on: {retired & deps}"
 
-    def test_regime_before_sector_before_screener(self):
-        """gold_regime → gold_sector → gold_screener ordering."""
+    def test_mtf_and_hmm_context_before_screener(self):
+        """ADR-055 v2: gold_mtf → gold_context_regime → gold_screener ordering (gold_regime and
+        gold_sector are archived; the HMM context regime is the platform's regime)."""
         seq = PIPELINE_SEQUENCE
-        names = ["gold_regime", "gold_sector", "gold_screener"]
-        positions = [seq.index(n) for n in names if n in seq]
+        names = ["gold_mtf", "gold_context_regime", "gold_screener"]
+        assert all(n in seq for n in names), [n for n in names if n not in seq]
+        positions = [seq.index(n) for n in names]
         assert positions == sorted(positions), (
-            "Gold regime→sector→screener order violated in PIPELINE_SEQUENCE"
+            "gold_mtf → gold_context_regime → gold_screener order violated in PIPELINE_SEQUENCE"
         )
 
     def test_callable_functions(self):

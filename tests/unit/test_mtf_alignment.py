@@ -8,7 +8,6 @@ import pytest
 
 import src.gold.mtf_alignment as mtf_mod
 from src.gold.mtf_alignment import (
-    _apply_regime_compatible,
     _compute_mtf_alignment,
     get_mtf_summary,
     run,
@@ -93,59 +92,12 @@ class TestMTFScoreLogic:
                 f"Score {row['mtf_score']}: expected {expected}, got {row['signal_quality']}"
 
 
-class TestRegiomeCompatible:
-    """Test regime_compatible logic from _apply_regime_compatible."""
-
-    def _apply_mock(self, df: pl.DataFrame, regime: str) -> pl.DataFrame:
-        """Replicate _apply_regime_compatible logic without file I/O."""
-        if regime == "RISK_ON":
-            compatible_expr = pl.col("mtf_score") > 0
-        elif regime == "RISK_OFF":
-            compatible_expr = pl.col("mtf_score") < 0
-        else:
-            compatible_expr = pl.lit(True)
-
-        return df.with_columns([
-            compatible_expr.alias("regime_compatible"),
-            pl.lit(regime).alias("active_regime"),
-        ])
-
-    def test_risk_on_positive_score_compatible(self):
-        df = pl.DataFrame({"mtf_score": [5, -5, 0]})
-        result = self._apply_mock(df, "RISK_ON")
-        compatible = result["regime_compatible"].to_list()
-        assert compatible == [True, False, False]
-
-    def test_risk_off_negative_score_compatible(self):
-        df = pl.DataFrame({"mtf_score": [5, -5, 0]})
-        result = self._apply_mock(df, "RISK_OFF")
-        compatible = result["regime_compatible"].to_list()
-        assert compatible == [False, True, False]
-
-    def test_stagflation_all_compatible(self):
-        """Non risk-on/off regimes: all symbols compatible."""
-        df = pl.DataFrame({"mtf_score": [7, -7, 3, 0]})
-        result = self._apply_mock(df, "STAGFLATION")
-        assert result["regime_compatible"].all()
-
-    def test_reflation_all_compatible(self):
-        df = pl.DataFrame({"mtf_score": [4, -4, 1]})
-        result = self._apply_mock(df, "REFLATION")
-        assert result["regime_compatible"].all()
-
-    def test_active_regime_column_added(self):
-        df = pl.DataFrame({"mtf_score": [5]})
-        result = self._apply_mock(df, "RISK_ON")
-        assert "active_regime" in result.columns
-        assert result["active_regime"].to_list()[0] == "RISK_ON"
-
-
 # ─────────────────────────────────────────────────────────────────────────
 # Decision C (GMI_Decision_Document_v5.docx §3, tranche item #1) —
-# real-function coverage. Everything above tests grading/regime logic in
-# isolation via hand-duplicated copies (_grade, _apply_mock) that never
+# real-function coverage. Everything above tests grading logic in
+# isolation via hand-duplicated copies (_grade) that never
 # call the actual module code. The classes below exercise the REAL
-# _compute_mtf_alignment(), _apply_regime_compatible(), run(), and
+# _compute_mtf_alignment(), run(), and
 # get_mtf_summary() against fixture Parquet files, following the
 # monkeypatch/tmp_path conventions established in test_macro_regime.py and
 # test_technical_signals.py.
@@ -356,74 +308,45 @@ class TestComputeMtfAlignmentEntryStopZones:
         assert row["reward_risk_ratio"] == pytest.approx(1.2)
 
 
-class TestApplyRegimeCompatibleReal:
-    """Exercises the REAL _apply_regime_compatible — including its file
-    I/O, staleness ordering, and exception-swallowing branches — as
-    opposed to TestRegiomeCompatible above, which only ever calls a
-    hand-duplicated copy of the branching logic."""
+class TestRegimeFreeAfterAdr055:
+    """ADR-055 v2: the gold technical engine is regime-free. The rule-based regime join
+    (`_apply_regime_compatible`, `regime_compatible`, `active_regime`) was removed with
+    macro_regime.py; these tests pin that it stays removed and that no regime store can influence
+    the MTF output."""
 
     @staticmethod
-    def _write_regime_store(path, rows: list[dict]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame(rows).write_parquet(path)
+    def _signals(tmp_path, monkeypatch):
+        sig_dir = tmp_path / "signals"
+        monkeypatch.setattr(mtf_mod, "GOLD_SIGNALS_PATH", sig_dir)
+        monkeypatch.setattr(mtf_mod, "GOLD_MTF_PATH", tmp_path / "mtf")
+        _write_tech_signals(
+            sig_dir / "tech_signals_1D.parquet",
+            [_row("AAPL", close=110.0, ema_9=12.0, ema_21=10.0, ema_50=100.0)],
+        )
 
-    def test_risk_on_from_real_regime_file(self, tmp_path, monkeypatch):
-        store = tmp_path / "regime_store.parquet"
-        monkeypatch.setattr(mtf_mod, "REGIME_STORE_PATH", store)
-        self._write_regime_store(store, [{"date": date(2026, 5, 30), "regime": "RISK_ON"}])
-        df = pl.DataFrame({"mtf_score": [5, -5, 0]})
-        result = _apply_regime_compatible(df, date(2026, 6, 1))
-        assert result["active_regime"].to_list() == ["RISK_ON"] * 3
-        assert result["regime_compatible"].to_list() == [True, False, False]
+    def test_module_has_no_regime_machinery(self):
+        assert not hasattr(mtf_mod, "_apply_regime_compatible")
+        assert not hasattr(mtf_mod, "REGIME_STORE_PATH")
 
-    def test_risk_off_from_real_regime_file(self, tmp_path, monkeypatch):
-        store = tmp_path / "regime_store.parquet"
-        monkeypatch.setattr(mtf_mod, "REGIME_STORE_PATH", store)
-        self._write_regime_store(store, [{"date": date(2026, 5, 30), "regime": "RISK_OFF"}])
-        df = pl.DataFrame({"mtf_score": [5, -5, 0]})
-        result = _apply_regime_compatible(df, date(2026, 6, 1))
-        assert result["regime_compatible"].to_list() == [False, True, False]
+    def test_output_has_no_regime_columns(self, tmp_path, monkeypatch):
+        self._signals(tmp_path, monkeypatch)
+        out = _compute_mtf_alignment(date(2026, 6, 1))
+        assert "regime_compatible" not in out.columns
+        assert "active_regime" not in out.columns
+        assert {"symbol", "mtf_score", "signal_quality", "date"} <= set(out.columns)
 
-    def test_most_recent_regime_row_selected(self, tmp_path, monkeypatch):
-        """ORDER BY date DESC LIMIT 1 must pick the latest row <= run_date."""
-        store = tmp_path / "regime_store.parquet"
-        monkeypatch.setattr(mtf_mod, "REGIME_STORE_PATH", store)
-        self._write_regime_store(store, [
-            {"date": date(2026, 5, 1),  "regime": "RISK_OFF"},
-            {"date": date(2026, 5, 30), "regime": "RISK_ON"},
-        ])
-        df = pl.DataFrame({"mtf_score": [1]})
-        result = _apply_regime_compatible(df, date(2026, 6, 1))
-        assert result["active_regime"].to_list() == ["RISK_ON"]
-
-    def test_missing_file_defaults_neutral_all_compatible(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(mtf_mod, "REGIME_STORE_PATH", tmp_path / "nonexistent.parquet")
-        df = pl.DataFrame({"mtf_score": [7, -7, 0]})
-        result = _apply_regime_compatible(df, date(2026, 6, 1))
-        assert result["active_regime"].to_list() == ["NEUTRAL"] * 3
-        assert result["regime_compatible"].all()
-
-    def test_no_row_before_run_date_defaults_neutral(self, tmp_path, monkeypatch):
-        """Regime rows exist but all postdate run_date — the query matches
-        nothing, fetchone() is None, must fall back to NEUTRAL not raise."""
-        store = tmp_path / "regime_store.parquet"
-        monkeypatch.setattr(mtf_mod, "REGIME_STORE_PATH", store)
-        self._write_regime_store(store, [{"date": date(2026, 7, 1), "regime": "RISK_ON"}])
-        df = pl.DataFrame({"mtf_score": [3]})
-        result = _apply_regime_compatible(df, date(2026, 6, 1))
-        assert result["active_regime"].to_list() == ["NEUTRAL"]
-
-    def test_corrupt_regime_file_swallows_exception_defaults_neutral(self, tmp_path, monkeypatch):
-        """A malformed file at REGIME_STORE_PATH must degrade gracefully —
-        regime join is optional context for MTF alignment, not a hard
-        dependency, so the broad except/pass here is intentional."""
-        store = tmp_path / "regime_store.parquet"
-        store.parent.mkdir(parents=True, exist_ok=True)
-        store.write_text("not a parquet file")
-        monkeypatch.setattr(mtf_mod, "REGIME_STORE_PATH", store)
-        df = pl.DataFrame({"mtf_score": [2]})
-        result = _apply_regime_compatible(df, date(2026, 6, 1))
-        assert result["active_regime"].to_list() == ["NEUTRAL"]
+    def test_output_unchanged_by_a_present_regime_store(self, tmp_path, monkeypatch):
+        """Even a legacy regime_store.parquet at the old path (RISK_OFF, which would have flipped
+        the old regime_compatible) must not change a single MTF value."""
+        self._signals(tmp_path, monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        before = _compute_mtf_alignment(date(2026, 6, 1))
+        legacy = tmp_path / "data" / "gold" / "macro"
+        legacy.mkdir(parents=True)
+        pl.DataFrame({"date": ["2026-05-30"], "regime": ["RISK_OFF"]}).write_parquet(
+            legacy / "regime_store.parquet")
+        after = _compute_mtf_alignment(date(2026, 6, 1))
+        assert before.equals(after)
 
 
 class TestRunIntegration:
@@ -436,7 +359,6 @@ class TestRunIntegration:
         mtf_dir = tmp_path / "mtf"
         monkeypatch.setattr(mtf_mod, "GOLD_SIGNALS_PATH", sig_dir)
         monkeypatch.setattr(mtf_mod, "GOLD_MTF_PATH", mtf_dir)
-        monkeypatch.setattr(mtf_mod, "REGIME_STORE_PATH", tmp_path / "no_regime.parquet")
         monkeypatch.setattr(ProgressCheckpoint, "DB_PATH", tmp_path / "health" / "progress.db")
         return sig_dir, mtf_dir
 

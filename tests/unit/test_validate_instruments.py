@@ -381,7 +381,7 @@ class TestCommodityTaxonomyValidation:
         )
         assert errors == []
 
-    # ── Cross-check against real file + sector_rotation.py ──────────────
+    # ── Cross-check against real file ───────────────────────────────────
 
     def test_real_file_all_14_commodity_instruments_have_valid_taxonomy(self):
         """Direct reproduction of the audit this change closes: walk the
@@ -416,28 +416,15 @@ class TestCommodityTaxonomyValidation:
             assert item["commodity_role"] in VALID_COMMODITY_ROLES
             assert item["commodity_subcategory"] in VALID_COMMODITY_SUBCATEGORIES
 
-    def test_subcategory_to_weight_key_map_matches_sector_rotation_keys(self):
-        """
-        Cross-module consistency guard — this is the exact check that
-        would have caught the 'commodity_precious' vs
-        'commodity_precious_metals' naming mismatch found empirically
-        while implementing this change (Architecture v2.1 Addendum §8.2's
-        own key-name table did not match its own §7.1 enum value). Proves
-        validate_instruments.py's independently-declared
-        COMMODITY_SUBCATEGORY_TO_WEIGHT_KEY map and
-        sector_rotation.py's independently-declared REGIME_SECTOR_WEIGHTS
-        keys have not drifted apart from each other.
-        """
-        from scripts.validate_instruments import COMMODITY_SUBCATEGORY_TO_WEIGHT_KEY
-        from src.gold.sector_rotation import REGIME_SECTOR_WEIGHTS
-
-        for regime, weights in REGIME_SECTOR_WEIGHTS.items():
-            for subcat, weight_key in COMMODITY_SUBCATEGORY_TO_WEIGHT_KEY.items():
-                assert weight_key in weights, (
-                    f"commodity_subcategory={subcat!r} maps to"
-                    f" {weight_key!r}, which is missing from"
-                    f" REGIME_SECTOR_WEIGHTS[{regime!r}]"
-                )
+    def test_regime_weight_key_map_is_retired(self):
+        """ADR-055 v2: COMMODITY_SUBCATEGORY_TO_WEIGHT_KEY guarded against a subcategory with no
+        key in the regime sector-weight table (sector_rotation.py, archived). With the table gone
+        the map is dead code: the VALID_COMMODITY_SUBCATEGORIES enum check is the whole guard, and
+        it must stay the five values the taxonomy uses."""
+        import scripts.validate_instruments as vi
+        assert not hasattr(vi, "COMMODITY_SUBCATEGORY_TO_WEIGHT_KEY")
+        assert vi.VALID_COMMODITY_SUBCATEGORIES == frozenset(
+            {"energy", "precious_metals", "base_metals", "agricultural", "bulks"})
 
 
 class TestDomainScoreWeightSumValidation:
@@ -632,13 +619,15 @@ class TestJsonSchemaLayer:
         path.write_text(yaml.dump(content))
         return str(path)
 
-    def test_all_three_schema_files_are_valid_draft7(self):
+    def test_all_schema_files_are_valid_draft7(self):
+        """ADR-055 v2: regime_sector_weights.schema.yaml was retired with the weight table
+        (archived under archive/macro_regime_cutover_2026_10/); two schemas remain."""
         import jsonschema
         schemas_dir = Path("config/schemas/instruments")
-        for name in (
+        assert sorted(p.name for p in schemas_dir.glob("*.schema.yaml")) == [
             "identity.schema.yaml", "taxonomy.schema.yaml",
-            "regime_sector_weights.schema.yaml",
-        ):
+        ]
+        for name in ("identity.schema.yaml", "taxonomy.schema.yaml"):
             schema = yaml.safe_load((schemas_dir / name).read_text())
             jsonschema.Draft7Validator.check_schema(schema)  # raises if invalid
 

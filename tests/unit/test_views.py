@@ -244,3 +244,43 @@ class TestRegisterViewsSuccessPath:
         }).write_parquet(ohlcv_dir / "AAPL_1D_silver.parquet")
 
         register_views()   # must not raise; v_ohlcv_1D resolves -> created.append() hit
+
+
+class TestViewsAcrossTheAdr055Cutover:
+    """ADR-055 v2: the regime view is v_context_regime (not v_macro_regime), the sector view is
+    gone with gold_sector, and every glob over dated files whose schema changed at the cutover (MTF,
+    watchlist) must use union_by_name=true — a plain glob over old+new files fails."""
+
+    def test_view_names(self):
+        assert "v_context_regime" in VIEW_DEFINITIONS
+        for retired in ("v_macro_regime", "v_sector_weights", "v_sector_map"):
+            assert retired not in VIEW_DEFINITIONS, retired
+
+    def test_no_view_reads_a_retired_store(self):
+        for name, sql in VIEW_DEFINITIONS.items():
+            assert "regime_store" not in sql and "sector_regime_weights" not in sql, name
+            assert "data/gold/sector" not in sql, name
+
+    @pytest.mark.parametrize("name", ["v_mtf_alignment", "v_screener", "v_watchlist_latest"])
+    def test_dated_file_globs_use_union_by_name(self, name):
+        assert name in VIEW_DEFINITIONS
+        assert VIEW_DEFINITIONS[name].count("union_by_name=true") == VIEW_DEFINITIONS[name].count("read_parquet(")
+
+    def test_v_mtf_alignment_reads_a_mix_of_old_and_new_files(self, tmp_path, monkeypatch):
+        import duckdb
+        import polars as pl
+        from src.config.instrument_loader import get_loader
+
+        get_loader()
+        monkeypatch.chdir(tmp_path)
+        d = tmp_path / "data" / "gold" / "mtf"
+        d.mkdir(parents=True)
+        pl.DataFrame({"symbol": ["A"], "mtf_score": [3], "regime_compatible": [True],
+                      "active_regime": ["RISK_ON"], "date": ["2026-10-16"]}
+                     ).write_parquet(d / "mtf_alignment_2026-10-16.parquet")
+        pl.DataFrame({"symbol": ["A"], "mtf_score": [4], "date": ["2026-10-19"]}
+                     ).write_parquet(d / "mtf_alignment_2026-10-19.parquet")
+        con = duckdb.connect()
+        con.execute(VIEW_DEFINITIONS["v_mtf_alignment"])
+        rows = con.execute("SELECT date, mtf_score FROM v_mtf_alignment ORDER BY date").fetchall()
+        assert rows == [("2026-10-16", 3), ("2026-10-19", 4)]

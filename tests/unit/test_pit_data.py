@@ -381,3 +381,39 @@ class TestCrossAssetPITHistorySelection:
         assert fc["horizon_days"].to_list() == [1, 2]            # one snapshot, ordered
         assert fc["computation_date"].unique().to_list() == [date(2026, 9, 13)]
         assert loader.get_forecast("AAPL", date(2026, 9, 15), horizon_days=2).height == 1
+
+
+class TestGetMtfScoreAcrossTheAdr055Cutover:
+    """ADR-055 v2: mtf_alignment files written before the cutover carry `regime_compatible` /
+    `active_regime`; files after it do not. A plain DuckDB glob over the mix raises a schema
+    mismatch — and get_mtf_score() swallows exceptions and returns None, i.e. SILENTLY returned
+    nothing for every symbol. These pin the union_by_name fix and that the retired regime columns
+    never reach a caller (the technical domain stays regime-free)."""
+
+    @staticmethod
+    def _write_mixed(tmp_path):
+        d = tmp_path / "mtf"
+        d.mkdir()
+        pl.DataFrame({"symbol": ["AAPL"], "mtf_score": [3], "signal_quality": ["B"],
+                      "regime_compatible": [True], "active_regime": ["RISK_ON"],
+                      "date": ["2026-10-16"]}).write_parquet(d / "mtf_alignment_2026-10-16.parquet")
+        pl.DataFrame({"symbol": ["AAPL"], "mtf_score": [4], "signal_quality": ["A"],
+                      "date": ["2026-10-19"]}).write_parquet(d / "mtf_alignment_2026-10-19.parquet")
+        return str(d / "mtf_alignment_*.parquet")
+
+    def test_mixed_old_and_new_files_are_readable(self, loader, monkeypatch, tmp_path):
+        monkeypatch.setattr(pit, "GOLD_MTF_PATH", self._write_mixed(tmp_path))
+        assert loader.get_mtf_score("AAPL", date(2026, 10, 19))["mtf_score"] == 4   # new schema row
+        assert loader.get_mtf_score("AAPL", date(2026, 10, 17))["mtf_score"] == 3   # old schema row
+
+    def test_legacy_regime_columns_never_reach_the_caller(self, loader, monkeypatch, tmp_path):
+        monkeypatch.setattr(pit, "GOLD_MTF_PATH", self._write_mixed(tmp_path))
+        old_row = loader.get_mtf_score("AAPL", date(2026, 10, 17))
+        new_row = loader.get_mtf_score("AAPL", date(2026, 10, 19))
+        for row in (old_row, new_row):
+            assert not pit.LEGACY_MTF_REGIME_COLUMNS & set(row), set(row)
+            assert {"symbol", "mtf_score", "signal_quality", "date"} <= set(row)
+
+    def test_get_regime_is_gone(self, loader):
+        assert not hasattr(loader, "get_regime")
+        assert not hasattr(pit, "GOLD_REGIME_PATH")

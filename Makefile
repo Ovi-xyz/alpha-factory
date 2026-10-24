@@ -150,8 +150,6 @@ silver:
 gold:
 	$(PYTHON) $(SRC)/runner.py --job gold_signals
 	$(PYTHON) $(SRC)/runner.py --job gold_mtf
-	$(PYTHON) $(SRC)/runner.py --job gold_regime
-	$(PYTHON) $(SRC)/runner.py --job gold_sector
 	$(PYTHON) $(SRC)/runner.py --job gold_screener
 
 # ── Maintenance ───────────────────────────────────────────────────────────────

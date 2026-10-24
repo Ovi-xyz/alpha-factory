@@ -1,13 +1,15 @@
 """
 test_gold_pipeline.py — Silver→Gold Integration Test
-End-to-end test: synthetic Silver data → Gold indicators → MTF → Regime.
+End-to-end test: synthetic Silver data → Gold indicators → MTF → HMM context regime → sector map.
 
 Validates:
     1. Technical indicators compute correctly on multi-symbol data
     2. MTF alignment produces valid score range [-7, +7]
     3. Signal quality grading A/B/C/D is applied correctly
-    4. Macro regime classification produces valid output
-    5. Sector rotation weights are applied per regime
+    4. The dual-HMM context regime join produces valid vocabulary and a boolean transition flag
+       (ADR-055 v2: replaces the rule-based macro_regime.py classification)
+    5. signal_aggregation's registry-direct sector map covers the whole universe (ADR-055 v2:
+       replaces the regime-keyed sector rotation weights; gold_sector is archived)
 """
 
 from __future__ import annotations
@@ -20,8 +22,9 @@ import pytest
 from src.gold.indicators.core_indicators import (
     add_atr, add_ema, add_macd, add_momentum_features, add_rsi,
 )
-from src.gold.macro_regime import MacroRegimeDetector
-from src.gold.sector_rotation import REGIME_SECTOR_WEIGHTS
+from src.config.instrument_loader import get_loader
+from src.gold.hmm.context_regime import COLUMNS as CONTEXT_COLUMNS, build as build_context
+from src.gold.signal_aggregation import _load_sector_map
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -131,64 +134,62 @@ class TestIndicatorPipeline:
 
 # ── Regime Tests ──────────────────────────────────────────────────────────────
 
-class TestMacroRegimeIntegration:
-
-    def setup_method(self):
-        self.detector = MacroRegimeDetector()
-
-    def test_regime_classification_all_regimes(self):
-        """All 5 regimes must be reachable via specific indicator inputs."""
-        cases = [
-            ({"vix": 35.0, "yield_spread": -0.5, "cpi": 5.0, "gdp": 1.5},
-             "RISK_OFF"),
-            ({"vix": 7.0,  "yield_spread": 1.2,  "cpi": 3.0, "gdp": 3.5},
-             "RISK_ON"),
-            ({"vix": 22.0, "yield_spread": 0.1,  "cpi": 7.0, "gdp": 0.3},
-             "STAGFLATION"),
-            ({"vix": 22.0, "yield_spread": 0.9,  "cpi": 3.5, "gdp": 3.0},
-             "REFLATION"),
-            ({"vix": 16.0, "yield_spread": 0.4,  "cpi": 1.5, "gdp": 2.0},
-             "DISINFLATION"),
-        ]
-        for indicators, expected_regime in cases:
-            regime, _, _ = self.detector._classify(indicators)
-            assert regime == expected_regime, (
-                f"Expected {expected_regime}, got {regime}"
-                f" for indicators={indicators}"
-            )
-
-    def test_regime_record_has_transition_flag(self, tmp_path, monkeypatch):
-        """regime_transition field must be in detect() output."""
-        import src.gold.macro_regime as mr
-        monkeypatch.setattr(mr, "REGIME_STORE_PATH", tmp_path / "regime_store.parquet")
-        record = self.detector.detect(date(2025, 6, 1))
-        assert "regime_transition" in record
-        assert isinstance(record["regime_transition"], bool)
+MACRO_LABELS  = {"expansion", "slowdown", "recession", "recovery"}
+MARKET_LABELS = {"risk_off", "mixed", "risk_on"}
 
 
-# ── Sector Rotation Integration ───────────────────────────────────────────────
+def _macro_frame(days: list[date], labels: list[str]) -> pl.DataFrame:
+    return pl.DataFrame({
+        "date": days, "macro_label": labels,
+        "macro_activity": [0.1 * i for i in range(len(days))],
+        "macro_momentum": [0.0] * len(days),
+        "in_sample": [False] * len(days),
+        "model_config_fingerprint": ["fp-macro"] * len(days),
+    })
 
-class TestSectorRotationIntegration:
 
-    def test_sector_weights_sum_plausible(self):
-        """Sum of all sector weights per regime should be reasonable."""
-        for regime, weights in REGIME_SECTOR_WEIGHTS.items():
-            total = sum(weights.values())
-            # 16 sectors × average ~1.0 = ~16 total
-            assert 8 < total < 25, (
-                f"Regime {regime}: implausible total weight {total:.2f}"
-            )
+def _market_frame(days: list[date], labels: list[str]) -> pl.DataFrame:
+    return pl.DataFrame({
+        "date": days, "market_label": labels,
+        "market_probability": [0.8] * len(days), "market_score": [0.5] * len(days),
+        "in_sample": [False] * len(days), "n_features_observed": [10] * len(days),
+        "model_config_fingerprint": ["fp-market"] * len(days),
+    })
 
-    def test_risk_on_sum_greater_than_risk_off(self):
-        """RISK_ON total weight should exceed RISK_OFF (more OW in bull)."""
-        ro_sum   = sum(REGIME_SECTOR_WEIGHTS["RISK_ON"].values())
-        roff_sum = sum(REGIME_SECTOR_WEIGHTS["RISK_OFF"].values())
-        assert ro_sum >= roff_sum * 0.95   # Allow slight overlap
 
-    def test_all_sectors_have_float_weights(self):
-        """All weight values must be floats."""
-        for regime, weights in REGIME_SECTOR_WEIGHTS.items():
-            for sector, w in weights.items():
-                assert isinstance(w, (int, float)), (
-                    f"{regime}/{sector}: weight is {type(w)}, expected float"
-                )
+class TestContextRegimeIntegration:
+    """The dual-HMM context regime is the platform's regime since ADR-055 v2."""
+
+    DAYS = [date(2026, 10, 12) + timedelta(days=i) for i in range(5)]   # Mon..Fri
+
+    def test_context_frame_vocabulary_and_schema(self):
+        macro  = _macro_frame(self.DAYS, ["expansion", "expansion", "slowdown", "slowdown", "slowdown"])
+        market = _market_frame(self.DAYS, ["risk_on", "risk_on", "mixed", "mixed", "risk_off"])
+        out = build_context(macro, market, self.DAYS[-1])
+        assert out.columns == CONTEXT_COLUMNS
+        assert set(out["macro_label"]) <= MACRO_LABELS
+        assert set(out["market_label"]) <= MARKET_LABELS
+        assert out["context_label"].to_list()[0] == "expansion/risk_on"
+
+    def test_transition_flag_is_boolean_and_marks_label_changes(self):
+        macro  = _macro_frame(self.DAYS, ["expansion", "expansion", "slowdown", "slowdown", "slowdown"])
+        market = _market_frame(self.DAYS, ["risk_on", "risk_on", "mixed", "mixed", "risk_off"])
+        out = build_context(macro, market, self.DAYS[-1])
+        assert out.schema["context_transition"] == pl.Boolean
+        assert out["context_transition"].to_list() == [False, False, True, False, True]
+        assert out["context_transition_alert"].to_list()[2] == "expansion/risk_on -> slowdown/mixed"
+        assert out["context_transition_alert"].to_list()[1] is None
+
+
+# ── Sector Map Integration ───────────────────────────────────────────────────
+
+class TestSectorMapIntegration:
+
+    def test_sector_map_covers_whole_universe(self):
+        get_loader.cache_clear()
+        df = _load_sector_map()
+        assert set(df["symbol"]) == {i.symbol for i in get_loader().all_symbols()}
+
+    def test_sector_map_has_no_weight_or_regime_columns(self):
+        df = _load_sector_map()
+        assert not {"regime", "sector_weight_adj"} & set(df.columns)

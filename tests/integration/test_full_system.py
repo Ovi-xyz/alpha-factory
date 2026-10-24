@@ -190,40 +190,54 @@ class TestFullSystemPipeline:
         if aapl_ema and au_ema:
             assert au_ema > aapl_ema * 10, "EMA not isolated per symbol"
 
-    # Layer 4: Macro Regime
-    def test_l4_regime_classification_stable(self):
-        from src.gold.macro_regime import MacroRegimeDetector
-        det     = MacroRegimeDetector()
-        results = set()
-        for _ in range(5):
-            indicators = {"vix": 18.0, "yield_spread": 0.6, "cpi": 3.0, "gdp": 2.5}
-            r, _, _    = det._classify(indicators)
-            results.add(r)
-        assert len(results) == 1, "Regime classification is not deterministic"
+    # Layer 4: Context Regime (dual-HMM engine — ADR-055 v2 replaced the rule-based macro regime)
+    @staticmethod
+    def _ctx_inputs():
+        import polars as pl
+        from datetime import timedelta
+        days = [date(2025, 3, 24) + timedelta(days=i) for i in range(5)]
+        macro = pl.DataFrame({
+            "date": days, "macro_label": ["slowdown"] * 5,
+            "macro_activity": [0.05] * 5, "macro_momentum": [-0.3] * 5,
+            "in_sample": [True] * 5, "model_config_fingerprint": ["fp"] * 5,
+        })
+        market = pl.DataFrame({
+            "date": days, "market_label": ["mixed"] * 5,
+            "market_probability": [0.6] * 5, "market_score": [0.0] * 5,
+            "in_sample": [True] * 5, "n_features_observed": [10] * 5,
+            "model_config_fingerprint": ["fp"] * 5,
+        })
+        return days, macro, market
 
-    def test_l4_regime_record_has_all_fields(self, tmp_path, monkeypatch):
-        import src.gold.macro_regime as mr
-        monkeypatch.setattr(mr, "REGIME_STORE_PATH", tmp_path / "regime_store.parquet")
-        det    = mr.MacroRegimeDetector()
-        record = det.detect(date(2025, 3, 28))
-        for field in ["date", "regime", "confidence", "regime_transition", "composite_score"]:
-            assert field in record, f"Missing regime field: {field}"
+    def test_l4_context_regime_is_deterministic(self):
+        from src.gold.hmm.context_regime import build
+        days, macro, market = self._ctx_inputs()
+        first = build(macro, market, days[-1])
+        for _ in range(4):
+            assert build(macro, market, days[-1]).equals(first), "context regime is not deterministic"
 
-    # Layer 5: Sector Rotation
-    def test_l5_all_instrument_symbols_have_weights(self):
-        from src.gold.sector_rotation import REGIME_SECTOR_WEIGHTS
+    def test_l4_context_record_has_all_fields(self):
+        from src.gold.hmm.context_regime import build
+        days, macro, market = self._ctx_inputs()
+        record = build(macro, market, days[-1]).row(-1, named=True)
+        for field in ["date", "macro_label", "market_label", "context_label",
+                      "context_transition", "in_sample"]:
+            assert field in record, f"Missing context regime field: {field}"
+        assert record["context_label"] == "slowdown/mixed"
+
+    # Layer 5: sector map (registry data read by signal_aggregation; gold_sector archived, ADR-055 v2)
+    def test_l5_all_instrument_symbols_have_a_sector(self):
+        from src.gold.signal_aggregation import _load_sector_map
         from src.config.instrument_loader import get_loader
-        loader  = get_loader()
-        sectors = set(loader.sectors())
-        for regime, weights in REGIME_SECTOR_WEIGHTS.items():
-            missing = sectors - set(weights.keys())
-            assert not missing, f"{regime} missing sectors: {missing}"
+        loader = get_loader()
+        df     = _load_sector_map()
+        assert set(df["symbol"]) == {i.symbol for i in loader.all_symbols()}
+        assert set(loader.sectors()) <= set(df["sector"])
 
-    def test_l5_weights_sum_reasonable(self):
-        from src.gold.sector_rotation import REGIME_SECTOR_WEIGHTS
-        for regime, weights in REGIME_SECTOR_WEIGHTS.items():
-            total = sum(weights.values())
-            assert 8 < total < 30, f"{regime}: total weight={total:.1f} out of range"
+    def test_l5_sector_map_carries_no_weights(self):
+        from src.gold.signal_aggregation import _load_sector_map
+        df = _load_sector_map()
+        assert not {"regime", "sector_weight_adj"} & set(df.columns)
 
     # Layer 6: MTF Score Logic
     def test_l6_mtf_grade_complete_coverage(self):

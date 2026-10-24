@@ -115,8 +115,8 @@ class Instrument:
     # never actually implemented in this dataclass until now, confirmed via
     # empirical grep before this change). Populated on ALL 14 commodity
     # instruments (Layer 1 trading + Layer 2 context) — None on every other
-    # market. commodity_subcategory drives REGIME_SECTOR_WEIGHTS routing via
-    # the 5 disaggregated commodity_* keys (see sector_rotation.py); it is
+    # market. commodity_subcategory is taxonomy data, 5 disaggregated values (it was the
+    # sector-rotation routing key until ADR-055 v2 archived that module); it is
     # deliberately a coarser, separate taxonomy from context_category/
     # context_group (the 22-subcategory CrossAssetEngine taxonomy) — e.g.
     # COAL_NEWC's context_group stays 'coal' but commodity_subcategory is

@@ -1,6 +1,9 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.21.0"
+version = "1.22.0"
+# ADR-055 v2 (GMI-HMM2-CUT-001, 20 Oct 2026): macro_regime.py and gold_sector archived; the
+# dual-HMM regime engine is the platform's regime; gold_screener is the designated (future)
+# Trading Engine interface. Also releases the two 1.21.0 "Unreleased" fixes (SIL-BRZ-SCHEMA-01, TS-DATE-01).
 # FIX GMI-JR-004 (RISK-34, chat thread, 25 Sep 2026): gold_cross_asset_
 # correlation/gold_lead_lag/gold_forecast had no run_on_weekdays guard —
 # identical gap to RISK-23 (31 Aug 2026, bronze_macro_weekly/

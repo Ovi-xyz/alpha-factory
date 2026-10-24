@@ -149,7 +149,8 @@ class TestGoldScreenerNotLocked:
         # Satisfy gold_screener's actual (post-ADR-043) dependencies directly.
         # Neither silver_fundamental nor silver_sentiment exist any more —
         # gold_screener does not wait on either.
-        for dep in ("gold_mtf", "gold_regime", "gold_sector"):
+        # ADR-055 v2: gold_regime and gold_sector are archived; gold_mtf is its one hard dependency.
+        for dep in ("gold_mtf",):
             run_job(dep, force=True, run_date=run_date)
 
         run_job("gold_screener", force=False, run_date=run_date)
@@ -233,7 +234,7 @@ class TestLayerCommands:
         are now genuinely Sunday-gated; silver_macro/silver_global_rates
         depend on them via a 7-day stale_tolerance (same pattern FIX NEW-1
         already established one hop downstream for silver_validate/
-        gold_regime's dependency on silver_macro itself). This test now
+        gold_regime's [retired, ADR-055 v2] dependency on silver_macro itself). This test now
         seeds that weekly sentinel on the preceding Sunday first, mirroring
         the real SOP (GD §14.4.2) and the existing GATE-N1 precedent in
         TestJobAllAcrossWeek above — not the previously-accidental behavior

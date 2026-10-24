@@ -34,6 +34,11 @@ building these fixtures (both fixed in this same thread — see CHANGELOG):
 
 TestBuildWatchlistRegimeJoinRegression and TestClusterDeduplication are the
 permanent regression guards for these two fixes.
+
+ADR-055 v2 (GMI-HMM2-CUT-001): the regime source is now the dual-HMM context_regime store
+(as-of join, staleness-bounded) and the sector weights are gone; the regime-join regression
+class below was rewritten for the new source with the SAME degrade-never-zero-the-watchlist
+contract (GLD-SCR-001 still applies to a missing/stale/corrupt context store).
 """
 
 from __future__ import annotations
@@ -67,13 +72,11 @@ def _mtf_row(
     stop: float = 90.0,
     rrr: float = 1.2,
     last_close: float = 100.0,
-    regime_compatible: bool = True,
 ) -> dict:
     return {
         "symbol": symbol,
         "mtf_score": mtf_score,
         "signal_quality": signal_quality,
-        "regime_compatible": regime_compatible,
         "entry_zone_low": entry_low,
         "entry_zone_high": entry_high,
         "stop_zone_1H": stop,
@@ -101,8 +104,7 @@ def _patch_all_optional_sources(tmp_path, monkeypatch):
     """Redirect every optional-source path constant to an isolated tmp_path
     location that does not exist yet (has_* all False by default)."""
     monkeypatch.setattr(scr_mod, "GOLD_MTF_PATH", tmp_path / "mtf")
-    monkeypatch.setattr(scr_mod, "GOLD_REGIME_PATH", tmp_path / "regime_store.parquet")
-    monkeypatch.setattr(scr_mod, "GOLD_SECTOR_PATH", tmp_path / "sector.parquet")
+    monkeypatch.setattr(scr_mod, "GOLD_CONTEXT_REGIME_PATH", tmp_path / "hmm" / "context_regime.parquet")
     monkeypatch.setattr(scr_mod, "GOLD_CORR_PATH", tmp_path / "corr.parquet")
     monkeypatch.setattr(scr_mod, "SILVER_ACTIVE_SYMBOLS_ROOT", tmp_path / "active_symbols")
     monkeypatch.setattr(scr_mod, "GOLD_SCREENER_PATH", tmp_path / "screener")
@@ -127,71 +129,141 @@ class TestBuildWatchlistNoMtf:
 
 # ── FIX GLD-SCR-001 regression ──────────────────────────────────────────────
 
+def _context_row(day: date, **over) -> dict:
+    row = {
+        "date": day, "macro_label": "expansion", "macro_activity": 0.4, "macro_momentum": 0.1,
+        "market_label": "risk_on", "market_probability": 0.8, "market_score": 0.6,
+        "market_age_days": 0, "context_label": "expansion/risk_on",
+        "context_transition": False, "context_transition_alert": None, "in_sample": False,
+    }
+    row.update(over)
+    return row
+
+
+def _write_context(rows: list[dict]) -> None:
+    scr_mod.GOLD_CONTEXT_REGIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(rows).write_parquet(scr_mod.GOLD_CONTEXT_REGIME_PATH)
+
+
+REGIME_OUTPUT_COLUMNS = [
+    "context_date", "context_age_days", "macro_label", "macro_activity", "macro_momentum",
+    "market_label", "market_probability", "market_score", "market_age_days", "context_label",
+    "context_transition", "context_transition_alert", "regime_in_sample",
+]
+LEGACY_OUTPUT_COLUMNS = [
+    "regime", "regime_composite", "regime_confidence", "regime_transition", "transition_alert",
+    "sector_weight_adj", "sector",
+]
+
+
 class TestBuildWatchlistRegimeJoinRegression:
-    """Regime data being unavailable must degrade gracefully (regime
-    columns null), never wipe out an otherwise-valid watchlist. See
-    FIX GLD-SCR-001 in the module docstring above."""
+    """Context-regime data being unavailable must degrade gracefully (regime columns null),
+    never wipe out an otherwise-valid watchlist. See FIX GLD-SCR-001 in the module docstring
+    above — the contract now applies to the dual-HMM context_regime store (ADR-055 v2)."""
 
     def test_missing_regime_file_still_returns_candidates(self, tmp_path, monkeypatch):
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
         run_date = date(2026, 6, 1)
         _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
-        # GOLD_REGIME_PATH deliberately left non-existent.
+        # GOLD_CONTEXT_REGIME_PATH deliberately left non-existent.
         result = build_watchlist(run_date)
-        assert not result.is_empty()
         assert result["symbol"].to_list() == ["AAPL"]
-        assert result["regime"].to_list() == [None]
+        assert result["context_label"].to_list() == [None]
+        assert result["context_date"].to_list() == [None]
 
-    def test_regime_file_exists_but_no_row_for_run_date(self, tmp_path, monkeypatch):
+    def test_output_has_context_columns_and_no_legacy_columns(self, tmp_path, monkeypatch):
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
         run_date = date(2026, 6, 1)
         _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
-        pl.DataFrame({
-            "date": [date(2026, 5, 20)], "regime": ["RISK_ON"],
-            "composite_score": [0.5], "confidence": [0.8],
-            "regime_transition": [False], "transition_alert": [None],
-        }).write_parquet(scr_mod.GOLD_REGIME_PATH)
         result = build_watchlist(run_date)
-        assert not result.is_empty(), (
-            "GLD-SCR-001 REGRESSION: a regime file with no row for this "
-            "run_date must not zero out the watchlist"
-        )
-        assert result["regime"].to_list() == [None]
+        for col in REGIME_OUTPUT_COLUMNS:
+            assert col in result.columns, f"{col} missing from the watchlist"
+        for col in LEGACY_OUTPUT_COLUMNS:
+            assert col not in result.columns, f"retired column {col} is still in the watchlist"
 
-    def test_regime_row_present_broadcasts_to_all_candidates(self, tmp_path, monkeypatch):
+    def test_context_row_present_broadcasts_to_all_candidates(self, tmp_path, monkeypatch):
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
         run_date = date(2026, 6, 1)
         _write_mtf(_mtf_path(mtf_dir, run_date), [
             _mtf_row("AAPL", 7, "A"), _mtf_row("MSFT", -6, "A"),
         ])
-        pl.DataFrame({
-            "date": [run_date], "regime": ["RISK_OFF"],
-            "composite_score": [-0.4], "confidence": [0.7],
-            "regime_transition": [True], "transition_alert": ["RISK_ON -> RISK_OFF"],
-        }).write_parquet(scr_mod.GOLD_REGIME_PATH)
+        _write_context([_context_row(
+            run_date, macro_label="slowdown", market_label="risk_off",
+            context_label="slowdown/risk_off", context_transition=True,
+            context_transition_alert="expansion/risk_on -> slowdown/risk_off", in_sample=True,
+        )])
         result = build_watchlist(run_date)
-        assert result["regime"].to_list() == ["RISK_OFF", "RISK_OFF"]
-        assert result["regime_transition"].to_list() == [True, True]
-        assert result["transition_alert"].to_list() == ["RISK_ON -> RISK_OFF"] * 2
+        assert result["context_label"].to_list() == ["slowdown/risk_off"] * 2
+        assert result["macro_label"].to_list() == ["slowdown"] * 2
+        assert result["market_label"].to_list() == ["risk_off"] * 2
+        assert result["context_transition"].to_list() == [True, True]
+        assert result["context_transition_alert"].to_list() == ["expansion/risk_on -> slowdown/risk_off"] * 2
+        assert result["regime_in_sample"].to_list() == [True, True]
+        assert result["context_age_days"].to_list() == [0, 0]
+
+    def test_asof_picks_latest_row_on_or_before_run_date_within_tolerance(self, tmp_path, monkeypatch):
+        """run_date is a Sunday: the Friday row (2 days old) is used, a LATER row is never read
+        (point-in-time safe) and the age is reported."""
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 10, 18)                     # Sunday
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        _write_context([
+            _context_row(date(2026, 10, 15), context_label="expansion/mixed"),
+            _context_row(date(2026, 10, 16), context_label="expansion/risk_on"),   # Friday
+            _context_row(date(2026, 10, 19), context_label="recession/risk_off"),  # FUTURE
+        ])
+        result = build_watchlist(run_date)
+        assert result["context_label"].to_list() == ["expansion/risk_on"]
+        assert result["context_date"].to_list() == [date(2026, 10, 16)]
+        assert result["context_age_days"].to_list() == [2]
+
+    def test_stale_context_row_beyond_tolerance_degrades_to_null(self, tmp_path, monkeypatch):
+        """A month-old state must not be presented as the current regime (never zero rows either)."""
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        _write_context([_context_row(date(2026, 5, 1))])   # 31 days old
+        result = build_watchlist(run_date)
+        assert not result.is_empty(), (
+            "GLD-SCR-001 REGRESSION: a stale context_regime store must not zero out the watchlist"
+        )
+        assert result["context_label"].to_list() == [None]
+
+    def test_only_future_rows_degrades_to_null(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        _write_context([_context_row(date(2026, 6, 2))])
+        result = build_watchlist(run_date)
+        assert result["symbol"].to_list() == ["AAPL"]
+        assert result["context_label"].to_list() == [None]
 
     def test_corrupt_regime_file_degrades_to_empty_placeholder(self, tmp_path, monkeypatch):
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
         run_date = date(2026, 6, 1)
         _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
-        scr_mod.GOLD_REGIME_PATH.parent.mkdir(parents=True, exist_ok=True)
-        scr_mod.GOLD_REGIME_PATH.write_text("not a parquet file")
+        scr_mod.GOLD_CONTEXT_REGIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+        scr_mod.GOLD_CONTEXT_REGIME_PATH.write_text("not a parquet file")
         result = build_watchlist(run_date)
         assert not result.is_empty()
-        assert result["regime"].to_list() == [None]
+        assert result["context_label"].to_list() == [None]
 
-    def test_corrupt_sector_file_degrades_to_defaults(self, tmp_path, monkeypatch):
+    def test_store_missing_a_required_column_degrades_loudly_not_silently(self, tmp_path, monkeypatch):
+        """A schema problem (e.g. a store from an older engine version) must still degrade to NULL
+        but be logged as a warning — it must not look like 'no file yet'."""
+        from loguru import logger
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
         run_date = date(2026, 6, 1)
         _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
-        scr_mod.GOLD_SECTOR_PATH.parent.mkdir(parents=True, exist_ok=True)
-        scr_mod.GOLD_SECTOR_PATH.write_text("not a parquet file")
-        result = build_watchlist(run_date)
-        assert result.row(0, named=True)["sector"] == "Unknown"
+        _write_context([{"date": run_date, "context_label": "expansion/risk_on"}])   # columns missing
+        messages: list[str] = []
+        sink = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+        try:
+            result = build_watchlist(run_date)
+        finally:
+            logger.remove(sink)
+        assert result["context_label"].to_list() == [None]
+        assert any("context_regime unreadable" in m for m in messages)
 
     def test_corrupt_active_symbols_file_degrades_to_defaults(self, tmp_path, monkeypatch):
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
@@ -225,19 +297,19 @@ class TestBuildWatchlistFiltering:
         result = build_watchlist(run_date)
         assert result["symbol"].to_list() == ["MSFT"]
 
-    def test_sector_weight_at_or_below_threshold_excluded(self, tmp_path, monkeypatch):
+    def test_sector_is_neither_a_filter_nor_an_output_column(self, tmp_path, monkeypatch):
+        """ADR-055 v2: the sector concentration guard (sector_weight_adj <= 0.5 excluded) was
+        retired with the regime-keyed weights, and the `sector` column was dropped with gold_sector
+        (Ovi, 21 Oct 2026). Energy used to be excluded in some regimes — it must pass like any
+        other candidate, and no sector label may appear in the watchlist."""
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
         run_date = date(2026, 6, 1)
         _write_mtf(_mtf_path(mtf_dir, run_date), [
             _mtf_row("AAPL", 7, "A"), _mtf_row("XOM", 7, "A"),
         ])
-        pl.DataFrame({
-            "symbol": ["AAPL", "XOM"],
-            "sector": ["Technology", "Energy"],
-            "sector_weight_adj": [1.2, 0.5],   # XOM exactly at threshold -> excluded (strict >)
-        }).write_parquet(scr_mod.GOLD_SECTOR_PATH)
         result = build_watchlist(run_date)
-        assert result["symbol"].to_list() == ["AAPL"]
+        assert sorted(result["symbol"].to_list()) == ["AAPL", "XOM"]
+        assert "sector" not in result.columns
 
     def test_dollar_volume_below_threshold_excluded_when_known(self, tmp_path, monkeypatch):
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
@@ -296,30 +368,16 @@ class TestCheckDataFreshnessCorruptData:
 
 class TestBuildWatchlistEnrichment:
 
-    def test_sector_and_dollar_volume_enriched(self, tmp_path, monkeypatch):
+    def test_dollar_volume_enriched(self, tmp_path, monkeypatch):
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
         run_date = date(2026, 6, 1)
         _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
-        pl.DataFrame({
-            "symbol": ["AAPL"], "sector": ["Technology"], "sector_weight_adj": [1.3],
-        }).write_parquet(scr_mod.GOLD_SECTOR_PATH)
         pl.DataFrame({
             "symbol": ["AAPL"], "dollar_volume_20d": [80_000_000.0],
         }).write_parquet(_active_symbols_path(run_date))
         result = build_watchlist(run_date)
         row = result.row(0, named=True)
-        assert row["sector"] == "Technology"
-        assert row["sector_weight_adj"] == pytest.approx(1.3)
         assert row["dollar_volume_20d"] == pytest.approx(80_000_000.0)
-
-    def test_missing_sector_defaults_unknown_and_neutral_weight(self, tmp_path, monkeypatch):
-        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
-        run_date = date(2026, 6, 1)
-        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
-        result = build_watchlist(run_date)
-        row = result.row(0, named=True)
-        assert row["sector"] == "Unknown"
-        assert row["sector_weight_adj"] == pytest.approx(1.0)
 
     def test_top_n_and_ordering(self, tmp_path, monkeypatch):
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)

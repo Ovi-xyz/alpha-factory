@@ -26,14 +26,16 @@ GOLD_DIR = pathlib.Path("src/gold")
 HMM_JOBS = {"gold_raw_macro", "gold_raw_market", "gold_hmm_macro_regime", "gold_hmm_macro_fit",
             "gold_hmm_market_regime", "gold_hmm_market_fit", "gold_context_regime"}
 CROSS_ASSET_JOBS = {"gold_global_regime", "gold_cross_asset_correlation", "gold_lead_lag", "gold_forecast"}
-TECHNICAL_CHAIN_JOBS = {"gold_signals", "gold_mtf", "signal_aggregation", "gold_regime",
-                        "gold_sector", "gold_screener"}
+# ADR-055 v2: "gold_regime" left this set — the job no longer exists (macro_regime.py archived).
+# gold_screener stays: it reads the HMM context regime as a SOFT source (no depends_on edge), so
+# no HMM job is upstream of it in the graph; see tests/integration/test_regime_cutover_adr055.py.
+TECHNICAL_CHAIN_JOBS = {"gold_signals", "gold_mtf", "signal_aggregation", "gold_screener"}
 FOREIGN_JOBS = CROSS_ASSET_JOBS | TECHNICAL_CHAIN_JOBS
 
 # Modules the HMM package must never import (other domains' Gold code).
 FOREIGN_MODULE_PREFIXES = (
     "src.gold.cross_asset", "src.gold.technical_signals", "src.gold.mtf_alignment",
-    "src.gold.signal_aggregation", "src.gold.screener", "src.gold.sector_rotation",
+    "src.gold.signal_aggregation", "src.gold.screener",
     "src.gold.macro_regime", "src.gold.indicators",
 )
 # Gold stores the HMM package must never read.
@@ -157,12 +159,14 @@ class TestJobGraph:
 # ── schedule ─────────────────────────────────────────────────────────────────
 
 class TestSchedule:
-    def test_hmm_jobs_sit_after_screener_and_before_gatekeeper(self):
-        """The runner stops at the first failing job and the engine is in
-        burn-in: it must not block the production chain (ADR-051)."""
+    def test_hmm_jobs_sit_after_technical_engine_and_before_screener(self):
+        """ADR-055 v2 (supersedes ADR-051's 'after the screener, it is in burn-in'): the HMM engine
+        is now the platform's regime source, so it runs BEFORE gold_screener — but after the
+        technical engine, because the runner stops at the first failing job and an HMM failure
+        must not stop the technical engine (independent domains)."""
         idx = {n: i for i, n in enumerate(DAILY_SEQUENCE)}
         for job in HMM_JOBS & set(DAILY_SEQUENCE):
-            assert idx["gold_screener"] < idx[job] < idx["gatekeeper"], job
+            assert idx["signal_aggregation"] < idx[job] < idx["gold_screener"] < idx["gatekeeper"], job
 
     def test_raw_macro_is_daily_with_weekly_macro_stale_tolerance(self):
         j = JOB_REGISTRY["gold_raw_macro"]

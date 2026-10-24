@@ -219,27 +219,16 @@ EXPECTED_DM_CB_COUNT = 9
 EXPECTED_EM_CB_COUNT = 3
 
 # ADD Decision B Step 1 (GMI_Decision_Document_v3.docx, Architecture v2.1
-# Addendum §7.1/§8.2): canonical enum values for the two new commodity
-# taxonomy fields. VALID_COMMODITY_SUBCATEGORY_KEYS is declared
-# independently here (not imported from src/gold/sector_rotation.py) —
-# same design principle as the rest of this file: validator must not share
-# a blind spot with the code it's validating. Keep in sync with
-# REGIME_SECTOR_WEIGHTS's key set by hand if either changes.
+# Addendum §7.1/§8.2): canonical enum values for the two commodity taxonomy fields. Declared
+# independently here (not imported from src/) — same design principle as the rest of this file:
+# the validator must not share a blind spot with the code it is validating.
+# ADR-055 v2: the COMMODITY_SUBCATEGORY_TO_WEIGHT_KEY map that used to live here (a guard against
+# a subcategory with no key in the regime sector-weight table) was retired with that table
+# (sector_rotation.py, archived); the enum check below is the whole guard now.
 VALID_COMMODITY_ROLES: frozenset = frozenset({"trading", "context"})
 VALID_COMMODITY_SUBCATEGORIES: frozenset = frozenset({
     "energy", "precious_metals", "base_metals", "agricultural", "bulks",
 })
-# Mechanical f"commodity_{subcategory}" formula (Addendum §8.4), with the
-# one documented exception: 'precious_metals' -> 'commodity_precious_metals',
-# NOT 'commodity_precious' as Addendum §8.2's key-name table states — that
-# table does not match §7.1's own enum value and was resolved in favour of
-# the formula (see src/gold/sector_rotation.py's REGIME_SECTOR_WEIGHTS
-# docstring for full rationale). This map exists so validate_instruments.py
-# can catch the same orphaned-key failure mode independently of
-# sector_rotation.py itself.
-COMMODITY_SUBCATEGORY_TO_WEIGHT_KEY: dict[str, str] = {
-    s: f"commodity_{s}" for s in VALID_COMMODITY_SUBCATEGORIES
-}
 
 
 def _flatten_layer1_items(market: str, content) -> list[dict]:
@@ -277,14 +266,6 @@ def _validate_commodity_taxonomy(
             errors.append(
                 f"[{scope_label}] {sym}: commodity_subcategory={subcat!r}"
                 f" not in {sorted(VALID_COMMODITY_SUBCATEGORIES)}"
-            )
-        elif subcat not in COMMODITY_SUBCATEGORY_TO_WEIGHT_KEY:
-            # Unreachable given VALID_COMMODITY_SUBCATEGORIES check above,
-            # kept as an explicit belt-and-suspenders guard against the two
-            # sets ever being edited out of sync with each other.
-            errors.append(
-                f"[{scope_label}] {sym}: commodity_subcategory={subcat!r}"
-                " has no corresponding REGIME_SECTOR_WEIGHTS key mapping"
             )
 
 

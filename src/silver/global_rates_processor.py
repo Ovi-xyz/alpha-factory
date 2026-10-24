@@ -30,7 +30,7 @@ Schema:
 
 Dikonsumsi oleh: CrossAssetEngine (domain score computation),
                  ForecastModule (PCA pre-processing Layer 2 input),
-                 gold_regime (global macro regime detection)
+                 dual-HMM regime engine (global macro regime detection; formerly gold_regime)
 """
 
 from __future__ import annotations

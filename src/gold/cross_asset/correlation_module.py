@@ -42,8 +42,10 @@ acceptable choices (the other, MinCovDet, is not used here) — SSEC gets
 no separate special-casing.
 
 Regime conditioning: each weekly run is tagged with the CURRENT regime
-label (most recent row in gold/macro/regime_store.parquet with
-date <= run_date). This is NOT "N separate matrices, one per possible
+label — the engine's OWN global_regime_label (most recent row in
+gold/cross_asset/global_regime.parquet with date <= run_date; see
+regime_tag.py, ADR-055 v2 R3 — formerly the retired rule-based
+regime_store.parquet). This is NOT "N separate matrices, one per possible
 regime label, computed simultaneously" — Architecture v2.0's §6.2.1 text
 ("separate matrices computed per active regime... stored with regime
 label") only becomes meaningful once enough weekly snapshots accumulate
@@ -89,11 +91,11 @@ from src.gold.cross_asset.legacy_correlation_bridge import write_legacy_correlat
 from src.silver.active_symbols import ActiveSymbolsResolver
 from src.silver.context_anchors import ContextAnchorsResolver
 from src.utils.atomic_io import atomic_write_parquet
+from src.gold.cross_asset.regime_tag import current_regime_tag
 from src.gold.cross_asset.history import CORR_HISTORY_NAME, write_history_snapshot
 from src.utils.silver_scope import context_glob, layer1_globs
 
 SILVER_OHLCV_PATH     = Path("data/silver/market_ohlcv")
-REGIME_STORE_PATH     = Path("data/gold/macro/regime_store.parquet")
 GOLD_CROSS_ASSET_PATH = Path("data/gold/cross_asset")
 CROSS_ASSET_CORR_PATH = GOLD_CROSS_ASSET_PATH / "cross_asset_corr.parquet"
 
@@ -318,17 +320,8 @@ class CorrelationModule:
 
     @staticmethod
     def _get_current_regime(run_date: date) -> str:
-        if not REGIME_STORE_PATH.exists():
-            return "UNKNOWN"
-        try:
-            df = pl.read_parquet(REGIME_STORE_PATH)
-            prior = df.filter(pl.col("date") <= str(run_date)).sort("date", descending=True)
-            if prior.is_empty():
-                return "UNKNOWN"
-            return prior.row(0, named=True)["regime"]
-        except Exception as e:
-            logger.debug(f"[gold_cross_asset_correlation] Could not read regime: {e}")
-            return "UNKNOWN"
+        """The engine's own regime tag — see regime_tag.py (ADR-055 v2, R3)."""
+        return current_regime_tag(run_date)
 
     # ── Output assembly ───────────────────────────────────────────────────
 

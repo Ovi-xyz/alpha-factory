@@ -114,7 +114,7 @@ python src/runner.py --list                        # all 27 registered jobs
 python src/runner.py --status                       # today's DONE/PENDING
 python src/runner.py --job all                      # full DAILY_SEQUENCE (16 jobs)
 python src/runner.py --job bronze_ohlcv_daily        # single job
-python src/runner.py --job gold_regime --force       # bypass dependency check
+python src/runner.py --job gold_context_regime --force   # bypass dependency check
 python src/runner.py --job all --date 2026-07-13     # backfill a specific date
 ```
 
@@ -216,7 +216,7 @@ CrossAssetEngine computation itself not yet built).
 bronze_ohlcv_daily          bronze_ohlcv_context_daily     bronze_treasury
 silver_ohlcv                silver_ohlcv_context           silver_validate
 silver_active_symbols       silver_context_anchors         gold_signals
-gold_mtf                    gold_regime                    gold_sector
+gold_mtf                    signal_aggregation             gold_context_regime
 gold_screener                health_report
 ```
 
@@ -235,7 +235,7 @@ python src/runner.py --job gold_correlation      # Rolling 60D, active symbols o
 
 ```bash
 python src/runner.py --status                      # today's job status
-python src/runner.py --reset gold_regime            # clear one sentinel
+python src/runner.py --reset gold_context_regime    # clear one sentinel
 python src/runner.py --reset-all                    # full pipeline re-run
 python -m src.utils.delta_reprocessor --dry-run     # preview stale Silver symbols
 python -m src.utils.pipeline_dashboard              # rich terminal health dashboard
@@ -319,7 +319,6 @@ alpha-factory/
 ├── config/
 │   ├── instruments_identity.yaml   # v1.6 — sourcing fields (Decision B split)
 │   ├── instruments_taxonomy.yaml   # v1.6 — routing/scoring + _meta blocks
-│   ├── regime_sector_weights.yaml  # externalized from sector_rotation.py
 │   ├── schemas/instruments/        # jsonschema Draft-7, one per file above
 │   ├── bis_cb_rates.yaml           # 12 REF_AREA map + structural break registry
 │   ├── fred_series.yaml           # 60 FRED series registry
@@ -366,7 +365,7 @@ alpha-factory/
 │   │   │   ├── core_indicators.py     # Pure Polars EMA/RSI/MACD/ATR
 │   │   │   └── pandas_indicators.py   # pandas-ta-classic BBands + ADX (v1.10.0)
 │   │   ├── technical_signals.py    # active_ohlcv-filtered (Layer 1 only)
-│   │   ├── mtf_alignment.py · macro_regime.py · sector_rotation.py
+│   │   ├── mtf_alignment.py · signal_aggregation.py
 │   │   ├── screener.py · correlation_matrix.py · views.py
 │   │   └── hmm/                    # ADR-051 dual-HMM regime engine (config, fred_pit, raw_macro, raw_market; more modules in progress)
 │   │
@@ -422,10 +421,9 @@ df  = con.execute("SELECT * FROM v_ohlcv_1D WHERE symbol = 'AAPL'").pl()
 
 | Output | Path | Refresh |
 |--------|------|---------|
-| Regime Store | `data/gold/macro/regime_store.parquet` | Daily |
 | MTF Alignment | `data/gold/mtf/mtf_alignment_{date}.parquet` | Daily |
 | Watchlist | `data/gold/screener/watchlist_{date}.parquet` | Daily |
-| Sector Weights | `data/gold/sector/sector_regime_weights.parquet` | Daily |
+| Context Regime | `data/gold/hmm/context_regime.parquet` | Daily |
 | Correlation Clusters | `data/gold/correlation/correlation_clusters.parquet` | Weekly |
 | Global Rates (BIS) | `data/silver/global_rates/global_rates_policy.parquet` | Weekly |
 

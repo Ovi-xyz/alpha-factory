@@ -16,7 +16,7 @@ Confirmed empirically against the live repo (list_directory +
 get_file_info on data/bronze/macro/fred/{volatility,credit}/): all 9 were
 frozen at exactly 2 Bronze files each, both predating the 31 Aug fix. 3 are
 regime_input: true in fred_series.yaml — VIXCLS (vix_proxy), DEXUSEU
-(dxy_proxy), BAMLH0A0HYM2 (credit_spread) — meaning 3 of gold_regime's 7
+(dxy_proxy), BAMLH0A0HYM2 (credit_spread) — meaning 3 of the retired gold_regime's 7 (macro_regime.py, archived by ADR-055 v2; the same series now also feed the dual-HMM engine)
 macro regime inputs were silently stale for a week with no error, crash,
 or non-debug log line anywhere in the run.
 

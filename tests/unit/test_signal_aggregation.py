@@ -210,21 +210,45 @@ class TestCompositeAggregation:
 
 
 class TestSectorMap:
-    def test_reads_sector_regime_weights_when_present(self, tmp_path, monkeypatch):
-        sector_path = tmp_path / "sector_regime_weights.parquet"
-        monkeypatch.setattr(sa_mod, "GOLD_SECTOR_PATH", sector_path)
-        pl.DataFrame({
-            "symbol": ["AAA"], "market": ["us_stocks"], "sector": ["Technology"],
-        }).write_parquet(sector_path)
-        out = _load_sector_map()
-        assert out.filter(pl.col("symbol") == "AAA")["sector"][0] == "Technology"
+    """ADR-055 v2: gold_sector (which published the sector column) is archived; signal_aggregation
+    reads the label straight from the registry — it is the only consumer left (the screener's
+    `sector` column was dropped)."""
 
-    def test_falls_back_when_sector_file_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(sa_mod, "GOLD_SECTOR_PATH", tmp_path / "does_not_exist.parquet")
-        # Fallback goes through InstrumentLoader — just assert it doesn't raise
-        # and returns a DataFrame with the expected columns.
+    def test_schema_and_one_row_per_layer1_symbol(self):
+        from src.config.instrument_loader import get_loader
+        get_loader.cache_clear()
         out = _load_sector_map()
-        assert set(out.columns) == {"symbol", "market", "sector"}
+        assert out.columns == ["symbol", "market", "sector"]
+        assert out.height == len(get_loader().all_symbols())
+        assert out["symbol"].n_unique() == out.height
+
+    def test_rule_is_sector_or_market(self):
+        """GICS sector for US stocks, the market name for everything else — the rule the archived
+        gold_sector published, so no consumer's value changes."""
+        from src.config.instrument_loader import get_loader
+        get_loader.cache_clear()
+        by_symbol = {r["symbol"]: r["sector"] for r in _load_sector_map().to_dicts()}
+        for inst in get_loader().all_symbols():
+            assert by_symbol[inst.symbol] == (inst.sector or inst.market), inst.symbol
+
+    def test_no_gold_store_is_read_for_sector_labels(self):
+        assert not hasattr(sa_mod, "GOLD_SECTOR_PATH")
+
+    def test_unreadable_registry_degrades_to_typed_empty_and_warns(self, monkeypatch):
+        from loguru import logger
+        import src.config.instrument_loader as il
+
+        def boom():
+            raise RuntimeError("registry unreadable")
+        monkeypatch.setattr(il, "get_loader", boom)
+        messages: list[str] = []
+        sink = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+        try:
+            out = _load_sector_map()
+        finally:
+            logger.remove(sink)
+        assert out.is_empty() and out.columns == ["symbol", "market", "sector"]
+        assert any("InstrumentLoader unreadable" in m for m in messages)
 
 
 class TestSectorBreadth:
@@ -311,7 +335,6 @@ class TestBreadthDivergenceIntegration:
     def _write_full_fixture(self, tmp_path, monkeypatch, mtf_rows=None):
         monkeypatch.setattr(sa_mod, "GOLD_SIGNALS_PATH", tmp_path / "signals")
         monkeypatch.setattr(sa_mod, "GOLD_MTF_PATH", tmp_path / "mtf")
-        monkeypatch.setattr(sa_mod, "GOLD_SECTOR_PATH", tmp_path / "sector.parquet")
         monkeypatch.setattr(sa_mod, "GOLD_SIGNAL_AGG_PATH", tmp_path / "out")
         for tf in TIMEFRAMES:
             _write_tf_fixture(tmp_path / "signals", tf, [_base_row("AAA"), _base_row("BBB")])
@@ -355,7 +378,6 @@ class TestRunEntryPoint:
         monkeypatch.setattr(ProgressCheckpoint, "DB_PATH", tmp_path / "progress.db")
         monkeypatch.setattr(sa_mod, "GOLD_SIGNALS_PATH", tmp_path / "signals")
         monkeypatch.setattr(sa_mod, "GOLD_MTF_PATH", tmp_path / "mtf")
-        monkeypatch.setattr(sa_mod, "GOLD_SECTOR_PATH", tmp_path / "sector.parquet")
         monkeypatch.setattr(sa_mod, "GOLD_SIGNAL_AGG_PATH", tmp_path / "out")
         for tf in TIMEFRAMES:
             _write_tf_fixture(tmp_path / "signals", tf, [_base_row("AAA")])

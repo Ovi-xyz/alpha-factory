@@ -28,6 +28,16 @@ Signal Quality (grade D removed — every symbol now falls into A/B/C):
   B: |score| == 3   (good alignment)
   C: |score| <= 2   (weak — catch-all, was the "D: skip" bucket pre-fix)
 
+REGIME-FREE BY CONSTRUCTION (ADR-055 v2, GMI-HMM2-CUT-001): this module belongs to the gold
+technical engine (gold_signals, gold_mtf, signal_aggregation), one of three
+independent intelligence domains. It reads no regime store of any kind. The columns
+`regime_compatible` and `active_regime` (derived from the retired rule-based macro_regime.py
+store) are no longer produced; regime conditioning of a setup is done where the domains meet
+(decision_xgboost, ADR-054), not here. Historical mtf_alignment_{date}.parquet files written
+before the cutover still carry those two columns: every multi-file reader must therefore use
+union_by_name=true (src/gold/views.py, src/backtest/pit_data.py) — a plain glob over old+new
+files fails with a schema mismatch (verified empirically on DuckDB 1.5).
+
 Output: data/gold/mtf/mtf_alignment_{date}.parquet
 """
 
@@ -45,20 +55,6 @@ from src.utils.progress_checkpoint import ProgressCheckpoint
 
 GOLD_SIGNALS_PATH = Path("data/gold/signals")
 GOLD_MTF_PATH     = Path("data/gold/mtf")
-# FIX GLD-MTF-COV-01: promoted from a string literal inline in
-# _apply_regime_compatible() to a module-level constant, matching the
-# GOLD_SIGNALS_PATH / GOLD_MTF_PATH pattern above and macro_regime.py's own
-# REGIME_STORE_PATH. Same default value — pure hardcode-avoidance/
-# testability fix, no behavior change. Before this fix the path could not
-# be monkeypatched in tests, so _apply_regime_compatible() was only ever
-# exercised via a hand-duplicated copy of its logic in test code, never the
-# real function. NOTE (flagged, not fixed here — out of this file's scope):
-# this same literal is independently hardcoded inline (not as a module
-# constant) in sector_rotation.py and views.py, and as a display-only
-# literal in pipeline_dashboard.py; consolidating all Gold-layer output
-# paths behind one shared constants module is a reasonable follow-up but is
-# a broader, separately-scoped change.
-REGIME_STORE_PATH = Path("data/gold/macro/regime_store.parquet")
 # FIX ADR-046 Path C: 5m/15m removed — they are never fetched into Bronze
 # under Path C (only 1H was wired up; see ADR-045/046) and would otherwise
 # sit here as permanent always-0 padding forever, which is precisely the
@@ -241,58 +237,11 @@ def _compute_mtf_alignment(run_date: date) -> pl.DataFrame:
                     "last_close", "atr", "reward_risk_ratio"]:
             pivot = pivot.with_columns(pl.lit(None).cast(pl.Float64).alias(col))
 
-    # regime_compatible: join with regime_store if available
-    pivot = _apply_regime_compatible(pivot, run_date)
-
     pivot = pivot.with_columns([
         pl.lit(str(run_date)).alias("date"),
     ])
 
     return pivot
-
-
-def _apply_regime_compatible(df: pl.DataFrame, run_date: date) -> pl.DataFrame:
-    """
-    Set regime_compatible = True for symbols whose mtf_score direction
-    matches the current macro regime bias.
-
-    RISK_ON  → long bias (positive score) = compatible
-    RISK_OFF → short/defensive bias (negative score) = compatible
-    Other    → all symbols compatible (regime-agnostic)
-    """
-    regime = "NEUTRAL"
-
-    try:
-        import duckdb
-        con = duckdb.connect()
-        # FIX GLD-003: $name parameterized query — f-string SQL dilarang GD §17.7
-        result = con.execute(
-            """
-            SELECT regime
-            FROM read_parquet($path)
-            WHERE CAST(date AS DATE) <= $run_date
-            ORDER BY date DESC
-            LIMIT 1
-            """,
-            {"path": str(REGIME_STORE_PATH), "run_date": run_date},
-        ).fetchone()
-        if result:
-            regime = result[0]
-    except Exception:
-        pass   # No regime store yet — default all compatible
-
-    # Apply compatibility filter
-    if regime == "RISK_ON":
-        compatible_expr = pl.col("mtf_score") > 0
-    elif regime == "RISK_OFF":
-        compatible_expr = pl.col("mtf_score") < 0
-    else:
-        compatible_expr = pl.lit(True)   # All compatible in other regimes
-
-    return df.with_columns([
-        compatible_expr.alias("regime_compatible"),
-        pl.lit(regime).alias("active_regime"),
-    ])
 
 
 def get_mtf_summary(run_date: date) -> dict:

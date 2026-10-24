@@ -83,6 +83,22 @@ def e2e_workspace(tmp_path_factory):
 
 # ── E2E Tests ─────────────────────────────────────────────────────────────────
 
+def _ctx_frames(days):
+    import polars as pl
+    macro = pl.DataFrame({
+        "date": days, "macro_label": ["expansion"] * len(days),
+        "macro_activity": [0.3] * len(days), "macro_momentum": [0.0] * len(days),
+        "in_sample": [False] * len(days), "model_config_fingerprint": ["fp"] * len(days),
+    })
+    market = pl.DataFrame({
+        "date": days, "market_label": ["risk_on"] * len(days),
+        "market_probability": [0.8] * len(days), "market_score": [0.5] * len(days),
+        "in_sample": [False] * len(days), "n_features_observed": [10] * len(days),
+        "model_config_fingerprint": ["fp"] * len(days),
+    })
+    return macro, market
+
+
 class TestEndToEndSmoke:
 
     # ── Layer 1: Bronze ───────────────────────────────────────────────────────
@@ -241,35 +257,35 @@ class TestEndToEndSmoke:
         assert (result["rsi_14"].drop_nulls() >= 0).all()
         assert (result["rsi_14"].drop_nulls() <= 100).all()
 
-    def test_macro_regime_produces_valid_output(self):
-        """MacroRegimeDetector returns valid regime record."""
-        from src.gold.macro_regime import MacroRegimeDetector
-        detector = MacroRegimeDetector()
+    def test_context_regime_produces_valid_output(self):
+        """The dual-HMM context regime join returns valid labels (ADR-055 v2: replaces the
+        rule-based MacroRegimeDetector smoke test)."""
+        from datetime import date, timedelta
+        from src.gold.hmm.context_regime import COLUMNS, build
 
-        # Test with neutral indicators (no FRED data needed)
-        indicators = {"vix": 22.0, "yield_spread": 0.4, "cpi": 3.5, "gdp": 2.5}
-        regime, scores, confidence = detector._classify(indicators)
+        days = [date(2026, 10, 12) + timedelta(days=i) for i in range(5)]
+        macro, market = _ctx_frames(days)
+        out = build(macro, market, days[-1])
 
-        assert regime in {
-            "RISK_ON", "RISK_OFF", "STAGFLATION", "REFLATION", "DISINFLATION"
-        }
-        assert 0.0 <= confidence <= 1.0
-        assert "composite" in scores
+        assert out.columns == COLUMNS
+        assert set(out["macro_label"]) <= {"expansion", "slowdown", "recession", "recovery"}
+        assert set(out["market_label"]) <= {"risk_off", "mixed", "risk_on"}
+        assert out["context_label"].to_list() == ["expansion/risk_on"] * 5
+        assert not any(out["context_transition"].to_list())
 
-    def test_sector_rotation_covers_all_symbols(self, e2e_workspace):
-        """REGIME_SECTOR_WEIGHTS covers all sectors present in instrument loader."""
-        from src.gold.sector_rotation import REGIME_SECTOR_WEIGHTS
+    def test_signal_aggregation_sector_map_covers_all_symbols(self, e2e_workspace):
+        """signal_aggregation's registry-direct sector map has a sector for every instrument and
+        carries every sector present in the instrument loader (ADR-055 v2: replaces the
+        REGIME_SECTOR_WEIGHTS coverage check — gold_sector is archived)."""
+        from src.gold.signal_aggregation import _load_sector_map
         from src.config.instrument_loader import get_loader
 
-        loader  = get_loader()
-        sectors = set(loader.sectors())
+        loader = get_loader()
+        df     = _load_sector_map()
 
-        for regime, weights in REGIME_SECTOR_WEIGHTS.items():
-            uncovered = sectors - set(weights.keys())
-            # All sectors in instrument loader should have a weight
-            assert not uncovered, (
-                f"Regime {regime} missing weights for sectors: {uncovered}"
-            )
+        assert set(df["symbol"]) == {i.symbol for i in loader.all_symbols()}
+        uncovered = set(loader.sectors()) - set(df["sector"])
+        assert not uncovered, f"sector map missing sectors: {uncovered}"
 
     # ── Schema Integrity ──────────────────────────────────────────────────────
 

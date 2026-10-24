@@ -79,47 +79,22 @@ class TestGLD001BEANIPAFilterIntegration:
 # GLD-002: DXY score hardcoded
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestGLD002DXYScoreIntegration:
-    """GLD-002 integration: _classify() menggunakan DXY dari indicators dict."""
+class TestGLD002RetiredWithMacroRegime:
+    """GLD-002 (hardcoded DXY score in the rule-based classifier) was fixed and tested in
+    macro_regime.py. ADR-055 v2 archived that module, so the finding is RETIRED, not lost: the
+    fix and its tests stay recoverable in the archive and nothing can import the module."""
 
-    def _classify(self, indicators: dict) -> dict:
-        """Wrap MacroRegimeDetector._classify() into a flat dict."""
-        from src.gold.macro_regime import MacroRegimeDetector
-        det = MacroRegimeDetector()
-        regime, scores, confidence = det._classify(indicators)
-        return {"regime": regime, "confidence": confidence, **scores}
+    ARCHIVE = pathlib.Path("archive/macro_regime_cutover_2026_10")
 
-    def test_dxy_key_read_from_indicators(self):
-        """indicators dict dengan key 'dxy' harus digunakan di _classify()."""
-        base = {"vix": 20.0, "yield_spread": 0.5, "cpi": 2.5, "gdp": 2.0}
-        result_weak   = self._classify({**base, "dxy": 90.0})
-        result_strong = self._classify({**base, "dxy": 115.0})
-        assert result_weak.get("dxy", 0) != result_strong.get("dxy", 0.5), (
-            "GLD-002: dxy_score harus berbeda untuk DXY=90 vs DXY=115"
-        )
+    def test_module_is_archived_not_importable(self):
+        assert not pathlib.Path("src/gold/macro_regime.py").exists()
+        assert (self.ARCHIVE / "src/gold/macro_regime.py").exists()
+        with pytest.raises(ModuleNotFoundError):
+            __import__("src.gold.macro_regime")
 
-    def test_no_hardcoded_dxy_05_in_source(self):
-        """Verifikasi source code macro_regime.py tidak mengandung 'dxy': 0.5 hardcode."""
-        import pathlib, re
-        regime_path = pathlib.Path("src/gold/macro_regime.py")
-        if not regime_path.exists():
-            pytest.skip("macro_regime.py tidak ditemukan")
-        src = regime_path.read_text()
-        hardcode_pattern = re.compile(
-            r"""['"]\s*dxy\s*['"]\s*:\s*0\.5\s*,?\s*#\s*Neutral""", re.IGNORECASE
-        )
-        assert not hardcode_pattern.search(src), (
-            "GLD-002 REGRESSION: 'dxy': 0.5 hardcode masih ada di macro_regime.py"
-        )
-
-    def test_dxy_score_in_classify_output(self):
-        """_classify() output harus menyertakan 'dxy' key."""
-        from src.gold.macro_regime import MacroRegimeDetector
-        det = MacroRegimeDetector()
-        _, scores, _ = det._classify({
-            "vix": 20.0, "yield_spread": 0.5, "cpi": 2.5, "gdp": 2.0, "dxy": 100.0
-        })
-        assert "dxy" in scores
+    def test_gld002_tests_are_preserved_in_the_archive(self):
+        assert (self.ARCHIVE / "tests/unit/test_macro_regime_gld002.py").exists()
+        assert (self.ARCHIVE / "tests/unit/test_macro_regime.py").exists()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -157,7 +132,8 @@ class TestGLD003NoFStringSQLIntegration:
         # correlation_matrix.py retired (FIX GMI-CORR-RETIRE-01, RISK-31,
         # 20 Sep 2026) — archived to archive/gold_correlation_retirement_2026_09/.
         # hmm_regime.py retired (ADR-051) — archived to archive/hmm_regime_orphan_2026_09/.
-        "src/gold/macro_regime.py",
+        # macro_regime.py retired (ADR-055 v2) — archived to archive/macro_regime_cutover_2026_10/.
+        "src/gold/hmm/context_regime.py",
     ]
 
     @pytest.mark.parametrize("gold_file", GOLD_FILES)
@@ -180,13 +156,12 @@ class TestGLD004AtomicWriteIntegration:
     """
 
     GOLD_WRITE_FILES = [
-        "src/gold/macro_regime.py",
         "src/gold/technical_signals.py",
         "src/gold/mtf_alignment.py",
         "src/gold/screener.py",
         # correlation_matrix.py retired (FIX GMI-CORR-RETIRE-01, RISK-31,
         # 20 Sep 2026) — archived to archive/gold_correlation_retirement_2026_09/.
-        "src/gold/sector_rotation.py",
+        "src/gold/hmm/context_regime.py",   # sector_rotation.py archived (ADR-055 v2)
     ]
 
     @pytest.mark.parametrize("gold_file", GOLD_WRITE_FILES)
@@ -335,7 +310,8 @@ class TestGLD006CIGateIntegration:
         Meta-test: verifikasi semua 6 finding IDs memiliki test file yang sesuai.
         Mapping finding → test file:
           GLD-001 → test_bea_ingester_gld001.py
-          GLD-002 → test_macro_regime_gld002.py
+          GLD-002 → test_macro_regime_gld002.py (archived with macro_regime.py, ADR-055 v2 —
+                    asserted present under archive/macro_regime_cutover_2026_10/)
           GLD-003 → test_fstring_sql_absence.py
           GLD-004 → test_atomic_io.py
           GLD-005 → test_screener_gld005.py
@@ -343,13 +319,16 @@ class TestGLD006CIGateIntegration:
         """
         EXPECTED_FILES = {
             "test_bea_ingester_gld001.py",
-            "test_macro_regime_gld002.py",
             "test_fstring_sql_absence.py",
             "test_atomic_io.py",
             "test_screener_gld005.py",
             "test_ci_gate_gld006.py",
         }
         existing_names = {f.name for f in pathlib.Path("tests").rglob("*.py")}
+        existing_names.add("test_macro_regime_gld002.py") if pathlib.Path(
+            "archive/macro_regime_cutover_2026_10/tests/unit/test_macro_regime_gld002.py"
+        ).exists() else None   # GLD-002: retired with macro_regime.py, preserved in the archive
+        EXPECTED_FILES = EXPECTED_FILES | {"test_macro_regime_gld002.py"}
         missing = EXPECTED_FILES - existing_names
         assert not missing, (
             f"Missing test files for audit findings: {missing}"

@@ -21,8 +21,6 @@ Cron schedule (WIB — Asia/Jakarta):
     03:55  silver_active_symbols (5m)
     04:15  gold_signals          (90m)
     05:45  gold_mtf              (30m)
-    06:00  gold_regime           (5m)
-    06:05  gold_sector           (2m)
     06:15  gold_screener         (5m)
     07:30  health_report         (2m)
 
@@ -125,8 +123,6 @@ def create_scheduler():
         ("silver_active_symbols", 3, 55),
         ("gold_signals",         4, 15),
         ("gold_mtf",             5, 45),
-        ("gold_regime",          6,  0),
-        ("gold_sector",          6,  5),
         ("gold_screener",        6, 15),
         ("health_report",        7, 30),
     ]

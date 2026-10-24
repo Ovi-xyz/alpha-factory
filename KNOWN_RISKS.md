@@ -3733,6 +3733,18 @@ rewritten, independence tests extended. Mutation: 25 / 25 killed (one survivor
 on the first pass — the `n == short_history_min_obs` boundary — closed with a
 new test). Full detail: CHANGELOG.md v1.21.0, dev-log/2026-10-14-adr051-engine-completion.md.
 
+### Update 20 Oct 2026 (v1.22.0, ADR-055 v2) — burn-in ended by decision
+
+`context_regime` is now the platform's regime: `macro_regime.py` and `gold_sector` are archived
+and `gold_screener` joins `context_regime` as-of (RISK-38). What this changes for the items above:
+item 6 (thin `context_regime`) — the per-domain states are NOT needed any more (the legacy
+projection that wanted them was dropped); `context_transition` / `context_transition_alert`
+were added instead. Item 7 (no per-domain Gatekeeper scope) is unchanged and now matters more:
+the HMM jobs are in the production daily chain. First-pass calibration (market weights, the
+`macro_label` rule, `MARKET_TOLERANCE_DAYS` = 5, the screener's `CONTEXT_REGIME_TOLERANCE_DAYS`
+= 5) now faces consumers. The live first-run checks (ADR-055 E7: feature weights against known
+macro dates, transition dates against known events) were NOT performed by the cutover work.
+
 ## RISK-37 (NEW): Silver 1D timestamps are local-exchange midnight (not UTC); DuckDB `CAST(timestamp AS DATE)` depended on the host timezone — PARTLY RESOLVED (FIX TS-DATE-01); CrossAssetEngine day alignment OPEN (decision D1)
 
 **Status:** 🟡 **PARTLY RESOLVED (16 Oct 2026, no version bump; `pyproject.toml` stays 1.21.0).**
@@ -3809,9 +3821,88 @@ Asia-Pacific series. The forecast log's all-member-NaN counts per category
 (`context_dollar` 36, `context_volatility` 35, …) are the D1 calendar mixing already
 described above, not a new defect.
 
+
+## RISK-38 (NEW): ADR-055 v2 cutover — the rule-based regime and the sector job were retired without a burn-in comparison, and two retired behaviours have no successor yet
+
+**Status:** 🟡 **OPEN (accepted, 20 Oct 2026).** v1.22.0.
+
+**Reference:** ADR-055 v2, ADR-051 (+ A2 §A), RISK-36, `archive/macro_regime_cutover_2026_10/README.md`.
+
+What was decided (Ovi, 20 Oct 2026): cutover starts now, E1 not required, `macro_regime.py`
+fully replaced, `gold_sector` archived with it (regime-free it had nothing left to do), the
+technical engine is (gold_signals, gold_mtf, signal_aggregation), and `gold_screener` is the
+designated interface of a Trading Engine that does not exist yet (the Gold layer is still
+unstable and unfinished). What that accepts:
+
+1. **No out-of-sample validation of the new regime before it became the production source.**
+   The legacy store was judged inaccurate, so agreement with it was dropped as a yardstick
+   (ADR-055 v1 F5/E3–E5) — but nothing replaced it. The HMM history is mostly in-sample; only
+   rows since the first live run (16 Oct 2026) are out-of-sample. The screener exposes
+   `regime_in_sample`; anything judging the regime must filter on it.
+2. **The watchlist schema is provisional.** Removed: `regime`, `regime_composite`,
+   `regime_confidence`, `regime_transition`, `transition_alert`, `sector_weight_adj`, `sector`. Added:
+   `context_date`, `context_age_days`, `macro_label`, `macro_activity`, `macro_momentum`,
+   `market_label`, `market_probability`, `market_score`, `market_age_days`, `context_label`,
+   `context_transition`, `context_transition_alert`, `regime_in_sample`. No Trading Engine
+   exists, so nothing outside the repo breaks and nobody needs notifying; the contract is
+   formalised when the Gold layer is finished (ADR-054). GD §0.4's text (regime_store, sector
+   weights, MTF as interface outputs) is stale and needs revising then. `confidence` and
+   `composite_score` have no HMM analogue and are not synthesised.
+3. **Sector weights, the sector concentration guard and the watchlist's `sector` column are
+   gone** (GD §15.1: sector weight <= 0.5 excluded; column dropped by Ovi, 21 Oct 2026), with
+   no successor until decision_xgboost (ADR-054). The interim watchlist makes no sector
+   judgement and carries no sector label: sectors the old table down-weighted in some regimes
+   (e.g. Energy) pass the filter. `signal_aggregation` still groups its sector-breadth columns
+   by sector, read straight from the registry (`inst.sector or inst.market`, the rule the
+   archived job published); an unreadable registry degrades to empty with a WARNING.
+4. **Discontinuity.** `regime_store.parquet` stops at its last date; it is not backfilled and no
+   consumer reads it. Pre-cutover trading dates have a regime only through `context_regime`'s
+   in-sample history. `PITDataLoader.get_regime` no longer exists.
+5. **Mixed-schema files on disk (the SIL-BRZ-SCHEMA-01 class).** `mtf_alignment_{date}.parquet`
+   and `watchlist_{date}.parquet` written before the cutover have different columns than those
+   after it. The readers known to glob them (`v_mtf_alignment`, `v_screener`,
+   `v_watchlist_latest`, `PITDataLoader.get_mtf_score`) use `union_by_name=true`, pinned by tests;
+   a NEW reader of those globs must do the same. `get_mtf_score` swallows exceptions, so a miss
+   there is silent.
+6. **Cross-asset tag vocabulary changed** to RISK_ON/RISK_OFF/MIXED/UNKNOWN. Weekly outputs are
+   overwritten so no file mixes vocabularies; dated history snapshots from before the cutover keep
+   the 5-state tags. No `src` consumer partitions on a tag (pinned).
+7. **`gold_screener`'s HMM source is soft.** If `context_regime.parquet` is missing, stale
+   (> 5 days) or lacks a column, the regime columns are NULL (stale/schema cases log a WARNING)
+   and the watchlist is still written. Right after upgrading, the existing store lacks
+   `context_transition*` until `gold_context_regime` is re-run once; the daily sequence does that
+   before the screener.
+8. **`gold_sector` archived, not rewritten (decided).** A regime-free `gold_sector` was built and
+   rejected: a job whose only product is a static projection of config is not a pipeline stage.
+   Reversal cost: restore the archived module and weight table and re-key it — which has no
+   evidence behind ~240 new weights (ADR-055 v1 F6) and needs an independence-test exception if
+   the technical engine is to read the HMM store.
+9. **ADR-055 v1 listed a burn-in instrument as built** (`scripts/compare_regimes.py`,
+   `config/hmm_legacy_mapping.yaml`); neither exists in the live repo or on GitHub `main`. Not
+   rebuilt — no longer needed.
+10. **Inert leftovers:** `data/gold/macro/regime_store.parquet`,
+    `data/gold/sector/sector_regime_weights.parquet`, and `gold_regime_*.done` /
+    `gold_sector_*.done` sentinels remain on disk if not moved; nothing reads them. Moving the
+    two parquet files to `data/archive/regime_store_legacy_2026_10/` makes any missed reader fail
+    loudly instead of silently reading a frozen file.
+11. **Not done in this release:** ADR-052..054 (labels, specialists, decision model), the
+    per-domain Gatekeeper scope, the E7 manual review, and re-pointing `scripts/preflight/
+    check_fred_series.py`'s `regime_input` flags (kept as the core daily FRED regime inputs).
+
+### Verification
+
+2504 → 2595 collected. In the sandbox 3 environmental failures (item 9 of RISK-36), none
+related. Structural pins: `tests/integration/test_regime_cutover_adr055.py` (job graph, schedule,
+source literals, archive), plus the extended HMM independence test. Mutants applied to the new
+tests: all killed.
+
 ---
 
-*Last updated: unreleased (18 Oct 2026, no version bump) — FIX SIL-BRZ-SCHEMA-01 second finding:
+*Last updated: v1.22.0 (20 Oct 2026) — ADR-055 v2: macro_regime.py and gold_sector replaced/
+archived, dual-HMM engine is the platform's regime, Gold layer organised as four engines,
+gold_screener = designated future Trading Engine interface (RISK-38 NEW, RISK-36 update).
+2504 -> 2595 collected.
+Prior entry: unreleased (18 Oct 2026, no version bump) — FIX SIL-BRZ-SCHEMA-01 second finding:
 LHX 1M (polygon naive-UTC vs yfinance tz-aware) fixed, CNH closed on M1 evidence, correlation /
 lead-lag re-run pending (D2, D3 open). 2499 -> 2504 collected.
 Prior entry (17 Oct 2026, no version bump) — FIX SIL-BRZ-SCHEMA-01: CNH

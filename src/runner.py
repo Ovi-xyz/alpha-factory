@@ -6,10 +6,10 @@ Usage:
     python runner.py --job bronze_ohlcv_daily
     python runner.py --job all
     python runner.py --job silver_ohlcv --force
-    python runner.py --job gold_regime --date 2026-05-13
+    python runner.py --job gold_context_regime --date 2026-05-13
     python runner.py --list
     python runner.py --status
-    python runner.py --reset gold_regime
+    python runner.py --reset gold_context_regime
     python runner.py --reset-all
 
 G5: schedule guard via _passes_schedule() — beberapa job hanya berjalan pada
@@ -228,7 +228,7 @@ Examples:
   python runner.py --status
   python runner.py --dashboard
   python runner.py --views
-  python runner.py --reset gold_regime
+  python runner.py --reset gold_context_regime
   python runner.py --reset-all
         """,
     )
