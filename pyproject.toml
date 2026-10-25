@@ -1,6 +1,12 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.22.0"
+version = "1.23.0"
+# ADR-052 (GMI-TB-001, 25 Oct 2026): triple-barrier labeling for decision_xgboost (ADR-054) --
+# src/backtest/triple_barrier.py (LookaheadTripleBarrierLabeler, offline label construction
+# only, lookahead by design, pinned out of every live path) + scripts/label_triple_barrier.py
+# (--from-mtf / --grid / --grid-all calibration driver). New capability, fully additive:
+# no job, no Gold/Silver/Bronze change, no Interface Contract change. See CHANGELOG.md
+# v1.23.0, KNOWN_RISKS.md RISK-39.
 # ADR-055 v2 (GMI-HMM2-CUT-001, 20 Oct 2026): macro_regime.py and gold_sector archived; the
 # dual-HMM regime engine is the platform's regime; gold_screener is the designated (future)
 # Trading Engine interface. Also releases the two 1.21.0 "Unreleased" fixes (SIL-BRZ-SCHEMA-01, TS-DATE-01).

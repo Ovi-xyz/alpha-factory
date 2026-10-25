@@ -1,5 +1,73 @@
 # CHANGELOG — Data Platform
 
+## v1.23.0 — ADR-052: pelabelan triple-barrier untuk decision_xgboost — `src/backtest/triple_barrier.py` dan `scripts/label_triple_barrier.py` (GMI-TB-001, Oktober 2026)
+
+Modul pembuat label *forward-looking* untuk ADR-054, murni offline. Tidak ada job, tidak ada
+entri `job_registry`, tidak ada perubahan pada Bronze/Silver/Gold, `PITDataLoader`, atau
+Interface Contract — kenaikan MINOR karena kapabilitas baru yang sepenuhnya aditif. Urutan
+fase: adr-050 → 051 → 055 → **052** → 053 → 054.
+
+**Keputusan (diambil saat implementasi; yang diwarisi dari ADR tetap seperti tertulis).**
+- **Kunci input adalah `decision_date`, bukan `entry_date` (Amendment A1).** `PITDataLoader`
+  hanya menampilkan bar dengan tanggal < T untuk keputusan di T, dan baris Gold (mtf_alignment dst.)
+  distempel dengan tanggal *run* T yang sama. Memindai `> run_date` akan melewatkan sesi pertama
+  yang bisa diperdagangkan (bar T) — selisih satu bar antara fitur dan label. Modul menurunkan
+  sendiri *anchor bar* (bar terakhir dengan tanggal < T, persis yang bisa dilihat model) dan memindai
+  bar dengan tanggal > anchor, sehingga `entry_date` di teks ADR = anchor. `< T` (fitur) dan
+  `> anchor` (label) membagi waktu di T tanpa tumpang-tindih dan tanpa celah. Menyuplai kolom
+  `entry_date` ditolak dengan pesan yang menjelaskan hal ini.
+- **Barrier dibangun bersama, bukan tiga rentang bebas.** `s = clip(stop_vol_mult·vol, 50, 100)`,
+  `R = clip(profit_vol_mult·vol/s, 2, 3)`, `p = R·s`. Karena s∈[50,100] dan R∈[2,3], p∈[100,300]
+  terjamin oleh konstruksi — pasangan 100/100 (R:R 1:1) tidak mungkin muncul. `BarrierConfig`
+  menolak (ValueError) kombinasi band yang tidak bisa menjamin itu. `vol` = rata-rata true range /
+  close sebelumnya, 14 bar, berakhir di anchor (tidak memakai apa pun setelahnya).
+- **Tiga pilihan yang dibiarkan terbuka ADR kini parameter eksplisit**, dicatat di kolom
+  `label_spec` pada setiap baris: time barrier = `loss` (`exclude` tersedia — membuang hasil
+  non-decisif menggelembungkan hit rate yang diukur gate ≥ 0,51); entry = `next_open` (satu-satunya
+  entry yang realistis bagi pipeline harian; `signal_close` tersedia, seperti `BacktestEngine`);
+  horizon 2–7 hari, default 7. Sentuhan di bar 1 adalah sentuhan nyata; `bars_held` disimpan.
+- **Aturan sentuh pada bar harian.** Bar yang *dibuka* melewati barrier menyentuhnya di open
+  (fill = open, jadi stop yang gap merealisasikan lebih dari s) dan itu yang pertama. Sentuhan ganda
+  dalam satu bar tanpa gap tidak bisa diurutkan: ditandai `same_bar_ambiguous`, diputus
+  `same_bar_policy` (default `stop_first`, konservatif).
+- **Bar dinilai dari strukturnya, bukan `is_clean`.** `is_clean=False` juga menandai gerakan nyata
+  |z|>4 — bar yang paling mungkin menyentuh barrier; membuangnya membiaskan label. Bar dengan
+  open/close di luar [low, high] (umum di forex) diperbaiki ke rentang pembungkusnya, bukan dibuang;
+  bar tak valid secara struktur (non-finit, ≤ 0, high < low) di dalam horizon membuat baris dilewati.
+- **Hasil per baris**: `outcome` (profit/stop/time), `label`/`label_binary`, `bars_held`,
+  `label_end_date` (untuk purge/embargo di ADR-054), `exit_price`, `realized_bps`, flag gap dan
+  ambiguitas, serta `anchor_date`/`first_bar_date`. Baris yang tidak dilabeli tidak hilang diam-diam:
+  semuanya masuk `skipped` dengan satu alasan (horizon belum lengkap, anchor basi > 7 hari, bar tak
+  valid, pasar ambigu seperti `CL`, simbol Layer 2, dst.).
+- **Default pengali 0,375 / 0,9375** (rasio 2,5 = R:R tengah), kalibrasi tahap pertama dari data
+  live — lihat temuan.
+
+**Temuan empiris selama implementasi (Silver live: AAPL, BBCA; 2023-10 s/d 2026-10; 2.954 label,
+dua arah, tanpa seleksi; 30 baris dilewati: 24 horizon belum lengkap, 6 anchor basi).**
+- True range harian median ≈ 185 bps (AAPL p10 ≈ 113, p90 ≈ 351; BBCA median ≈ 183) — band stop
+  50–100 bps sebesar atau di bawah satu hari rentang. Pada pengali awal 0,5/1,25 stop menempel di plafon 100 bps
+  pada 53% hari (penskalaan volatilitas tidak membawa informasi); pada 0,375/0,9375: lantai 4,2%,
+  bebas 78,3%, plafon 17,5%.
+- Base rate tanpa seleksi 27,5% (referensi zero-drift 28,2%); 72% entry kena stop, rata-rata ditahan
+  1,7 bar. Gate ≥ 0,51 di ADR-054 karenanya adalah ujian presisi *trade yang dipicu*, bukan base rate.
+  Ambiguitas same-bar 2,4%, gap-through 9,2%, time-exit 0,6%. Base rate long vs short berbeda
+  (gabungan 29,2% vs 25,7%; AAPL saja 31,4% vs 20,7%, karena drift) — jangan digabung begitu saja.
+
+**Pengujian.** `tests/unit/test_triple_barrier.py` (94), `tests/unit/test_label_triple_barrier_script.py`
+(12), `tests/integration/test_triple_barrier_isolation_adr052.py` (9). Pembanding berbasis loop independen
+dibandingkan dengan resolver vektor pada 3×600 jendela acak; 18 mutan pada labeler dan 4 pada pin isolasi
+semuanya terbunuh (dua mutan sempat selamat — presedensi gap dan klem R:R — dan menghasilkan tes tambahan).
+Pin isolasi: tidak ada modul `src/` yang meng-import labeler, `PITDataLoader` tidak menyebutnya, tidak ada
+job/jadwal, labeler tidak meng-import `pit_data`/duckdb dan tidak menulis apa pun. Tes ADR-055 yang
+diparametrisasi atas file `src/` kini ikut mencakup modul baru (+1 ID). 2595 → 2711 collected;
+2709 lulus, 2 gagal (biner `poetry` tidak ada di sandbox, identik di `main` murni).
+
+**Sengaja tidak dilakukan.** Penyelesaian same-bar dengan bar 1H (riwayat 1H hanya ~2 tahun; tindak
+lanjut bila audit grid menunjukkan ambiguitas tinggi di suatu pasar). Purge/embargo dan bobot
+keunikan (milik ADR-054; modul hanya menyediakan `label_end_date`). Biaya/slippage (GD §0.3).
+Penyelarasan `BacktestEngine` (entry di close sinyal) dengan `next_open`. Inspeksi manual terhadap grafik
+harga mentah dan audit grid seluruh universe — keduanya langkah operator, lihat RISK-39.
+
 ## v1.22.0 — ADR-055 v2: cutover total ke Dual-HMM Regime Engine — `macro_regime.py` dan `gold_sector` diarsipkan, Gold layer menjadi empat engine, `gold_screener` menjadi antarmuka Trading Engine yang dirancang (GMI-HMM2-CUT-001, Oktober 2026)
 
 Versi ini juga merilis dua entri "Unreleased" di bawahnya (FIX SIL-BRZ-SCHEMA-01 dan

@@ -3898,7 +3898,91 @@ tests: all killed.
 
 ---
 
-*Last updated: v1.22.0 (20 Oct 2026) — ADR-055 v2: macro_regime.py and gold_sector replaced/
+## RISK-39 (NEW): ADR-052 triple-barrier labels — first-pass calibration from two live symbols, an uninformed base rate far below the 0.51 gate, and a manual-inspection gate still open
+
+**Status:** 🟡 **OPEN (accepted, 25 Oct 2026).** v1.23.0.
+
+**Reference:** ADR-052 (+ Amendment A1), ADR-054, `src/backtest/triple_barrier.py`,
+`scripts/label_triple_barrier.py`, RISK-28 (universe survivorship).
+
+`triple_barrier.py` is label construction only and reads bars AFTER the decision date by design;
+it is pinned out of every live path (`tests/integration/test_triple_barrier_isolation_adr052.py`).
+What shipping it accepts:
+
+1. **Calibration comes from two symbols.** `stop_vol_mult`/`profit_vol_mult` (0.375/0.9375, R:R
+   midpoint 2.5) were chosen so the typical Layer 1 equity lands inside the band rather than on its
+   edge (median true range ~185 bps x 0.375 ~ 69 bps), measured on live Silver AAPL and BBCA
+   (2023-10..2026-10, 2,954 unconditional labels, both directions). Same data:
+   0.5/1.25 → stop at the 100 bps ceiling on 53.0% of days (floor 0.1%, free 46.9%); 0.375/0.9375 →
+   floor 4.2%, free 78.3%, ceiling 17.5%; 0.30/0.75 → floor 20.9%, free 73.9%, ceiling 5.2%.
+   Forex, commodity and the rest of IDX/US were not examined; forex true range (tens of bps) is
+   likely floor-bound whatever the multiplier. **Action before ADR-054 trains:** on the M1, run
+   `python scripts/label_triple_barrier.py --grid-all --years 3 --step 5 --inspect 25` and review the
+   per-market clamp table. Changing the multipliers is configuration; `label_spec` is stamped on every
+   row so a dataset mixing specs is detectable.
+2. **The uninformed base rate is ~27%, not ~51%.** At the default, an entry with no selection wins
+   27.5% (zero-drift continuous-monitoring reference 28.2%); 72% stop out, mean 1.7 bars held,
+   time exits 0.6%.
+   Break-even at R:R 2.5 is 28.6%. ADR-054's >= 0.51 gate therefore measures the precision of
+   *fired* trades — it must be reported together with coverage (fraction of symbol-days fired) and
+   the base rate, never alone. Long and short base rates differ with drift (pooled 29.2% vs 25.7%;
+   AAPL alone 31.4% vs 20.7%): do not pool directions without checking.
+3. **The 50-100 bps stop band sits at or below one day's range for equities** (median daily true
+   range ~185 bps). Most stops resolve within 1-2 bars. This is inherent to the band ADR-052 states, not
+   a labeler defect; vol-scaling can only move the stop inside it.
+4. **Time-barrier exits are labeled `loss`** (stated choice; 0.6% of the unconditional sample).
+   `time_barrier_policy="exclude"` and the stored `realized_bps`/`bars_held` allow any alternative
+   without relabeling.
+5. **Same-bar double touches (2.4%) are decided `stop_first`** — daily bars cannot order them.
+   Resolution with 1H bars is not implemented (1H history is ~2 years); revisit if the grid audit shows
+   a high rate in some market. **Gap-through fills (9.2%) fill at the open**, so a gapped stop realises
+   more than `stop_bps`; the binary label is unaffected, `realized_bps` carries the truth.
+6. **Amendment A1 — the join key is `decision_date`.** Labels start at the first bar after the last
+   bar visible at that date; the ADR's `entry_date` is the anchor bar. An ADR-054 training join must
+   key labels on `decision_date` and never on `anchor_date`. Assumes the SOP morning run (pipeline run
+   before the session dated T). If a run happens after bar T has closed, bar T is excluded from features
+   by the PIT guard but included in the label horizon — safe against leakage, optimistic about the entry
+   actually achievable.
+7. **Overlapping horizons.** Consecutive decision dates' [decision_date, label_end_date] windows overlap,
+   so labels are serially correlated and the effective sample is far smaller than the row count. Purge/
+   embargo on `label_end_date` and uniqueness weighting belong to ADR-054; the module only supplies the
+   field.
+8. **Survivorship.** The labelable universe is the current registry (RISK-28 removed 36 dead symbols and
+   9 more as stopgap/insufficient-evidence), so labels cover survivors only and any hit rate computed from them is
+   optimistic.
+9. **`next_open` differs from `BacktestEngine`, which enters at the signal-bar close.** Not changed here;
+   ADR-054's out-of-sample evaluation and a BacktestEngine run on the same signals will not agree on entry
+   price.
+10. **Prices are Silver-adjusted** (`is_adjusted=True`), consistent with the signals; barrier geometry is in
+    bps of the adjusted series, so ex-dividend gaps are smoothed.
+11. **Skips are by design and reported:** `horizon_incomplete` (rows near the end of data are never
+    labeled with a partial horizon), `anchor_stale` (> 7 calendar days between the decision date and the
+    last bar — drops decision dates inside long exchange closures), `invalid_bar_in_horizon`,
+    `ambiguous_market` (`CL` exists in commodity and us_stocks; pass `market`), `not_layer1`.
+12. **ADR-052's own validation gate is still open: manual inspection of labeled trades against raw price
+    charts.** `--inspect N` writes N random trades with barrier prices and the forward bars to CSV for
+    exactly that. Not yet done; nothing should train on these labels first. The labeler was run end-to-end
+    only on AAPL and BBCA from a sandbox copy of two Silver files; it has not been run on the live
+    pipeline outputs.
+13. `src/backtest/*` is excluded from the coverage gate (`pyproject.toml`); the module is held to
+    mutation testing instead.
+
+### Verification
+
+2595 -> 2711 collected (115 new tests + 1 existing ADR-055 test parametrised over `src/` files, which now
+covers the new module). Sandbox with the poetry.lock versions (duckdb 1.5.4, polars 1.42.1): 2709 passed,
+2 failed (`test_check_poetry_env.py`, `poetry` binary absent from the sandbox — identical on pristine
+`main`). Mutants: 18 on the labeler (anchor side, gap precedence x4, ambiguity policy, R:R clamps x2, stop
+floor, vol lookahead, time-exit price, stop sign, `is_clean` filtering, tz conversion, horizon completeness,
+time policy, bar repair x2) and 4 on the isolation pin — all killed; two labeler mutants initially
+survived (gap precedence, R:R clamp masked by the profit-band clip) and produced additional tests.
+
+---
+
+*Last updated: v1.23.0 (25 Oct 2026) — ADR-052: triple-barrier labeling module + offline driver
+(offline label construction only, pinned out of every live path; Amendment A1: join key is
+decision_date), RISK-39 NEW. 2595 -> 2711 collected.
+Prior entry: v1.22.0 (20 Oct 2026) — ADR-055 v2: macro_regime.py and gold_sector replaced/
 archived, dual-HMM engine is the platform's regime, Gold layer organised as four engines,
 gold_screener = designated future Trading Engine interface (RISK-38 NEW, RISK-36 update).
 2504 -> 2595 collected.
