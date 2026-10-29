@@ -286,10 +286,9 @@ def _gold_cross_asset_correlation(run_date: date) -> None:
     """ADD GMI Wave 1 Cycle 4 — CrossAssetEngine's second module
     (Architecture v2.0 §6.2). FIX GMI-CORR-RETIRE-01 (RISK-31, 20 Sep
     2026): the pre-Cycle-4 gold_correlation job (Layer 1-only, no
-    Ledoit-Wolf) is retired — this job's own run() now also writes
-    gold_correlation's legacy consumer-facing output as a compatibility
-    bridge; see src/gold/cross_asset/correlation_module.py and
-    legacy_correlation_bridge.py module docstrings."""
+    Ledoit-Wolf) is retired; its consumers now read cross_asset_corr.parquet
+    directly (the compatibility bridge is archived, RISK-31 update 29 Oct
+    2026); see src/gold/cross_asset/correlation_module.py."""
     from src.gold.cross_asset.correlation_module import run as cross_corr_run
     cross_corr_run(run_date)
 
@@ -746,10 +745,10 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
     # kept out of git rather than under a tracked archive/ path).
     # gold_cross_asset_correlation below is its replacement: merged Layer
     # 1 + Layer 2 universe, Ledoit-Wolf shrinkage, scipy hierarchical
-    # clustering — and its own run() now also derives gold_correlation's
-    # legacy output shape as a compatibility bridge (see
-    # legacy_correlation_bridge.py), so screener.py and views.py's
-    # v_correlation needed zero changes.
+    # clustering. Its former consumers now read cross_asset_corr.parquet
+    # directly: the compatibility bridge that once derived gold_correlation's
+    # legacy output shape is archived (archive/legacy_correlation_bridge_2026_10/,
+    # RISK-31 update 29 Oct 2026) and v_correlation is removed.
     "gold_cross_asset_correlation": {
         "description": "Ledoit-Wolf correlation + clustering — merged Layer 1+2 universe",
         "fn":          _gold_cross_asset_correlation,

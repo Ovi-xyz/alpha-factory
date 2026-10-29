@@ -253,13 +253,14 @@ class TestViewsAcrossTheAdr055Cutover:
 
     def test_view_names(self):
         assert "v_context_regime" in VIEW_DEFINITIONS
-        for retired in ("v_macro_regime", "v_sector_weights", "v_sector_map"):
+        for retired in ("v_macro_regime", "v_sector_weights", "v_sector_map", "v_correlation"):
             assert retired not in VIEW_DEFINITIONS, retired
 
     def test_no_view_reads_a_retired_store(self):
         for name, sql in VIEW_DEFINITIONS.items():
             assert "regime_store" not in sql and "sector_regime_weights" not in sql, name
             assert "data/gold/sector" not in sql, name
+            assert "data/gold/correlation" not in sql, name   # legacy_correlation_bridge archived
 
     @pytest.mark.parametrize("name", ["v_mtf_alignment", "v_screener", "v_watchlist_latest"])
     def test_dated_file_globs_use_union_by_name(self, name):

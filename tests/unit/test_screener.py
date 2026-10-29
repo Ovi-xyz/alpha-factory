@@ -105,7 +105,7 @@ def _patch_all_optional_sources(tmp_path, monkeypatch):
     location that does not exist yet (has_* all False by default)."""
     monkeypatch.setattr(scr_mod, "GOLD_MTF_PATH", tmp_path / "mtf")
     monkeypatch.setattr(scr_mod, "GOLD_CONTEXT_REGIME_PATH", tmp_path / "hmm" / "context_regime.parquet")
-    monkeypatch.setattr(scr_mod, "GOLD_CORR_PATH", tmp_path / "corr.parquet")
+    monkeypatch.setattr(scr_mod, "CROSS_ASSET_CORR_PATH", tmp_path / "cross_asset" / "cross_asset_corr.parquet")
     monkeypatch.setattr(scr_mod, "SILVER_ACTIVE_SYMBOLS_ROOT", tmp_path / "active_symbols")
     monkeypatch.setattr(scr_mod, "GOLD_SCREENER_PATH", tmp_path / "screener")
     # ADD GMI Wave 1 Cycle 4 — CrossAssetEngine optional sources.
@@ -680,15 +680,33 @@ class TestSignalAggregationIntegration:
 
 # ── FIX GLD-SCR-003 regression (correlation cluster dedup) ──────────────────
 
+def _pairwise_corr(clusters: dict, path):
+    """Write a cross_asset_corr.parquet-shaped frame (upper triangle, one row per unordered
+    pair, cluster id of each side) for {symbol: cluster_id}, exactly as
+    CorrelationModule._to_long_format() lays it out."""
+    syms = list(clusters)
+    rows = [(syms[i], syms[j]) for i in range(len(syms)) for j in range(i + 1, len(syms))]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol_a": [a for a, _ in rows],
+        "symbol_b": [b for _, b in rows],
+        "correlation": [0.5] * len(rows),
+        "regime": ["mixed"] * len(rows),
+        "computation_date": ["2026-05-31"] * len(rows),
+        "cluster_id_a": [clusters[a] for a, _ in rows],
+        "cluster_id_b": [clusters[b] for _, b in rows],
+    }).write_parquet(path)
+    return path
+
+
 class TestClusterDeduplication:
-    """See FIX GLD-SCR-003 in the module docstring above."""
+    """See FIX GLD-SCR-003 in the module docstring above. Cluster source is
+    cross_asset_corr.parquet (pairwise), read directly — the legacy
+    correlation_clusters.parquet bridge is archived (RISK-31, 29 Oct 2026)."""
 
     def test_direct_call_enforces_max_per_cluster(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(scr_mod, "GOLD_CORR_PATH", tmp_path / "corr.parquet")
-        pl.DataFrame({
-            "symbol": ["A", "B", "C", "D", "E"],
-            "cluster_id": [1, 1, 1, 2, 2],
-        }).write_parquet(scr_mod.GOLD_CORR_PATH)
+        monkeypatch.setattr(scr_mod, "CROSS_ASSET_CORR_PATH", tmp_path / "cross_asset_corr.parquet")
+        _pairwise_corr({"A": 1, "B": 1, "C": 1, "D": 2, "E": 2}, scr_mod.CROSS_ASSET_CORR_PATH)
         # Pre-ordered exactly as build_watchlist's ORDER BY would deliver —
         # highest-priority candidate per cluster listed first.
         df = pl.DataFrame({"symbol": ["A", "B", "C", "D", "E"], "mtf_score": [7, 6, 5, 7, 6]})
@@ -702,8 +720,41 @@ class TestClusterDeduplication:
         assert set(counts) == {"A", "B", "D", "E"}   # C (3rd in its cluster) dropped
         assert "C" not in counts
 
+    def test_symbol_only_ever_in_symbol_b_is_still_clustered(self, tmp_path, monkeypatch):
+        """In the upper triangle the LAST symbol appears only as symbol_b. Reading
+        symbol_a alone would leave it cluster -1 (never deduped)."""
+        monkeypatch.setattr(scr_mod, "CROSS_ASSET_CORR_PATH", tmp_path / "cross_asset_corr.parquet")
+        _pairwise_corr({"A": 1, "B": 1, "C": 1}, scr_mod.CROSS_ASSET_CORR_PATH)
+        pairs = pl.read_parquet(scr_mod.CROSS_ASSET_CORR_PATH)
+        assert "C" not in pairs["symbol_a"].to_list()   # fixture premise: C is symbol_b only
+        df = pl.DataFrame({"symbol": ["A", "B", "C"], "mtf_score": [7, 6, 5]})
+        result = _deduplicate_by_cluster(df, date(2026, 6, 1), duckdb.connect())
+        assert result["symbol"].to_list() == ["A", "B"]
+
+    def test_conflicting_cluster_ids_never_fan_out_the_join(self, tmp_path, monkeypatch):
+        """Cardinality guard: one symbol carrying two cluster ids must not duplicate rows."""
+        monkeypatch.setattr(scr_mod, "CROSS_ASSET_CORR_PATH", tmp_path / "cross_asset_corr.parquet")
+        pl.DataFrame({
+            "symbol_a": ["A", "A"], "symbol_b": ["B", "C"],
+            "cluster_id_a": [1, 2], "cluster_id_b": [1, 3],
+        }).write_parquet(scr_mod.CROSS_ASSET_CORR_PATH)
+        df = pl.DataFrame({"symbol": ["A", "B", "C"], "mtf_score": [7, 6, 5]})
+        result = _deduplicate_by_cluster(df, date(2026, 6, 1), duckdb.connect())
+        assert result["symbol"].to_list().count("A") == 1
+        assert len(result) <= len(df)
+
+    def test_legacy_schema_file_leaves_candidates_untouched(self, tmp_path, monkeypatch):
+        """A file in the retired (symbol, cluster_id) shape is not this source's schema:
+        dedup degrades (no raise, no row loss) rather than mis-reading it."""
+        monkeypatch.setattr(scr_mod, "CROSS_ASSET_CORR_PATH", tmp_path / "cross_asset_corr.parquet")
+        pl.DataFrame({"symbol": ["A", "B", "C"], "cluster_id": [1, 1, 1]}).write_parquet(
+            scr_mod.CROSS_ASSET_CORR_PATH)
+        df = pl.DataFrame({"symbol": ["A", "B", "C"], "mtf_score": [7, 6, 5]})
+        result = _deduplicate_by_cluster(df, date(2026, 6, 1), duckdb.connect())
+        assert result["symbol"].to_list() == ["A", "B", "C"]
+
     def test_no_correlation_file_leaves_candidates_untouched(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(scr_mod, "GOLD_CORR_PATH", tmp_path / "nonexistent.parquet")
+        monkeypatch.setattr(scr_mod, "CROSS_ASSET_CORR_PATH", tmp_path / "nonexistent.parquet")
         df = pl.DataFrame({"symbol": ["A", "B", "C"], "mtf_score": [7, 6, 5]})
         con = duckdb.connect()
         result = _deduplicate_by_cluster(df, date(2026, 6, 1), con)
@@ -715,12 +766,25 @@ class TestClusterDeduplication:
         _write_mtf(_mtf_path(mtf_dir, run_date), [
             _mtf_row("A", 9, "A"), _mtf_row("B", 8, "A"), _mtf_row("C", 7, "A"),
         ])
-        pl.DataFrame({
-            "symbol": ["A", "B", "C"], "cluster_id": [1, 1, 1],
-        }).write_parquet(scr_mod.GOLD_CORR_PATH)
+        _pairwise_corr({"A": 1, "B": 1, "C": 1}, scr_mod.CROSS_ASSET_CORR_PATH)
         result = build_watchlist(run_date)
         assert len(result) == scr_mod.MAX_PER_CLUSTER
         assert set(result["symbol"].to_list()) == {"A", "B"}   # top 2 by score kept
+
+    def test_full_build_watchlist_ignores_a_stale_legacy_clusters_file(self, tmp_path, monkeypatch):
+        """The retired correlation_clusters.parquet must not influence the watchlist even if
+        it is still on disk (it is no longer refreshed)."""
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [
+            _mtf_row("A", 9, "A"), _mtf_row("B", 8, "A"), _mtf_row("C", 7, "A"),
+        ])
+        monkeypatch.chdir(tmp_path)
+        legacy = tmp_path / "data" / "gold" / "correlation" / "correlation_clusters.parquet"
+        legacy.parent.mkdir(parents=True)
+        pl.DataFrame({"symbol": ["A", "B", "C"], "cluster_id": [1, 1, 1]}).write_parquet(legacy)
+        result = build_watchlist(run_date)          # no cross_asset_corr.parquet -> no dedup
+        assert set(result["symbol"].to_list()) == {"A", "B", "C"}
 
 
 # ── Main-query failure -> simplified fallback ───────────────────────────────

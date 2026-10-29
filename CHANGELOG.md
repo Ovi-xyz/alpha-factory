@@ -1,5 +1,53 @@
 # CHANGELOG — Data Platform
 
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — `legacy_correlation_bridge.py` diarsipkan: screener membaca `cross_asset_corr.parquet` langsung, `v_correlation` dihapus (Oktober 2026)
+
+**Latar.** Jembatan GMI-CORR-RETIRE-01 (RISK-31, 20 Sep 2026) menurunkan
+`data/gold/correlation/correlation_clusters.parquet` dari `cross_asset_corr.parquet` di akhir
+setiap run `gold_cross_asset_correlation`, hanya supaya dua konsumen job `gold_correlation` yang
+sudah dipensiunkan tidak perlu diubah: `screener.py::_deduplicate_by_cluster()` (GD §15.1, maks. 2
+per cluster) dan `views.py::v_correlation`.
+
+**Temuan Explore.** Jembatan itu belum mati: kedua konsumen masih membaca file tersebut di `main`
+0b78829, dan `correlation_module.py` meng-import jembatan di level modul. Mengarsipkan modulnya saja
+akan (a) mematahkan `gold_cross_asset_correlation` saat import, dan setelah import dibuang (b)
+membiarkan screener men-dedup terhadap file yang tidak lagi diperbarui — `has_corr` hanya mengecek
+`exists()` dan kegagalan di dalam dedup dicatat pada level debug: kelas kegagalan diam-diam
+(stale/skip) yang pernah terjadi di codebase ini. Keputusan (Ovi): **opsi A** — konsumen
+diselesaikan dulu, baru modulnya diarsipkan.
+
+**Perubahan.**
+- `src/gold/screener.py`: `GOLD_CORR_PATH` → `CROSS_ASSET_CORR_PATH` (path yang sama dengan yang
+  ditulis `CorrelationModule`). Query cluster = UNION `(symbol_a, cluster_id_a)` dan
+  `(symbol_b, cluster_id_b)` — simbol terakhir segitiga atas hanya pernah muncul sebagai
+  `symbol_b` — ditambah penjaga kardinalitas satu-baris-per-simbol agar join kiri tidak menggandakan
+  baris watchlist. `CorrelationModule._cluster()` memberi satu `cluster_id` per simbol per run,
+  sehingga hasilnya identik dengan yang ditulis jembatan. Jalur gagal naik dari `debug` ke
+  `warning`: dengan skema sumber yang berbeda, ketidakcocokan harus terlihat.
+- `src/gold/views.py`: `v_correlation` dihapus (belum ada Trading Engine dan tidak ada yang di luar
+  repo bergantung pada view itu — ADR-055 §5; output kontraknya `cross_asset_corr.parquet`).
+- `src/gold/cross_asset/correlation_module.py`: import dan pemanggilan jembatan dibuang; docstring
+  di file ini, `cross_asset/__init__.py`, dan `job_registry.py` diperbarui.
+- `legacy_correlation_bridge.py` dan 15 test-nya dipindah dengan `git mv` ke
+  `archive/legacy_correlation_bridge_2026_10/` (README memuat rollback). `correlation_avg` dan
+  `n_cluster_members` tidak punya konsumen di `src/`.
+
+**Test.** `tests/COUNT_BASELINE.txt` 2888 → 2881: −15 test jembatan, −1 kasus per-file pada
+`test_regime_cutover_adr055` (parametrize atas seluruh `src/**/*.py`), +4 test dedup screener
+(simbol yang hanya `symbol_b`, id cluster konflik/tanpa fan-out, file skema lama, file legacy basi
+diabaikan), +5 pin struktural (`tests/integration/test_legacy_bridge_retirement.py`: modul hanya di
+arsip, tidak ada yang meng-import, tidak ada string eksekusi di `src/`/`scripts/` yang menyebut file
+yang dipensiunkan, `run()` tidak menulis apa pun di `data/gold/correlation`, screener dan
+`CorrelationModule` memakai satu path). Lima mutan dibunuh (membaca `symbol_a` saja, tanpa penjaga
+kardinalitas, `v_correlation` ditambahkan kembali, `run()` membuat ulang direktori legacy, string
+path legacy muncul lagi di `src/`). Di sandbox dengan dependency ter-pin ke `poetry.lock` (kecuali
+xgboost 3.4.1 vs 3.2.0): 2879 lulus, 2 gagal (`test_check_poetry_env`, identik dengan baseline
+`main` sebelum perubahan).
+
+**Langkah operator setelah mirror ke live.** Sebaiknya supaya pembaca yang terlewat gagal dengan
+jelas:
+`mkdir -p data/archive/legacy_correlation_clusters_2026_10 && mv data/gold/correlation/correlation_clusters.parquet data/archive/legacy_correlation_clusters_2026_10/`
+
 ## v1.24.0 — ADR-053: model spesialis (hmm_xgboost, gold_xgboost) + mesin bersama + skop Gatekeeper per-domain (GMI-XGB-001, Oktober 2026)
 
 Lapisan *learned* pertama di tier Gold. Dua dari tiga spesialis ADR-053 dibangun — regime (HMM) dan

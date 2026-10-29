@@ -3268,6 +3268,50 @@ has 56 leaders and no CNH (HKD is present). Re-run `gold_cross_asset_correlation
 **D2 still open** — the census script now gives the detection on demand; the always-on check is
 still the proposal.
 
+### Update — 29 Oct 2026: `legacy_correlation_bridge.py` archived — screener reads `cross_asset_corr.parquet` directly; `v_correlation` removed (no version bump)
+
+**Why it existed.** The 20 Sep bridge decision (above) kept `gold_correlation`'s two consumers
+unchanged by deriving `data/gold/correlation/correlation_clusters.parquet` from
+`cross_asset_corr.parquet` at the end of every `gold_cross_asset_correlation` run:
+`screener.py::_deduplicate_by_cluster()` (GD §15.1, max 2 per cluster) and `views.py::v_correlation`.
+
+**Explore (before archiving).** The bridge was not dead code: both consumers still read the file
+at `main` 0b78829, and `correlation_module.py` imported the bridge at module level. Archiving the
+module alone would have (a) broken `gold_cross_asset_correlation` at import time and, with the
+import removed, (b) left the screener deduping against a file that no longer refreshes —
+`has_corr` only tests `exists()`, and a failure inside the dedup was logged at debug — i.e. the
+silent-stale / silent-skip class this codebase has hit before. So the archive needed the consumers
+resolved first; decision (Ovi, 29 Oct): **option A**.
+
+**Decision / fix.**
+- `screener.py`: `GOLD_CORR_PATH` -> `CROSS_ASSET_CORR_PATH` (= `data/gold/cross_asset/cross_asset_corr.parquet`,
+  the same path `CorrelationModule` writes); the clusters query is the UNION of
+  `(symbol_a, cluster_id_a)` and `(symbol_b, cluster_id_b)` — the last symbol of the upper triangle
+  is only ever `symbol_b` — plus a one-row-per-symbol cardinality guard so the left join cannot
+  fan out. `CorrelationModule._cluster()` assigns one id per symbol per run, so the projection is
+  identical to what the bridge wrote. The failure path is now `logger.warning` (was `debug`): with
+  a different source schema, a mismatch must be visible.
+- `views.py`: `v_correlation` removed (no Trading Engine exists, nothing outside the repo depends
+  on the view — ADR-055 §5; `cross_asset_corr.parquet` is the contract output).
+- `correlation_module.py`: bridge import and call removed; docstrings in it, `cross_asset/__init__.py`
+  and `job_registry.py` updated.
+- Module and its 15 tests moved with `git mv` to `archive/legacy_correlation_bridge_2026_10/`
+  (README carries the rollback). `correlation_avg` / `n_cluster_members` had no consumer in `src/`.
+- Tests: +4 screener dedup tests (symbol only in `symbol_b`, conflicting ids / no fan-out,
+  retired-schema file, stale legacy file ignored — three mutants killed: reading `symbol_a` only,
+  no cardinality guard, `v_correlation` re-added); `test_views.py` retired-view list extended;
+  +5 structural pins (`tests/integration/test_legacy_bridge_retirement.py`: module only in archive,
+  nothing imports it, no executable string in `src/`/`scripts/` names the retired file, `run()`
+  writes nothing under `data/gold/correlation`, screener and `CorrelationModule` share one path;
+  two mutants killed).
+
+**Accounting.** No version bump (`pyproject.toml` stays 1.24.0), CHANGELOG `Unreleased` entry.
+`tests/COUNT_BASELINE.txt`: 2888 → 2881 (−15 archived bridge tests, −1 per-file case of the
+parametrized `test_regime_cutover_adr055` source scan, +4 screener, +5 pins).
+
+**Operator step after the live mirror** (recommended so a missed reader fails loudly):
+`mkdir -p data/archive/legacy_correlation_clusters_2026_10 && mv data/gold/correlation/correlation_clusters.parquet data/archive/legacy_correlation_clusters_2026_10/`.
+
 
 ---
 

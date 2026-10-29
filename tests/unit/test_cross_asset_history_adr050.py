@@ -95,7 +95,6 @@ class TestModuleHooks:
         monkeypatch.setattr(hist, "HISTORY_ROOT", tmp_path / "h")
         monkeypatch.setattr(corr_mod, "GOLD_CROSS_ASSET_PATH", tmp_path / "s")
         monkeypatch.setattr(corr_mod, "CROSS_ASSET_CORR_PATH", tmp_path / "s" / "cross_asset_corr.parquet")
-        monkeypatch.setattr(corr_mod, "write_legacy_correlation_clusters", lambda df: None)
         monkeypatch.setattr(corr_mod.CorrelationModule, "compute", lambda self, rd: _corr_frame(rd))
         corr_mod.run(d)
         assert (tmp_path / "s" / "cross_asset_corr.parquet").exists()

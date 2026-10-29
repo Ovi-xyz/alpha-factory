@@ -49,6 +49,8 @@ correctly typed, simply permanently null instead of sometimes-populated.
 
 v1.2 additions (retained):
     - Correlation cluster deduplication: max 2 per cluster
+      (source: cross_asset_corr.parquet read directly — the legacy
+      correlation_clusters.parquet bridge is archived, RISK-31 update 29 Oct 2026)
 
 ADD GMI Wave 1 Cycle 4 — CrossAssetEngine integration (Architecture v2.0
 §5.3, §9.1 Phase 5, §10.1 roadmap item "gold_screener: integrate
@@ -122,13 +124,15 @@ from src.utils.trade_date import with_trade_date  # FIX TS-DATE-01
 SILVER_OHLCV_ROOT  = Path("data/silver/market_ohlcv")
 GOLD_MTF_PATH       = Path("data/gold/mtf")
 GOLD_CONTEXT_REGIME_PATH = Path("data/gold/hmm/context_regime.parquet")   # ADR-055 v2: replaces regime_store
-GOLD_CORR_PATH      = Path("data/gold/correlation/correlation_clusters.parquet")
 GOLD_SCREENER_PATH  = Path("data/gold/screener")
 # ADD GMI Wave 1 Cycle 4 — CrossAssetEngine outputs (see module docstring).
 GOLD_CROSS_ASSET_PATH   = Path("data/gold/cross_asset")
 GLOBAL_REGIME_PATH      = GOLD_CROSS_ASSET_PATH / "global_regime.parquet"
 LEAD_LAG_PATH           = GOLD_CROSS_ASSET_PATH / "lead_lag_matrix.parquet"
 CROSS_ASSET_FORECAST_PATH = GOLD_CROSS_ASSET_PATH / "cross_asset_forecast.parquet"
+# Cluster source for the GD §15.1 max-per-cluster guard: CorrelationModule's own pairwise output,
+# read directly (legacy_correlation_bridge.py and correlation_clusters.parquet are archived).
+CROSS_ASSET_CORR_PATH   = GOLD_CROSS_ASSET_PATH / "cross_asset_corr.parquet"
 # ADD GMI-SIGAGG-001 — see module docstring.
 SIGNAL_AGG_PATH = Path("data/gold/signal_aggregation")
 # FIX GLD-SCR-002: this was previously built inline as an ad hoc string/
@@ -400,7 +404,7 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     # Menggantikan /dev/null injection pattern yang tidak cross-platform.
     # FIX GLD-003: tidak ada f-string SQL.
 
-    has_corr    = GOLD_CORR_PATH.exists()
+    has_corr    = CROSS_ASSET_CORR_PATH.exists()
     active_sym_path = (
         SILVER_ACTIVE_SYMBOLS_ROOT / f"active_{run_date.isoformat()}.parquet"
     )
@@ -638,16 +642,31 @@ def _deduplicate_by_cluster(
     run_date: date,
     con: duckdb.DuckDBPyConnection,
 ) -> pl.DataFrame:
-    """Keep max MAX_PER_CLUSTER symbols per correlation cluster."""
+    """Keep max MAX_PER_CLUSTER symbols per correlation cluster.
+
+    Cluster source is cross_asset_corr.parquet (pairwise, upper triangle).
+    CorrelationModule assigns ONE cluster_id per symbol per run, and a symbol
+    is symbol_a in some pairs and symbol_b in others (the last symbol only
+    ever as symbol_b) — so both sides are unioned. This is the same
+    projection legacy_correlation_bridge.py used to materialise.
+    """
     try:
         # FIX GLD-003: $name parameterized query — f-string SQL dilarang GD §17.7
         clusters = con.execute(
             """
-            SELECT symbol, cluster_id
+            SELECT symbol_a AS symbol, cluster_id_a AS cluster_id
             FROM read_parquet($path)
+            UNION
+            SELECT symbol_b AS symbol, cluster_id_b AS cluster_id
+            FROM read_parquet($path)
+            ORDER BY symbol, cluster_id
             """,
-            {"path": str(GOLD_CORR_PATH)},
+            {"path": str(CROSS_ASSET_CORR_PATH)},
         ).pl()
+        # Cardinality guard: the left join below must never fan out and
+        # duplicate watchlist rows, even if the pairwise file were ever to
+        # carry two cluster ids for one symbol (it cannot within one run).
+        clusters = clusters.unique(subset=["symbol"], keep="first", maintain_order=True)
 
         df = df.join(clusters, on="symbol", how="left")
         df = df.with_columns(
@@ -673,7 +692,7 @@ def _deduplicate_by_cluster(
         df = df.filter(pl.col("cluster_rank") < MAX_PER_CLUSTER)
         df = df.drop(["cluster_id", "cluster_rank"])
     except Exception as e:
-        logger.debug(f"[gold_screener] Cluster dedup skipped: {e}")
+        logger.warning(f"[gold_screener] Cluster dedup skipped: {e}")
 
     return df
 

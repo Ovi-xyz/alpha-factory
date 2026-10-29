@@ -196,12 +196,8 @@ VIEW_DEFINITIONS = {
     # v_sector_weights REMOVED (ADR-055 v2): gold_sector and sector_regime_weights.parquet are
     # archived; the sector label was registry data and no watchlist/view carries it any more.
 
-    "v_correlation": """
-        CREATE OR REPLACE VIEW v_correlation AS
-        SELECT * FROM read_parquet(
-            'data/gold/correlation/correlation_clusters.parquet'
-        )
-    """,
+    # v_correlation REMOVED (legacy_correlation_bridge archived, RISK-31 update 29 Oct 2026):
+    # correlation_clusters.parquet is no longer produced; cross_asset_corr.parquet is the output.
 
     # union_by_name=true (ADR-055 v2): the watchlist schema changed at the cutover (regime /
     # sector-weight columns replaced) and per-date files from before it persist on disk.

@@ -11,15 +11,13 @@ FIX GMI-CORR-RETIRE-01 (KNOWN_RISKS.md RISK-31, 20 Sep 2026): the
 pre-Cycle-4 gold_correlation job (src/gold/correlation_matrix.py — Layer
 1-only, raw Pearson via Polars .corr(), sklearn AgglomerativeClustering)
 is now retired — deregistered from JOB_REGISTRY/WEEKLY_SEQUENCE, module
-archived to archive/gold_correlation_retirement_2026_09/. Its two real
-consumers (screener.py::_deduplicate_by_cluster(), views.py's
-v_correlation — the documented Trading Engine Interface Contract, GD
-§0.4) were not rewritten against this module's pairwise schema; instead,
-run() below also derives and writes gold_correlation's legacy per-symbol
-output shape via legacy_correlation_bridge.py, at the SAME path
-(data/gold/correlation/correlation_clusters.parquet), so both consumers
-needed zero changes. See legacy_correlation_bridge.py's own docstring for
-the full rationale.
+archived to archive/gold_correlation_retirement_2026_09/. For a time
+run() also derived gold_correlation's legacy per-symbol output
+(data/gold/correlation/correlation_clusters.parquet) through
+legacy_correlation_bridge.py so its two consumers needed no change. That
+bridge is archived (archive/legacy_correlation_bridge_2026_10/, RISK-31
+update 29 Oct 2026): screener.py::_deduplicate_by_cluster() reads this
+module's cross_asset_corr.parquet directly and v_correlation is removed.
 
 Universe: layer1_globs() + [context_glob()] merged explicitly, per
 silver_scope.py's own module docstring instruction — NOT an unfiltered
@@ -87,7 +85,6 @@ import numpy as np
 import polars as pl
 from loguru import logger
 
-from src.gold.cross_asset.legacy_correlation_bridge import write_legacy_correlation_clusters
 from src.silver.active_symbols import ActiveSymbolsResolver
 from src.silver.context_anchors import ContextAnchorsResolver
 from src.utils.atomic_io import atomic_write_parquet
@@ -376,8 +373,3 @@ def run(run_date: date) -> None:
         f"[gold_cross_asset_correlation] {n_symbols} symbols, {result.height:,} pairs, "
         f"regime={result['regime'][0]} -> {CROSS_ASSET_CORR_PATH.name}"
     )
-
-    # FIX GMI-CORR-RETIRE-01: best-effort legacy bridge for gold_correlation's
-    # two retired-job consumers (screener.py, views.py:v_correlation) — see
-    # legacy_correlation_bridge.py docstring. Never allowed to fail this job.
-    write_legacy_correlation_clusters(result)

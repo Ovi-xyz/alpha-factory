@@ -15,8 +15,9 @@ src/gold/screener.py's own "ADD GMI Wave 1 Cycle 4" docstring section).
 See CHANGELOG.md v1.18.0 and KNOWN_RISKS.md RISK-31 for full status.
 Live validation against real Silver data and the pre-Cycle-4
 gold_correlation retirement (both originally left open by this pass) are
-now resolved — see correlation_module.py and legacy_correlation_bridge.py
-for the retirement, and RISK-31's dated updates for the live-run history.
+now resolved — see correlation_module.py for the retirement, and RISK-31's
+dated updates for the live-run history (the compatibility bridge that
+carried the retirement is itself archived, RISK-31 update 29 Oct 2026).
 FRED/BIS rate series remaining out of ForecastModule's PCA input is still
 open.
 """
