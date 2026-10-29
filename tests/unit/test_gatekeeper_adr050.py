@@ -27,12 +27,16 @@ import src.utils.gatekeeper as gk
 from src.scheduler.dependency_guard import DependencyGuard
 from src.scheduler.job_registry import (
     DAILY_SEQUENCE,
+    GATE_DOMAINS,
     JOB_REGISTRY,
     LAYER_JOB_NAMES,
     _passes_schedule,
 )
 
 ANCHOR = date(2026, 9, 27)  # a Sunday — exercises the weekly-only job set too
+
+
+N_SCOPES = 3 + len(GATE_DOMAINS)      # bronze/silver/gold + one scope per intelligence domain (ADR-053 D4)
 
 
 def _mark_all_expected(guard: DependencyGuard, day: date) -> None:
@@ -312,7 +316,7 @@ class TestComputeIntegration:
 
     def test_empty_environment_blocks_all_layers(self, sandbox):
         df = gk.compute(ANCHOR)
-        assert df.height == 3
+        assert df.height == N_SCOPES                      # 3 layers + ADR-053 domain scopes
         assert set(df["gate_status"].to_list()) == {"block"}
         assert set(df["streak_days"].to_list()) == {gk.LOOKBACK_DAYS}
 
@@ -344,7 +348,7 @@ class TestComputeIntegration:
 
     def test_scopes_present(self, sandbox):
         df = gk.compute(ANCHOR)
-        assert set(df["scope"].to_list()) == {"bronze", "silver", "gold"}
+        assert set(df["scope"].to_list()) == {"bronze", "silver", "gold", *GATE_DOMAINS}
 
 
 class TestRunPersistence:
@@ -354,14 +358,14 @@ class TestRunPersistence:
         gk.run(ANCHOR)
         assert sandbox.gate_status_path.exists()
         df = pl.read_parquet(sandbox.gate_status_path)
-        assert df.height == 3
+        assert df.height == N_SCOPES
 
     def test_rerun_same_date_replaces_not_duplicates(self, sandbox):
         sandbox.healthy_days(ANCHOR, gk.LOOKBACK_DAYS)
         gk.run(ANCHOR)
         gk.run(ANCHOR)
         df = pl.read_parquet(sandbox.gate_status_path)
-        assert df.height == 3   # not 6
+        assert df.height == N_SCOPES   # not 2 * N_SCOPES
 
     def test_history_accumulates_across_dates(self, sandbox):
         sandbox.healthy_days(ANCHOR, gk.LOOKBACK_DAYS)
@@ -369,7 +373,7 @@ class TestRunPersistence:
         sandbox.healthy_days(ANCHOR + timedelta(days=1), gk.LOOKBACK_DAYS)
         gk.run(ANCHOR + timedelta(days=1))
         df = pl.read_parquet(sandbox.gate_status_path)
-        assert df.height == 6
+        assert df.height == 2 * N_SCOPES
         assert set(df["run_date"].unique().to_list()) == {
             ANCHOR.isoformat(), (ANCHOR + timedelta(days=1)).isoformat(),
         }
@@ -461,3 +465,66 @@ class TestDetectionLag:
         daily = set(DAILY_SEQUENCE)
         for i in range(20):
             assert gk._job_completed(sandbox.guard, "silver_macro", date(2026, 9, 1) + timedelta(days=i), daily)
+
+
+class TestDomainScopes:
+    """ADR-053 D4: one scope per intelligence domain, built from that domain's own job chain only."""
+
+    def test_members_are_the_domain_chain_and_nothing_else(self):
+        sunday = date(2026, 10, 25)
+        wednesday = date(2026, 10, 21)
+        assert sunday.weekday() == 6 and wednesday.weekday() == 2
+        hmm_sun = set(gk.domain_members("hmm", sunday))
+        assert {"gold_raw_macro", "gold_context_regime", "gold_hmm_walk_forward", "silver_macro"} <= hmm_sun
+        assert hmm_sun.isdisjoint({"gold_signals", "gold_mtf", "gold_global_regime", "gold_lead_lag"})
+        assert "gold_hmm_walk_forward" not in gk.domain_members("hmm", wednesday)     # Sunday-gated
+        assert set(gk.domain_members("technical", wednesday)).isdisjoint(
+            {"gold_raw_macro", "gold_context_regime", "gold_global_regime"})
+
+    def test_unknown_domain_is_a_key_error(self):
+        with pytest.raises(KeyError):
+            gk.domain_members("nope", ANCHOR)
+
+    def test_healthy_history_passes_every_domain(self, sandbox):
+        sandbox.healthy_days(ANCHOR, gk.LOOKBACK_DAYS)
+        for dom in GATE_DOMAINS:
+            st = gk.domain_status(dom, ANCHOR)
+            assert st["gate_status"] == "pass" and st["layer_health"] == "pass", (dom, st)
+
+    def test_a_cross_asset_outage_does_not_touch_the_other_domains(self, sandbox):
+        """The point of the domain scopes: gold_global_regime missing today blocks cross_asset's raw
+        status and the gold LAYER, but the hmm and technical chains are unaffected."""
+        sandbox.healthy_days(ANCHOR, gk.LOOKBACK_DAYS)
+        sandbox.guard.reset_job("gold_global_regime", ANCHOR)
+        assert gk.domain_status("cross_asset", ANCHOR)["layer_health"] == "block"
+        assert gk.domain_status("hmm", ANCHOR)["layer_health"] == "pass"
+        assert gk.domain_status("technical", ANCHOR)["layer_health"] == "pass"
+        df = gk.compute(ANCHOR)
+        assert df.filter(pl.col("scope") == "gold")["layer_health"][0] == "block"
+
+    def test_an_hmm_outage_does_not_touch_the_technical_or_cross_asset_domains(self, sandbox):
+        sandbox.healthy_days(ANCHOR, gk.LOOKBACK_DAYS)
+        sandbox.guard.reset_job("gold_context_regime", ANCHOR)
+        assert gk.domain_status("hmm", ANCHOR)["layer_health"] == "block"
+        assert gk.domain_status("technical", ANCHOR)["layer_health"] == "pass"
+        assert gk.domain_status("cross_asset", ANCHOR)["layer_health"] == "pass"
+
+    def test_a_failed_silver_quality_check_reaches_only_domains_that_depend_on_silver_validate(self, sandbox):
+        from src.scheduler.job_registry import JOB_REGISTRY
+        sandbox.healthy_days(ANCHOR, gk.LOOKBACK_DAYS)
+        _write_quality_log(sandbox.quality_log_path, [ANCHOR], passed=False)
+        chains = {d: gk._upstream_closure(GATE_DOMAINS[d], JOB_REGISTRY) for d in GATE_DOMAINS}
+        for dom, chain in chains.items():
+            expected = "block" if "silver_validate" in chain else "pass"
+            assert gk.domain_status(dom, ANCHOR)["layer_health"] == expected, dom
+        assert "silver_validate" not in chains["hmm"]            # the HMM chain never rests on it
+
+    def test_domain_status_uses_the_same_hysteresis_as_the_layers(self, sandbox):
+        days = sandbox.healthy_days(ANCHOR, gk.LOOKBACK_DAYS)
+        sandbox.guard.reset_job("gold_context_regime", ANCHOR)
+        st = gk.domain_status("hmm", ANCHOR)
+        assert st["layer_health"] == "block" and st["gate_status"] == "warn" and st["streak_days"] == 1  # one bad day: warn, not block
+
+    def test_domain_gate_status_never_raises(self, monkeypatch):
+        monkeypatch.setattr(gk, "domain_status", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert gk.domain_gate_status("hmm", ANCHOR) == "unknown"

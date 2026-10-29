@@ -1,0 +1,65 @@
+# intelligence.yaml -- ADR-053 (GMI-XGB-001): specialist intelligence models (shared settings).
+# Read by src/gold/intelligence/core.py. Per-domain feature lists live in the feature builders
+# (code, pinned by tests via a feature-spec hash); only knobs live here.
+#
+# FIRST-PASS values: no live out-of-sample history exists to tune against. Every number below
+# is a stated choice, not a measured optimum (KNOWN_RISKS RISK-40).
+version: "1.0"
+
+label:
+  # The ONE label specification the specialists accept (ADR-052 BarrierConfig().spec). A label
+  # file stamped with anything else is refused: a silently different barrier geometry would
+  # train a model on a target the rest of the platform does not mean.
+  spec: "tb1.0|h7|next_open|time=loss|same=stop_first|tr14x0.375/0.9375|s50-100|rr2-3"
+  dir: data/training/labels            # materialised label Parquet (scripts/label_triple_barrier.py --publish)
+  max_age_days: 14                     # fit refuses labels whose newest label_end_date is older than this
+
+walk_forward:
+  initial_train_months: 36             # first out-of-fold block starts this long after the first label
+  test_block_months: 3                 # out-of-fold block length (calendar months)
+  embargo_days: 7                      # extra calendar gap between a training label's end and a test start
+  min_train_rows: 5000                 # a block with fewer purged training rows is skipped, not fitted
+
+xgb:                                   # deliberately small and heavily regularised: labels overlap (7-bar horizon)
+  n_estimators: 200
+  max_depth: 3
+  learning_rate: 0.05
+  subsample: 0.6
+  colsample_bytree: 0.7
+  min_child_weight: 50
+  reg_lambda: 10.0
+  max_bin: 128
+  nthread: 4                           # M1: four performance cores
+
+bags:
+  oof: 3                               # seeds per out-of-fold block
+  final: 5                             # seeds in the production model (their spread is the confidence)
+
+calibration:
+  min_rows: 5000                       # out-of-fold rows needed before an isotonic map is applied
+
+confidence:
+  std_cap: 0.05                        # confidence = 1 - min(1, bag std / std_cap)
+
+output_root: data/gold/intelligence
+
+# Per-model overrides (xgb / walk_forward keys only; everything else is inherited).
+models:
+  hmm_xgboost:
+    # Features are date-level (identical for every symbol of a market), so training rows are
+    # aggregated to (date, market, direction) with weight = symbol count. The effective sample is
+    # the number of DATES (~2,000 since the market HMM starts 2016-09), not the symbol count, so the
+    # trees are kept very shallow and every leaf must carry a lot of weight.
+    xgb:
+      max_depth: 2
+      n_estimators: 150
+      learning_rate: 0.03
+      min_child_weight: 400
+    walk_forward:
+      min_train_rows: 2000
+
+  gold_xgboost:
+    # One row per (symbol, date, direction) — up to ~1M rows with 7-bar overlapping labels, so
+    # leaves must carry real weight; otherwise defaults.
+    xgb:
+      min_child_weight: 200

@@ -1,5 +1,72 @@
 # CHANGELOG — Data Platform
 
+## v1.24.0 — ADR-053: model spesialis (hmm_xgboost, gold_xgboost) + mesin bersama + skop Gatekeeper per-domain (GMI-XGB-001, Oktober 2026)
+
+Lapisan *learned* pertama di tier Gold. Dua dari tiga spesialis ADR-053 dibangun — regime (HMM) dan
+teknikal; `cross_asset_xgboost` ditunda ke Wave 2 (keputusan D5). Tidak ada perubahan pada Bronze,
+Silver, `gold_screener`, `PITDataLoader`, atau Interface Contract; kenaikan MINOR karena kapabilitas
+aditif (satu dependency baru: `xgboost>=2.0`, di macOS butuh `brew install libomp`, lalu `poetry lock`).
+Urutan fase: adr-050 → 051 → 055 → 052 → **053** → 054.
+
+**Temuan Explore yang mengubah ADR (semuanya terukur pada data live; detail di Amendment 1 dan RISK-40).**
+- Riwayat Gold yang tersimpan terlalu dangkal untuk *fit*: `mtf_alignment` dan `signal_aggregation` masing-masing
+  3 file, `global_regime` 3 baris, riwayat CrossAssetEngine 2 snapshot mingguan. Akses via `PITDataLoader`
+  hanya cukup untuk *predict*.
+- Store HMM produksi hampir 100% `in_sample` (macro 7.862/7.862, market 2.541/2.542): filternya kausal tetapi
+  parameternya sudah melihat seluruh jendela. Model yang dilatih di atasnya akan belajar sinyal yang tidak
+  pernah ada out-of-sample.
+- `tech_signals_{TF}` memuat ~15 tahun fitur kausal, tetapi `signal_date` konstan (tanggal run terakhir) di
+  seluruh 141.645 baris mingguan — guard `signal_date <= trade_date` mengembalikan kosong untuk tanggal lampau;
+  `vix_at_signal`/`high_volatility_flag` konstan di semua baris historis (nilai pasar hari-run: lintas domain
+  sekaligus lookahead). Bar mingguan/bulanan distempel di *awal* periode.
+- ADR-052 mengunci labeler di luar setiap job pipeline, sedangkan `fit` ADR-053 adalah job mingguan yang butuh label.
+- Gatekeeper hanya punya skop bronze/silver/gold; skop per-model yang diminta ADR-053 (RISK-36 #7) belum ada.
+
+**Keputusan (D1–D5, diterima 26 Okt).**
+- **D1 Target:** setiap spesialis adalah classifier biner pada label triple-barrier ADR-052 (`label_binary`) per
+  (symbol, tanggal, arah), hanya dengan fitur domainnya sendiri + `direction` + `market`. Output: `probability`
+  (OOF terkalibrasi kausal), `confidence` (kesepakatan 5 seed), `quality` (status Gatekeeper domain), `regime_tag`,
+  `age_days`, `model_fit_date`, `lineage`.
+- **D2 Fitur as-of:** satu builder untuk fit dan predict. HMM: riwayat walk-forward (refit kuartalan, window
+  expanding) yang dibangun ulang dengan `hmm_core` yang sama (`src/gold/hmm/walk_forward.py`, job
+  `gold_hmm_walk_forward`, insert-only per fold). Teknikal: bar *lengkap* terakhir (1D/1W/1M), warm-up
+  indikator di-mask, kolom VIX/`signal_date` tidak pernah dibaca.
+- **D3 Batas label:** `scripts/label_triple_barrier.py --publish` menulis `data/training/labels/`; job fit hanya
+  membaca Parquet itu (`labels.py`) dan *skip* (tercatat, model lama tetap dipakai) bila hilang, basi (>14 hari),
+  atau `label_spec` berbeda dari `config/intelligence.yaml`. Tidak ada job yang mengimpor labeler.
+- **D4 Gatekeeper:** skop domain `hmm`, `technical`, `cross_asset` (kunci `job_registry.GATE_DOMAINS`) =
+  job Gold domain itu + closure upstream-nya, tidak lebih. `gate_status.parquet` kini 6 baris/hari. Model memberi
+  label `quality` dari rantai *input*-nya, dihitung saat predict.
+- **D5 Fase:** Wave 1 = mesin bersama + hmm_xgboost + gold_xgboost; cross_asset_xgboost menunggu spike biaya backfill.
+
+**Mesin bersama (`src/gold/intelligence/core.py`, domain-agnostik).** Walk-forward expanding per blok kalender
+dengan purge (`label_end_date <= awal blok − embargo`) dan guard struktural yang menolak (LeakageError) bila ada
+jendela label yang menjangkau blok uji; kalibrator isotonik untuk sebuah blok hanya dari blok-blok sebelumnya;
+model dari masa depan ditolak saat predict; bobot/baris teragregasi (label pecahan) eksak untuk loss logistik
+(Brier diperbaiki untuk label pecahan — ditemukan oleh tes eksaktitas); frame dengan urutan total (urutan baris
+`group_by` tidak stabil dan subsampling XGBoost bersifat posisional — ditemukan oleh tes reuse OOF). Bundle model =
+satu JSON (metadata + booster UBJSON base64 + peta isotonik sebagai dua array) ditulis atomik; OOF insert-only per
+blok, fingerprint konfigurasi/fitur/versi mengubah = bangun ulang.
+
+**Job baru:** `gold_hmm_walk_forward`, `gold_hmm_xgboost_fit`, `gold_gold_xgboost_fit` (Minggu); `gold_hmm_xgboost_predict`,
+`gold_gold_xgboost_predict` (harian, lunak: tanpa model tidak menulis apa pun). Nama `gold_gold_xgboost_*` mengikuti ADR.
+
+**Terukur pada store live (salinan read-only).** Walk-forward macro: 4.120 baris 2011-01..2026-10, 64 fold, ~290 dtk,
+0 baris in-sample; label cocok dengan store tersimpan hanya 64% hari (korelasi activity 0,73; seluruh 261 hari 2013 = `recession`
+vs `recovery` pada model full-sample) — riwayat jujur jauh lebih lemah daripada yang in-sample (RISK-40 #2).
+Market: 2.022 baris, 33 fold, ~45 dtk, label cocok 86%. Builder teknikal divalidasi pada file
+`tech_signals_1W/1M` nyata: availability tiap bar mingguan = Senin berikutnya; keputusan hari Rabu melihat minggu
+sebelumnya, bukan minggu berjalan.
+
+**Pin baru.** `test_intelligence_domain_independence_adr053.py` (import, literal store, graf job; dimutasi:
+impor HMM, literal store teknikal, store domain di core — ketiganya terbunuh), `test_gate_domains_adr053.py`;
+`HMM_JOBS` di pin ADR-051 diperluas ke tiga job HMM baru.
+
+**Belum selesai / dicatat di RISK-40:** belum dijalankan pada data live (label belum dimaterialisasi);
+hiperparameter dan set fitur first-pass; sampel efektif `hmm_xgboost` ≈ jumlah tanggal; `cross_asset_xgboost`
+ditunda; `PITDataLoader.get_signals` masih menyesatkan untuk riwayat (GMI-PIT-002).
+
+
 ## v1.23.0 — ADR-052: pelabelan triple-barrier untuk decision_xgboost — `src/backtest/triple_barrier.py` dan `scripts/label_triple_barrier.py` (GMI-TB-001, Oktober 2026)
 
 Modul pembuat label *forward-looking* untuk ADR-054, murni offline. Tidak ada job, tidak ada

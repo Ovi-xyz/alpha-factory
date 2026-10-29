@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "alpha-factory"
-version = "1.23.0"
+version = "1.24.0"
 # ADR-052 (GMI-TB-001, 25 Oct 2026): triple-barrier labeling for decision_xgboost (ADR-054) --
 # src/backtest/triple_barrier.py (LookaheadTripleBarrierLabeler, offline label construction
 # only, lookahead by design, pinned out of every live path) + scripts/label_triple_barrier.py
@@ -1079,6 +1079,12 @@ scikit-learn = "*"
 # pandas-ta.
 scipy = "*"
 statsmodels = "*"
+# ADD ADR-053 (GMI-XGB-001): the specialist intelligence models (src/gold/intelligence/) are
+# gradient-boosted classifiers; boosters are persisted as UBJSON inside a JSON bundle (no pickle).
+# >=2.0: Booster.save_raw(raw_format="ubj") / load_model(bytearray) are stable from 2.0. On macOS
+# the wheel needs the OpenMP runtime: `brew install libomp`. After pulling this change run
+# `poetry lock` (or `poetry add xgboost`) once on the M1 to refresh poetry.lock.
+xgboost = ">=2.0"
 httpx = "*"
 requests = "*"
 

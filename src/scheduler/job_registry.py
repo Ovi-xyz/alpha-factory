@@ -368,6 +368,41 @@ def _gold_context_regime(run_date: date) -> None:
     context_regime_run(run_date)
 
 
+def _gold_hmm_walk_forward(run_date: date) -> None:
+    """ADD GMI-XGB-001 (ADR-053 D2) — HMM-domain module: honest as-of regime history (expanding
+    window, quarterly refit) for hmm_xgboost's fit. Insert-only per completed fold."""
+    from src.gold.hmm.walk_forward import run as walk_forward_run
+    walk_forward_run(run_date)
+
+
+def _gold_hmm_xgboost_fit(run_date: date) -> None:
+    """ADD GMI-XGB-001 (ADR-053) — weekly fit of the regime-domain specialist. Reads only the
+    walk-forward regime stores + the published label file; skips (recorded) on missing/stale labels."""
+    from src.gold.intelligence.hmm_xgboost import run_fit as hmm_xgboost_fit
+    hmm_xgboost_fit(run_date)
+
+
+def _gold_hmm_xgboost_predict(run_date: date) -> None:
+    """ADD GMI-XGB-001 (ADR-053) — daily score of the regime-domain specialist from the production
+    regime stores. Soft: no fitted model -> nothing written."""
+    from src.gold.intelligence.hmm_xgboost import run as hmm_xgboost_run
+    hmm_xgboost_run(run_date)
+
+
+def _gold_gold_xgboost_fit(run_date: date) -> None:
+    """ADD GMI-XGB-001 (ADR-053) — weekly fit of the technical-domain specialist (job name per the ADR).
+    Reads only the technical store + the published label file; skips (recorded) on missing/stale labels.
+    The FIRST run builds the whole out-of-fold history (long); later runs add only new blocks."""
+    from src.gold.intelligence.gold_xgboost import run_fit as gold_xgboost_fit
+    gold_xgboost_fit(run_date)
+
+
+def _gold_gold_xgboost_predict(run_date: date) -> None:
+    """ADD GMI-XGB-001 (ADR-053) — daily score of the technical-domain specialist. Soft: no model -> nothing written."""
+    from src.gold.intelligence.gold_xgboost import run as gold_xgboost_run
+    gold_xgboost_run(run_date)
+
+
 def _health_report(run_date: date) -> None:
     from src.utils.health_reporter import run as health_run
     health_run(run_date)
@@ -911,6 +946,66 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "est_minutes":     1,
     },
 
+    # ── ADR-053 (GMI-XGB-001): regime-domain specialist ───────────────────────
+    # HMM-domain jobs (names start gold_hmm_, pinned by test_hmm_domain_independence_adr051): their
+    # transitive upstream holds no technical-chain or CrossAssetEngine job and none of those
+    # depends on them.
+    #
+    # gold_hmm_walk_forward — honest as-of regime history (ADR-053 D2). Sunday, after both fit
+    # jobs; cross-cadence tolerant on the raw panels (same pattern as the fit jobs above).
+    "gold_hmm_walk_forward": {
+        "description":     "Dual-HMM walk-forward — as-of regime history, expanding window, quarterly refit (ADR-053 D2)",
+        "fn":              _gold_hmm_walk_forward,
+        "depends_on":      ["gold_raw_macro", "gold_raw_market"],
+        "stale_tolerance": {"gold_raw_macro": 3, "gold_raw_market": 3},
+        "run_on_weekdays": [6],
+        "layer":           "gold",
+        "est_minutes":     10,
+    },
+
+    # Weekly fit (Sunday). Hard dependency on the walk-forward store; reads the published label
+    # file (the ADR-052 labeling script, flag --publish) and SKIPS, recorded, when it is missing,
+    # stale or carries a foreign spec (ADR-053 D3) — a skipped fit never fails the weekly run.
+    "gold_hmm_xgboost_fit": {
+        "description":     "hmm_xgboost fit — walk-forward OOF + final bagged XGBoost on triple-barrier labels (ADR-053)",
+        "fn":              _gold_hmm_xgboost_fit,
+        "depends_on":      ["gold_hmm_walk_forward"],
+        "run_on_weekdays": [6],
+        "layer":           "gold",
+        "est_minutes":     10,
+    },
+
+    # Daily score. Hard dependency on gold_context_regime only (the production stores it scores
+    # are complete once that job is). NO dependency on the fit job: a stale-but-present model
+    # still scores (visible via model_fit_date); no model at all -> writes nothing.
+    "gold_hmm_xgboost_predict": {
+        "description":     "hmm_xgboost predict — P(win) per market x direction from the production regime stores (ADR-053)",
+        "fn":              _gold_hmm_xgboost_predict,
+        "depends_on":      ["gold_context_regime"],
+        "layer":           "gold",
+        "est_minutes":     1,
+    },
+
+    # ── ADR-053 (GMI-XGB-001): technical-domain specialist ────────────────────
+    # Same shape as the regime-domain pair, rooted in the technical chain (gold_signals) only.
+    "gold_gold_xgboost_fit": {
+        "description":     "gold_xgboost fit — walk-forward OOF + final bagged XGBoost on triple-barrier labels (ADR-053)",
+        "fn":              _gold_gold_xgboost_fit,
+        "depends_on":      ["gold_signals"],
+        "stale_tolerance": {"gold_signals": 3},
+        "run_on_weekdays": [6],
+        "layer":           "gold",
+        "est_minutes":     30,
+    },
+
+    "gold_gold_xgboost_predict": {
+        "description":     "gold_xgboost predict — P(win) per symbol x direction from the latest completed bars (ADR-053)",
+        "fn":              _gold_gold_xgboost_predict,
+        "depends_on":      ["gold_signals"],
+        "layer":           "gold",
+        "est_minutes":     2,
+    },
+
     # ── UTILITIES ─────────────────────────────────────────────────────────────
 
     # ADD GMI-GATE-001 (ADR-050): cascading Bronze -> Silver -> Gold health
@@ -1010,6 +1105,7 @@ DAILY_SEQUENCE: list[str] = [
     # breadth_divergence) is normally satisfied in the scheduled path — not a hard ordering
     # requirement (see that job's own entry).
     "signal_aggregation",
+    "gold_gold_xgboost_predict",  # ADR-053: technical-domain specialist, scored from the bars just built
 
     # Gold dual-HMM regime engine (ADR-051; the platform's regime since ADR-055 v2).
     "gold_raw_macro",
@@ -1017,6 +1113,7 @@ DAILY_SEQUENCE: list[str] = [
     "gold_raw_market",
     "gold_hmm_market_regime",
     "gold_context_regime",      # after BOTH classify jobs — the only hard ordering inside the engine
+    "gold_hmm_xgboost_predict", # ADR-053: regime-domain specialist, scored from the stores just built
 
     # Gold screener — designated future Trading Engine interface (no consumer exists yet)
     "gold_screener",
@@ -1068,6 +1165,9 @@ WEEKLY_SEQUENCE: list[str] = [
     # nothing downstream depends on it — the daily classify job scores with whatever model exists.
     "gold_hmm_macro_fit",
     "gold_hmm_market_fit",      # same: needs a raw_market sentinel within 3 days, nothing depends on it
+    "gold_hmm_walk_forward",    # ADR-053 D2: honest as-of regime history (needs both raw sentinels within 3 days)
+    "gold_hmm_xgboost_fit",     # ADR-053: needs that day's walk-forward sentinel; nothing depends on it
+    "gold_gold_xgboost_fit",    # ADR-053: technical specialist fit; needs a gold_signals sentinel within 3 days
 
     # Lanjutkan dengan DAILY_SEQUENCE setelah ini (per SOP §14.4.2)
 ] + DAILY_SEQUENCE
@@ -1128,4 +1228,22 @@ LAYER_JOB_NAMES: dict[str, list[str]] = {
     "bronze": layer_sequence("bronze"),
     "silver": layer_sequence("silver"),
     "gold":   layer_sequence("gold"),
+}
+
+
+# ── Gatekeeper domain scopes (ADR-053 D4) ─────────────────────────────────────
+# One scope per intelligence domain. The value is the domain's own Gold DATA jobs; the Gatekeeper
+# adds their transitive depends_on closure (the Bronze/Silver jobs they ultimately rest on) and
+# nothing else — so one domain's outage never degrades another's status. The specialist MODEL
+# jobs (fit / predict) are deliberately NOT members: a model tags its output with the health of
+# its INPUTS, and its own predict job has not completed when it reads that status.
+# A drift guard (tests/integration/test_gate_domains_adr053.py) pins that every sequenced gold
+# job is a data job of exactly one domain, a specialist model job, or the screener.
+GATE_DOMAINS: dict[str, tuple[str, ...]] = {
+    "hmm": (
+        "gold_raw_macro", "gold_hmm_macro_regime", "gold_raw_market", "gold_hmm_market_regime",
+        "gold_context_regime", "gold_hmm_macro_fit", "gold_hmm_market_fit", "gold_hmm_walk_forward",
+    ),
+    "technical": ("gold_signals", "gold_mtf", "signal_aggregation"),
+    "cross_asset": ("gold_global_regime", "gold_cross_asset_correlation", "gold_lead_lag", "gold_forecast"),
 }

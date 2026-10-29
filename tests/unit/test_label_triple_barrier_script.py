@@ -167,3 +167,36 @@ class TestMain:
         spec = pl.read_parquet(next(out.glob("labels_*.parquet")))["label_spec"][0]
         for token in ("h5", "signal_close", "time=exclude", "same=profit_first", "x0.3/0.75"):
             assert token in spec
+
+    # ── ADR-053 D3: --publish hands the labels to the weekly fit jobs ──────────────────────────
+
+    def test_publish_copies_labels_to_the_training_directory(self, tmp_path, capsys):
+        silver, out, pub = tmp_path / "silver", tmp_path / "out", tmp_path / "pub"
+        _silver(silver, "us_stocks", "AAA", n=60)
+        rc = main(["--grid", "AAA", "--years", "50", "--step", "2", "--silver-root", str(silver),
+                   "--out-dir", str(out), "--publish", "--publish-dir", str(pub)])
+        assert rc == 0
+        tag = max(p.stem.split("_", 1)[1] for p in out.glob("labels_*.parquet"))
+        published = pub / f"labels_{tag}.parquet"
+        assert published.exists()
+        assert pl.read_parquet(published).equals(pl.read_parquet(out / f"labels_{tag}.parquet"))
+        assert "published" in capsys.readouterr().out
+
+    def test_without_the_flag_nothing_is_published(self, tmp_path):
+        silver, out, pub = tmp_path / "silver", tmp_path / "out", tmp_path / "pub"
+        _silver(silver, "us_stocks", "AAA", n=60)
+        main(["--grid", "AAA", "--years", "50", "--step", "2", "--silver-root", str(silver),
+              "--out-dir", str(out), "--publish-dir", str(pub)])
+        assert not pub.exists()
+
+    def test_published_file_satisfies_the_specialists_label_reader(self, tmp_path):
+        """End-to-end contract: what the labeler publishes is what labels.py accepts (spec, columns)."""
+        from datetime import date as _d
+        from src.gold.intelligence import core, labels
+        silver, out, pub = tmp_path / "silver", tmp_path / "out", tmp_path / "pub"
+        _silver(silver, "us_stocks", "AAA", n=60)
+        main(["--grid", "AAA", "--years", "50", "--step", "2", "--silver-root", str(silver),
+              "--out-dir", str(out), "--publish", "--publish-dir", str(pub)])
+        newest = pl.read_parquet(next(pub.glob("labels_*.parquet")))["label_end_date"].max()
+        got = labels.load_training_labels(core.load_config(), newest + timedelta(days=2), pub)
+        assert got.height > 0 and set(got["direction"].unique().to_list()) <= {"long", "short"}

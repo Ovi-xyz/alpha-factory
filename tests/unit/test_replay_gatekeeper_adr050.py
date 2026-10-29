@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from src.scheduler.job_registry import GATE_DOMAINS
+
 import src.utils.gatekeeper as gk
 from scripts.replay_gatekeeper import replay, sweep
 from src.scheduler.dependency_guard import DependencyGuard
@@ -46,8 +48,8 @@ class TestReplay:
     def test_three_scope_rows_per_day(self, tmp_path):
         _mark_healthy(tmp_path / "s", _range())
         rows = replay(START, END, tmp_path / "s")
-        assert len(rows) == 3 * len(_range())
-        assert {r["scope"] for r in rows} == {"bronze", "silver", "gold"}
+        assert len(rows) == (3 + len(GATE_DOMAINS)) * len(_range())     # layers + ADR-053 domain scopes
+        assert {r["scope"] for r in rows} == {"bronze", "silver", "gold", *GATE_DOMAINS}
 
     def test_empty_history_is_all_block(self, tmp_path):
         rows = replay(START, END, tmp_path / "empty")

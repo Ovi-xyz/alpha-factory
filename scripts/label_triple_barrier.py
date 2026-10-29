@@ -54,6 +54,9 @@ from src.backtest.triple_barrier import (
 from src.utils.atomic_io import atomic_write_parquet
 
 OUT_DIR = Path("data/backtest/triple_barrier")
+# ADR-053 D3: where the weekly fit jobs read labels. A neutral path on purpose — Gold/pipeline
+# source may not even name this module (ADR-052 isolation pin), so it names a directory only.
+PUBLISH_DIR = Path("data/training/labels")
 
 
 # ── triple sources ────────────────────────────────────────────────────────────
@@ -206,6 +209,10 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
     p.add_argument("--profit-vol-mult", type=float, default=None)
     p.add_argument("--silver-root", default="data/silver/market_ohlcv")
     p.add_argument("--out-dir", default=str(OUT_DIR))
+    p.add_argument("--publish", action="store_true",
+                   help="ADR-053 D3: also publish labels_<tag>.parquet to data/training/labels/ for the "
+                        "weekly specialist fit jobs (use with --grid-all --step 1)")
+    p.add_argument("--publish-dir", default=str(PUBLISH_DIR))
     p.add_argument("--inspect", type=int, default=0, help="write N random trades + forward bars to CSV")
     return p.parse_args(argv)
 
@@ -232,6 +239,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     tag = triples["decision_date"].max().isoformat()
     out = Path(a.out_dir)
     atomic_write_parquet(result.labels, out / f"labels_{tag}.parquet")
+    if a.publish:
+        if result.labels.height == 0:
+            print("--publish: no labels produced — nothing published", file=sys.stderr)
+            return 1
+        atomic_write_parquet(result.labels, Path(a.publish_dir) / f"labels_{tag}.parquet")
+        print(f"published → {Path(a.publish_dir) / f'labels_{tag}.parquet'}")
     atomic_write_parquet(result.skipped, out / f"skipped_{tag}.parquet")
     summary = result.summary()
     (out / f"summary_{tag}.json").write_text(json.dumps(summary, indent=2, default=str))

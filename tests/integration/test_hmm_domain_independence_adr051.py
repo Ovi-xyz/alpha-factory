@@ -24,7 +24,10 @@ HMM_DIR = pathlib.Path("src/gold/hmm")
 GOLD_DIR = pathlib.Path("src/gold")
 
 HMM_JOBS = {"gold_raw_macro", "gold_raw_market", "gold_hmm_macro_regime", "gold_hmm_macro_fit",
-            "gold_hmm_market_regime", "gold_hmm_market_fit", "gold_context_regime"}
+            "gold_hmm_market_regime", "gold_hmm_market_fit", "gold_context_regime",
+            # ADR-053: the regime-domain specialist and its honest as-of history. Same rules apply —
+            # nothing foreign upstream, nothing foreign downstream.
+            "gold_hmm_walk_forward", "gold_hmm_xgboost_fit", "gold_hmm_xgboost_predict"}
 CROSS_ASSET_JOBS = {"gold_global_regime", "gold_cross_asset_correlation", "gold_lead_lag", "gold_forecast"}
 # ADR-055 v2: "gold_regime" left this set — the job no longer exists (macro_regime.py archived).
 # gold_screener stays: it reads the HMM context regime as a SOFT source (no depends_on edge), so

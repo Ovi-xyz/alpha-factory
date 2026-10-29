@@ -14,7 +14,12 @@ as the duplicated-logic drift risk to avoid).
 Output: data/health/gate_status.parquet
     run_date, scope, layer_health, gate_status, streak_days
 
-    scope        — 'bronze' | 'silver' | 'gold'
+    scope        — 'bronze' | 'silver' | 'gold' | and, since ADR-053 D4, one DOMAIN scope per
+                   intelligence domain ('hmm' | 'technical' | 'cross_asset' — the keys of
+                   job_registry.GATE_DOMAINS): the health of that domain's own Gold jobs plus
+                   their transitive upstream (Bronze/Silver) jobs, NOTHING else. A CrossAssetEngine
+                   outage therefore never degrades the HMM domain's status, which is what lets a
+                   specialist model tag its output with the status of its own chain only.
     layer_health — TODAY's raw, unsmoothed signal for that scope: 'pass' |
                    'warn' | 'block'. See _bronze_raw_status() /
                    _silver_raw_status() / _gold_raw_status().
@@ -230,6 +235,20 @@ def _bronze_raw_status(
     return "pass"
 
 
+def _quality_local_status(quality_log: pl.DataFrame, run_date: date) -> str:
+    """Silver's persisted-check verdict for run_date: block on a failed CRITICAL check, warn on a
+    failed WARNING check, and warn when no check detail exists for the date at all (silver_validate's
+    own sentinel says done, but absence of evidence is not evidence of health — e.g. a prior run
+    predates FIX GMI-GATE-001, or the persistence write failed and was swallowed)."""
+    day_str = run_date.isoformat()
+    day_log = quality_log.filter(pl.col("run_date") == day_str) if quality_log.height else quality_log
+    if day_log.height == 0:
+        return "warn"
+    critical_fail = day_log.filter((pl.col("tier") == "critical") & (~pl.col("passed"))).height > 0
+    warning_fail = day_log.filter((pl.col("tier") == "warning") & (~pl.col("passed"))).height > 0
+    return "block" if critical_fail else ("warn" if warning_fail else "pass")
+
+
 def _silver_raw_status(
     guard: DependencyGuard,
     run_date: date,
@@ -240,25 +259,10 @@ def _silver_raw_status(
     expected = _expected_jobs_for_layer("silver", run_date)
     missing  = [j for j in expected if not _job_completed(guard, j, run_date, daily_sequence)]
 
-    day_str = run_date.isoformat()
-    day_log = quality_log.filter(pl.col("run_date") == day_str) if quality_log.height else quality_log
-
     if missing:
         local = "block"
-    elif day_log.height == 0:
-        # silver_validate's own sentinel says done, but no persisted check
-        # detail exists for this date (e.g. a prior run predates FIX
-        # GMI-GATE-001, or the persistence write itself failed and was
-        # swallowed) -- absence of evidence is not evidence of health.
-        local = "warn"
     else:
-        critical_fail = day_log.filter(
-            (pl.col("tier") == "critical") & (~pl.col("passed"))
-        ).height > 0
-        warning_fail = day_log.filter(
-            (pl.col("tier") == "warning") & (~pl.col("passed"))
-        ).height > 0
-        local = "block" if critical_fail else ("warn" if warning_fail else "pass")
+        local = _quality_local_status(quality_log, run_date)
 
     return _worse(bronze_status, local)
 
@@ -287,6 +291,82 @@ def _raw_status_for_day(
     silver = _silver_raw_status(guard, run_date, daily_sequence, quality_log, bronze)
     gold   = _gold_raw_status(guard, run_date, daily_sequence, silver)
     return {"bronze": bronze, "silver": silver, "gold": gold}
+
+
+# ── Domain scopes (ADR-053 D4) ─────────────────────────────────────────────────────
+
+def _upstream_closure(job_names, registry: dict) -> set[str]:
+    """The jobs plus everything they transitively depend_on."""
+    seen: set[str] = set()
+    stack = list(job_names)
+    while stack:
+        j = stack.pop()
+        if j in seen:
+            continue
+        seen.add(j)
+        stack.extend(registry[j].get("depends_on", []))
+    return seen
+
+
+def domain_members(domain: str, run_date: date) -> list[str]:
+    """Sequenced jobs of `domain`'s chain (its GATE_DOMAINS Gold jobs + their transitive upstream)
+    that were scheduled to run on run_date."""
+    from src.scheduler.job_registry import GATE_DOMAINS, JOB_REGISTRY, LAYER_JOB_NAMES, _passes_schedule
+
+    if domain not in GATE_DOMAINS:
+        raise KeyError(f"unknown gate domain {domain!r}; known: {sorted(GATE_DOMAINS)}")
+    sequenced = {j for names in LAYER_JOB_NAMES.values() for j in names}
+    closure = _upstream_closure(GATE_DOMAINS[domain], JOB_REGISTRY)
+    return sorted(j for j in closure if j in sequenced and _passes_schedule(JOB_REGISTRY[j], run_date))
+
+
+def _domain_raw_status(
+    domain: str,
+    guard: DependencyGuard,
+    run_date: date,
+    daily_sequence: set[str],
+    quality_log: pl.DataFrame,
+) -> str:
+    """One day's raw status of a domain chain: block when any member job that was due did not
+    complete; otherwise the worst of (a) Silver's persisted-check verdict, ONLY when silver_validate
+    is part of the chain, and (b) a Bronze quarantine warning, ONLY when a Bronze job is."""
+    from src.scheduler.job_registry import GATE_DOMAINS, JOB_REGISTRY
+
+    members = domain_members(domain, run_date)
+    if any(not _job_completed(guard, j, run_date, daily_sequence) for j in members):
+        return "block"
+    chain = _upstream_closure(GATE_DOMAINS[domain], JOB_REGISTRY)
+    status = "pass"
+    if "silver_validate" in chain:
+        status = _worse(status, _quality_local_status(quality_log, run_date))
+    if any(JOB_REGISTRY[j]["layer"] == "bronze" for j in chain) and _quarantine_today(run_date):
+        status = _worse(status, "warn")
+    return status
+
+
+def domain_status(domain: str, run_date: date, guard: DependencyGuard | None = None,
+                  quality_log: pl.DataFrame | None = None) -> dict:
+    """{'layer_health', 'gate_status', 'streak_days'} for one domain scope — the same hysteresis
+    (_emit_status) as the layer scopes, recomputed from the sentinels over LOOKBACK_DAYS."""
+    from src.scheduler.job_registry import DAILY_SEQUENCE
+
+    guard = guard or DependencyGuard()
+    quality_log = _read_quality_log() if quality_log is None else quality_log
+    daily_sequence = set(DAILY_SEQUENCE)
+    history = [_domain_raw_status(domain, guard, run_date - timedelta(days=o), daily_sequence, quality_log)
+               for o in range(LOOKBACK_DAYS)]
+    emitted, streak = _emit_status(history)
+    return {"layer_health": history[0], "gate_status": emitted, "streak_days": streak}
+
+
+def domain_gate_status(domain: str, run_date: date) -> str:
+    """What a specialist model stamps as its `quality` column. 'unknown' (never an exception) when
+    the status cannot be computed — scoring must not die because the gate could not be read."""
+    try:
+        return domain_status(domain, run_date)["gate_status"]
+    except Exception as e:                                  # noqa: BLE001 — see docstring
+        logger.warning(f"[Gatekeeper] domain status for {domain!r} unavailable ({e}) — 'unknown'")
+        return "unknown"
 
 
 def _emit_status(raw_history: list[str]) -> tuple[str, int]:
@@ -328,11 +408,11 @@ def _read_quality_log() -> pl.DataFrame:
 
 
 def compute(run_date: date) -> pl.DataFrame:
-    """Compute this run_date's gate_status row for all three scopes,
+    """Compute this run_date's gate_status rows for every scope (bronze, silver, gold + the ADR-053 domains),
     recomputing up to LOOKBACK_DAYS of raw history from the underlying
     signals each time (never trusts a previously-written gate_status.parquet
     row) so a bad historical write can never propagate forward."""
-    from src.scheduler.job_registry import DAILY_SEQUENCE
+    from src.scheduler.job_registry import DAILY_SEQUENCE, GATE_DOMAINS
 
     guard = DependencyGuard()
     daily_sequence = set(DAILY_SEQUENCE)
@@ -354,6 +434,15 @@ def compute(run_date: date) -> pl.DataFrame:
             "layer_health": history[scope][0],
             "gate_status":  emitted,
             "streak_days":  streak,
+        })
+    for domain in GATE_DOMAINS:                              # ADR-053 D4: one row per intelligence domain
+        st = domain_status(domain, run_date, guard, quality_log)
+        rows.append({
+            "run_date":     run_date.isoformat(),
+            "scope":        domain,
+            "layer_health": st["layer_health"],
+            "gate_status":  st["gate_status"],
+            "streak_days":  st["streak_days"],
         })
     return pl.DataFrame(rows)
 

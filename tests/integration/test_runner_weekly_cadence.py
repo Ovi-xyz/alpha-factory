@@ -289,6 +289,12 @@ class TestLayerCommands:
             # job scores with whatever model exists — so it is correctly skipped here.
             "gold_hmm_macro_fit",
             "gold_hmm_market_fit",      # same shape: Sunday-gated, no daily dependent
+            # ADD GMI-XGB-001 (ADR-053): the honest as-of regime history and the regime-domain
+            # specialist's weekly fit are Sunday-gated with no daily dependent (the daily predict
+            # scores with whatever model exists).
+            "gold_hmm_walk_forward",
+            "gold_hmm_xgboost_fit",
+            "gold_gold_xgboost_fit",    # technical-domain specialist: same shape
         }
         for layer in ("bronze", "silver", "gold"):
             for job_name in LAYER_JOB_NAMES[layer]:

@@ -4325,3 +4325,73 @@ Decision B Step 1), July 2026.
 Earlier: GMI Decision Documents v1 & v2 implementation, July 2026.
 Earlier still: Bronze+Silver formal audit following GMI Wave 1 Cycle 3, July 2026.
 Earliest: Production Readiness Assessment v1.7.2 remediation, June 2026.*
+
+
+## RISK-40 (NEW): ADR-053 specialist models — built and unit-tested in sandbox only (labels never materialised, no fit ever run on the live stores); first-pass hyper-parameters and feature sets; honest walk-forward regime history is markedly weaker than the in-sample one; cross_asset_xgboost deferred
+
+**Status:** 🟡 **OPEN (accepted, 26 Oct 2026).** v1.24.0.
+
+**Reference:** ADR-053 (+ Amendment 1), ADR-051 A2 §E, ADR-052 (+ A1), ADR-054, RISK-36, RISK-39, RISK-28,
+`src/gold/intelligence/`, `src/gold/hmm/walk_forward.py`.
+
+Wave 1 ships `hmm_xgboost` and `gold_xgboost` and the shared engine. What shipping them accepts:
+
+1. **Never run on live data.** The sandbox has no Silver/Gold; every test uses synthetic panels with the
+   production column names, plus (read-only) measurements on copies of the live stores (below). The labels
+   have not been materialised (`--publish`), so no model exists yet. **Action on the M1, in order:**
+   `brew install libomp && poetry lock` (xgboost is a new dependency) → `python scripts/label_triple_barrier.py
+   --grid-all --years 15 --step 1 --publish` → `python src/runner.py --job gold_hmm_walk_forward --force`
+   (measured in the sandbox: ~290 s macro + ~45 s market) → `--job gold_hmm_xgboost_fit --force` →
+   `--job gold_gold_xgboost_fit --force` (first run builds the whole out-of-fold history; slow, one-off) →
+   review `data/gold/intelligence/<model>/validation.json` BEFORE ADR-054 reads any OOF file.
+2. **The honest regime history is much weaker than the stored one.** Measured on the live stores (26 Oct):
+   `macro_regime` is 7,862/7,862 rows `in_sample`, `market_regime` 2,541/2,542 — the filter is causal but the
+   parameters saw the whole window. Rebuilt walk-forward (quarterly refit), the macro label agrees with the
+   stored one on only 64% of days since 2011 (activity correlation 0.73) and calls all 261 days of 2013
+   `recession` where the full-sample model calls all 261 `recovery`. Early folds are trained on 1996-2010,
+   which contains 2008; their state semantics do not transfer. The market label agrees with the stored one on
+   86% of 2,022 days (risk_off 916 vs 798 days, risk_on 131 vs 130 over 2018-10..2026-10). Expect `hmm_xgboost`'s validation AUC to be near 0.5; that is
+   the finding, not a defect. Any ADR-054 expectation built on the in-sample `macro_label` is optimistic.
+3. **`hmm_xgboost` effective sample = number of DATES.** Features are identical for every symbol of a market
+   on a date; rows are aggregated to (date, market, direction) with weight = symbol count (exact for the
+   logistic loss, `core.py` tests prove it) but the independent observations are ~2,000 dates from 2018-10
+   (the market HMM starts 2016-09 + 500 observations), first out-of-fold block 36 months later (~2021-10).
+   Trees are kept at depth 2 with `min_child_weight` 400 (`config/intelligence.yaml`, untuned).
+4. **Refit cadence differs from production.** Production refits weekly; the walk-forward history refits every
+   3 months (`config/hmm_walk_forward.yaml`). Parameter drift between the two is second-order but unmeasured.
+   Folds are insert-only; a changed config fingerprint rebuilds everything.
+5. **Technical specialist uses 1D + 1W + 1M only, completed bars only.** 1H/4H history is ~2 years (GD §6.4).
+   Weekly/monthly bars are stamped at the period start: `timestamp < T` would show a mid-week decision the
+   rest of the week (measured: every weekly bar's availability is the following Monday). The specialist uses
+   the last COMPLETE bar, whereas `gold_mtf`'s live trend columns read the latest (possibly partial) bar — the
+   two are deliberately not the same quantity (`mtf_score_dw` is the specialist's own). `PITDataLoader.get_signals`
+   is NOT used: `tech_signals_*` carries one constant `signal_date` (the last run) on all 141,645 weekly rows, so
+   its `signal_date <= trade_date` guard returns nothing for any earlier date; `vix_at_signal` and
+   `high_volatility_flag` are single constants on every historical row and are never read. **`get_signals` is
+   still misleading for historical use — follow-up GMI-PIT-002** (not changed here: other callers).
+6. **Warm-up masking.** EMA/MACD/ADX in `tech_signals` have no minimum period, so each symbol's first bars are
+   warm-up artifacts; features are null for the first 250 daily / 60 weekly / 36 monthly bars (complete cases
+   only, nothing imputed). Monthly warm-up pushes the first usable row to ~2014-09.
+7. **Survivorship (RISK-28) applies twice.** Labels use today's active universe applied to history, and the
+   `breadth_ema50_market` features are computed over that same ~196-symbol universe.
+8. **Calibration is causal but first-pass.** A block is calibrated with an isotonic map fitted on EARLIER
+   blocks' out-of-fold raw predictions only; the production calibrator uses all of them. `confidence` =
+   1 - bag-std/0.05 (5 seeds): ensemble agreement, not a calibrated interval.
+9. **The label hand-off is operator-run.** `fit` refuses (skips, recorded in `fit_status.json`, previous model
+   keeps scoring) when the label file is missing, older than 14 days, or carries another `label_spec`. A skipped
+   fit does not fail the weekly run; **the sentinel is still written**, so the skip is visible only in
+   `fit_status.json` and in `model_fit_date` of the predictions — a Gatekeeper signal for model age is ADR-054's
+   live-performance extension.
+10. **Domain gate scopes cover INPUT chains only.** `gate_status.parquet` grew from 3 to 6 rows per day (`hmm`,
+    `technical`, `cross_asset`). A model's `quality` column is its domain's input-chain status computed at predict
+    time from sentinels (the Gatekeeper job runs later); `unknown` if it cannot be computed. A domain job missing
+    from `job_registry.GATE_DOMAINS` would escape every status — `test_gate_domains_adr053.py` pins that every
+    sequenced gold job is classified. RISK-36 #7 (per-domain scope) is resolved by this.
+11. **`cross_asset_xgboost` is deferred (Wave 2).** Stored CrossAssetEngine history is 2 weekly snapshots and 3
+    daily `global_regime` rows; reconstructing it as-of means re-running the weekly modules (registry estimate
+    ~45 min per weekly run, untested). Spike first, then decide. `decision_xgboost` (ADR-054) therefore has two
+    specialists to stack until then.
+12. **Reproducibility fix found by test.** Row order of a `group_by`-built training frame is unstable and XGBoost's
+    row subsampling is positional; frames are now totally ordered before every fit (a regression test shuffles the
+    input and requires identical predictions).
+
