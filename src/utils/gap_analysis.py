@@ -45,6 +45,19 @@ as isolated — i.e. NOT suppressed. Under-suppressing preserves today's
 detection behavior exactly; over-suppressing could hide a real problem,
 so ties/unknowns resolve toward keeping the check's current sensitivity.
 
+XAE-R05 (cross_asset_recalibration_guide Q3/Q4, decision D2) — CALENDAR ORACLE FIRST, PEERS AS FALLBACK.
+Peer agreement cannot classify an index that is alone on its holiday calendar: N225 (13 events) and DAX (2)
+sit in a nine-member DM group whose other members trade normally on Japanese and German holidays, and 12 of
+JKSE's 13 events are Indonesian holidays no Asian peer shares. Measured on live Silver: 17 closures stay
+"isolated" under ANY loosening of the overlap definition (still 17 at "at least 2 peers", 46 at "at least
+1"), and 21 of the 54 isolated EM events are exactly 6 days — one over the >5 threshold. The peer GROUP is
+the problem, not the overlap definition, so loosening it is rejected. `classify_gaps()` takes an optional
+`oracle(event) -> True | False | None` (calendar_oracle.CalendarOracle.is_closure): True = every missing
+weekday was an official non-session day (closure), False = a session day has no bar (genuinely missing —
+isolated, even if peers share the gap, because a calendar says the bar should exist), None = unknown (no
+calendar / outside its range) -> the peer rule decides, as before. The oracle is an injected callable so this
+module stays free of any calendar library.
+
 This module is pure Python — no DuckDB, no filesystem, no InstrumentLoader
 import. quality_validator.py owns the SQL fetch (see its
 _fetch_raw_gap_events()); silver_scope.py owns turning InstrumentLoader
@@ -57,8 +70,9 @@ instrument universe.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
+from typing import Callable, Optional
 
 DEFAULT_MIN_PEER_AGREEMENT: float = 0.5
 
@@ -89,13 +103,26 @@ def _overlaps(a: GapEvent, b: GapEvent) -> bool:
     return a.prev_ts < b.ts and b.prev_ts < a.ts
 
 
-def classify_gaps_by_peer_agreement(
+@dataclass
+class GapClassification:
+    """Result of classify_gaps(): the two lists the caller counts, plus HOW each event was decided so a
+    check can report an oracle that silently stopped answering."""
+    isolated: list[GapEvent] = field(default_factory=list)
+    closures: list[GapEvent] = field(default_factory=list)
+    closure_by_oracle: int = 0       # decided True by the calendar oracle
+    isolated_by_oracle: int = 0      # decided False by the calendar oracle (a session day has no bar)
+    decided_by_peers: int = 0        # oracle answered None (or no oracle) -> peer rule
+
+
+def classify_gaps(
     events: list[GapEvent],
     peer_group_sizes: dict[str, int],
     min_peer_agreement: float = DEFAULT_MIN_PEER_AGREEMENT,
-) -> tuple[list[GapEvent], list[GapEvent]]:
+    oracle: Optional[Callable[[GapEvent], Optional[bool]]] = None,
+) -> GapClassification:
     """
-    Split gap events into (isolated, market_closure).
+    Split gap events into isolated / market_closure. For each event the oracle (if given) is asked first:
+    True -> closure, False -> isolated, None -> the peer-agreement rule below decides.
 
     peer_group_sizes: {peer_group_name: total_symbol_count_in_group} —
     the TOTAL membership of the group (from the instrument universe, via
@@ -123,12 +150,23 @@ def classify_gaps_by_peer_agreement(
         if e.peer_group is not None:
             by_group[e.peer_group].append(e)
 
-    isolated: list[GapEvent] = []
-    closures: list[GapEvent] = []
+    out = GapClassification()
 
     for e in events:
+        if oracle is not None:
+            verdict = oracle(e)
+            if verdict is True:
+                out.closures.append(e)
+                out.closure_by_oracle += 1
+                continue
+            if verdict is False:
+                out.isolated.append(e)
+                out.isolated_by_oracle += 1
+                continue
+        out.decided_by_peers += 1
+
         if e.peer_group is None:
-            isolated.append(e)
+            out.isolated.append(e)
             continue
 
         n_peers = peer_group_sizes.get(e.peer_group, 0) - 1  # exclude self
@@ -136,7 +174,7 @@ def classify_gaps_by_peer_agreement(
             # No comparable peers (singleton group, or group missing from
             # peer_group_sizes entirely) — cannot evaluate agreement.
             # Conservative default: do not suppress.
-            isolated.append(e)
+            out.isolated.append(e)
             continue
 
         agreeing_peers = {
@@ -147,8 +185,19 @@ def classify_gaps_by_peer_agreement(
         agreement = len(agreeing_peers) / n_peers
 
         if agreement >= min_peer_agreement:
-            closures.append(e)
+            out.closures.append(e)
         else:
-            isolated.append(e)
+            out.isolated.append(e)
 
-    return isolated, closures
+    return out
+
+
+def classify_gaps_by_peer_agreement(
+    events: list[GapEvent],
+    peer_group_sizes: dict[str, int],
+    min_peer_agreement: float = DEFAULT_MIN_PEER_AGREEMENT,
+) -> tuple[list[GapEvent], list[GapEvent]]:
+    """Peer-agreement-only classification (no oracle): (isolated, market_closure). Unchanged contract —
+    see classify_gaps() for the full rule and for the oracle-first variant (XAE-R05)."""
+    c = classify_gaps(events, peer_group_sizes, min_peer_agreement, oracle=None)
+    return c.isolated, c.closures

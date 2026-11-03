@@ -913,3 +913,167 @@ class TestLoadWatchlist:
         monkeypatch.setattr(scr_mod, "GOLD_SCREENER_PATH", tmp_path)
         with pytest.raises(FileNotFoundError):
             load_watchlist(date(2099, 1, 1))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XAE-R01 — as-of read of the global regime store
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestLoadGlobalRegimeAsOf:
+    """The store holds one row per BAR date since processing_version 1.1, so the screener must read the
+    latest row on/before run_date, not the row whose `date` equals run_date."""
+
+    @staticmethod
+    def _store(tmp_path, rows):
+        import polars as pl
+        from datetime import date as _d
+        p = tmp_path / "global_regime.parquet"
+        pl.DataFrame({
+            "date": [r[0] for r in rows],
+            "as_of_bar_date": [_d.fromisoformat(r[1]) if r[1] else None for r in rows],
+            "global_risk_score": [r[2] for r in rows],
+            "global_regime_label": [r[3] for r in rows],
+            "dm_em_divergence": [0.0] * len(rows),
+        }, schema={"date": pl.Utf8, "as_of_bar_date": pl.Date, "global_risk_score": pl.Float64,
+                   "global_regime_label": pl.Utf8, "dm_em_divergence": pl.Float64}).write_parquet(p)
+        return p
+
+    def test_weekend_run_date_reads_the_friday_bar_row(self, tmp_path, monkeypatch):
+        import src.gold.screener as sc
+        from datetime import date as _d
+        monkeypatch.setattr(sc, "GLOBAL_REGIME_PATH",
+                            self._store(tmp_path, [("2026-10-17", "2026-10-16", 35.7, "RISK_OFF")]))
+        out = sc._load_global_regime(_d(2026, 10, 18))          # Sunday: no row has date == run_date
+        assert out.height == 1 and out["global_regime_label"][0] == "RISK_OFF"
+
+    def test_stale_row_degrades_to_null(self, tmp_path, monkeypatch):
+        import src.gold.screener as sc
+        from datetime import date as _d
+        monkeypatch.setattr(sc, "GLOBAL_REGIME_PATH",
+                            self._store(tmp_path, [("2026-10-17", "2026-10-16", 35.7, "RISK_OFF")]))
+        assert sc._load_global_regime(_d(2026, 11, 1)).is_empty()
+
+    def test_never_reads_a_future_row(self, tmp_path, monkeypatch):
+        import src.gold.screener as sc
+        from datetime import date as _d
+        monkeypatch.setattr(sc, "GLOBAL_REGIME_PATH",
+                            self._store(tmp_path, [("2026-10-20", "2026-10-19", 70.0, "RISK_ON")]))
+        assert sc._load_global_regime(_d(2026, 10, 18)).is_empty()
+
+    def test_missing_store_is_empty_not_an_error(self, tmp_path, monkeypatch):
+        import src.gold.screener as sc
+        from datetime import date as _d
+        monkeypatch.setattr(sc, "GLOBAL_REGIME_PATH", tmp_path / "absent.parquet")
+        assert sc._load_global_regime(_d(2026, 10, 18)).is_empty()
+
+    def test_legacy_store_without_bar_date_still_reads(self, tmp_path, monkeypatch):
+        import polars as pl
+        import src.gold.screener as sc
+        from datetime import date as _d
+        p = tmp_path / "g.parquet"
+        pl.DataFrame({"date": ["2026-10-16"], "global_risk_score": [50.0],
+                      "global_regime_label": ["MIXED"], "dm_em_divergence": [0.0]}).write_parquet(p)
+        monkeypatch.setattr(sc, "GLOBAL_REGIME_PATH", p)
+        assert sc._load_global_regime(_d(2026, 10, 18))["global_regime_label"][0] == "MIXED"
+
+    def test_same_date_rows_resolve_to_the_newest_bar(self, tmp_path, monkeypatch):
+        import src.gold.screener as sc
+        from datetime import date as _d
+        monkeypatch.setattr(sc, "GLOBAL_REGIME_PATH", self._store(tmp_path, [
+            ("2026-10-20", "2026-10-16", 50.0, "MIXED"), ("2026-10-20", "2026-10-19", 70.0, "RISK_ON")]))
+        assert sc._load_global_regime(_d(2026, 10, 20))["global_regime_label"][0] == "RISK_ON"
+
+
+class TestForecastHasSignalR09:
+    """XAE-R09 Step A: a trailing-mean (var_lag = 0) row must never be shown as a forecast."""
+
+    def _run(self, tmp_path, monkeypatch, forecast: "pl.DataFrame"):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A"), _mtf_row("MSFT", 6, "A")])
+        scr_mod.CROSS_ASSET_FORECAST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        forecast.write_parquet(scr_mod.CROSS_ASSET_FORECAST_PATH)
+        result = build_watchlist(run_date)
+        return {r["symbol"]: r for r in result.iter_rows(named=True)}
+
+    def test_has_signal_false_rows_are_nulled(self, tmp_path, monkeypatch):
+        rows = self._run(tmp_path, monkeypatch, pl.DataFrame({
+            "symbol": ["AAPL", "MSFT"], "horizon_days": [1, 1],
+            "forecast_return": [0.01, 0.002], "stable": [True, None],
+            "var_lag": [2, 0], "has_signal": [True, False],
+        }, schema_overrides={"stable": pl.Boolean}))
+        assert rows["AAPL"]["forecast_return_1d"] == pytest.approx(0.01)
+        assert rows["AAPL"]["forecast_has_signal"] is True
+        assert rows["MSFT"]["forecast_return_1d"] is None
+        assert rows["MSFT"]["forecast_stable"] is None
+        assert rows["MSFT"]["forecast_has_signal"] is False
+
+    def test_pre_r09_file_with_var_lag_derives_has_signal(self, tmp_path, monkeypatch):
+        rows = self._run(tmp_path, monkeypatch, pl.DataFrame({
+            "symbol": ["AAPL", "MSFT"], "horizon_days": [1, 1],
+            "forecast_return": [0.01, 0.002], "stable": [True, True], "var_lag": [3, 0],
+        }))
+        assert rows["AAPL"]["forecast_return_1d"] == pytest.approx(0.01)
+        assert rows["MSFT"]["forecast_return_1d"] is None          # lag-0 mean no longer shown
+        assert rows["MSFT"]["forecast_has_signal"] is False
+
+    def test_pre_r09_file_without_var_lag_keeps_the_value_with_unknown_signal(self, tmp_path, monkeypatch):
+        rows = self._run(tmp_path, monkeypatch, pl.DataFrame({
+            "symbol": ["AAPL", "MSFT"], "horizon_days": [1, 1],
+            "forecast_return": [0.01, 0.002], "stable": [True, True],
+        }))
+        assert rows["AAPL"]["forecast_return_1d"] == pytest.approx(0.01)
+        assert rows["AAPL"]["forecast_has_signal"] is None
+
+    def test_missing_forecast_store_leaves_every_forecast_column_null(self, tmp_path, monkeypatch):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        row = build_watchlist(run_date).row(0, named=True)
+        assert row["forecast_return_1d"] is None and row["forecast_has_signal"] is None
+
+
+class TestLeadLagActionableR08:
+    """XAE-R08: the screener's lead_lag_signal is `actionable` when the store has it."""
+
+    def _run(self, tmp_path, monkeypatch, frame):
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.LEAD_LAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(scr_mod.LEAD_LAG_PATH)
+        return build_watchlist(run_date).row(0, named=True)
+
+    @staticmethod
+    def _frame(**over):
+        base = {
+            "leader": ["DXY", "SPX"], "follower": ["AAPL", "AAPL"], "optimal_lag": [2, 1],
+            "p_value_raw": [0.001, 0.02], "p_value_adjusted": [0.01, 0.028], "r_squared": [0.4, 0.2],
+            "bh_significant": [True, True], "max_cross_corr": [0.5, 0.3],
+        }
+        base.update(over)
+        return pl.DataFrame(base)
+
+    def test_bh_significant_but_not_actionable_is_not_a_signal(self, tmp_path, monkeypatch):
+        row = self._run(tmp_path, monkeypatch, self._frame(actionable=[False, False]))
+        assert row["lead_lag_signal"] is False and row["lead_lag_top_leader"] is None
+
+    def test_actionable_row_drives_the_signal_even_if_another_row_is_larger(self, tmp_path, monkeypatch):
+        row = self._run(tmp_path, monkeypatch, self._frame(actionable=[False, True]))
+        assert row["lead_lag_signal"] is True and row["lead_lag_top_leader"] == "SPX"
+
+    def test_tautology_row_with_null_adjusted_p_never_breaks_the_sort(self, tmp_path, monkeypatch):
+        frame = self._frame(actionable=[False, True]).with_columns(
+            pl.Series("p_value_adjusted", [None, 0.02], dtype=pl.Float64))
+        row = self._run(tmp_path, monkeypatch, frame)
+        assert row["lead_lag_top_leader"] == "SPX"
+
+    def test_calibrated_rank_is_preferred_when_present(self, tmp_path, monkeypatch):
+        frame = self._frame(actionable=[True, True],
+                            p_value_calibrated_adjusted=[0.02, 0.001])        # SPX is the stronger calibrated
+        row = self._run(tmp_path, monkeypatch, frame)
+        assert row["lead_lag_top_leader"] == "SPX"
+
+    def test_pre_r08_store_still_uses_bh_significant(self, tmp_path, monkeypatch):
+        row = self._run(tmp_path, monkeypatch, self._frame())
+        assert row["lead_lag_signal"] is True and row["lead_lag_top_leader"] == "DXY"

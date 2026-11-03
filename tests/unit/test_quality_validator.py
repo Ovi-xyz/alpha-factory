@@ -1065,3 +1065,117 @@ class TestContextPriceSanityIsCleanScoping:
         )
         qv = qv_mod.QualityValidator()
         assert qv._check_context_price_sanity(date(2026, 6, 20)) is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# QV-OUT-03 (XAE-R04) — Layer 2 isfinite guard + loud detection failure
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestContextOutlierIsfiniteGuard:
+    """cross_asset_recalibration_guide Q1/Q2: _check_context_outliers lacked QV-OUT-01's isfinite guard and
+    swallowed any failure at DEBUG, so ONE non-finite return in ANY Layer 2 symbol silently turned outlier
+    flagging off for all of them."""
+
+    @staticmethod
+    def _make(symbol, n=250, outlier_idx=None, nonfinite_idx=None, nonfinite_value=float("inf"), seed=0):
+        import datetime
+        import numpy as np
+        import polars as pl
+        rng = np.random.default_rng(seed)
+        base = datetime.datetime(2023, 1, 1, tzinfo=datetime.timezone.utc)
+        rows = []
+        for i in range(n):
+            rows.append({
+                "symbol": symbol, "timestamp": base + datetime.timedelta(days=i),
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1_000_000,
+                "log_return": float(rng.normal(0, 0.01)), "is_clean": True,
+            })
+        if outlier_idx is not None:
+            rows[outlier_idx]["log_return"] = 12.0
+        if nonfinite_idx is not None:
+            rows[nonfinite_idx]["log_return"] = nonfinite_value
+        return pl.DataFrame(rows)
+
+    @staticmethod
+    def _write_context(base, symbol, df):
+        from pathlib import Path
+        d = Path(base) / "context" / f"symbol={symbol}"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"{symbol}_1D_silver.parquet"
+        df.write_parquet(p)
+        return p
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("nan"), float("-inf")])
+    def test_a_nonfinite_symbol_does_not_disable_flagging_for_the_others(self, tmp_path, monkeypatch, bad):
+        import polars as pl
+        import src.silver.quality_validator as qv_mod
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+        self._write_context(tmp_path, "BRENT", self._make("BRENT", nonfinite_idx=100,
+                                                          nonfinite_value=bad, seed=1))
+        spx = self._write_context(tmp_path, "SPX", self._make("SPX", outlier_idx=75, seed=2))
+
+        validator = qv_mod.QualityValidator()
+        assert validator._check_context_outliers(date(2025, 1, 1)) is True
+        assert pl.read_parquet(spx).filter(~pl.col("is_clean")).height == 1, (
+            "pre-fix: the whole Layer 2 query aborted on BRENT's non-finite return and SPX's real "
+            "outlier was never flagged"
+        )
+        assert not [i for i in validator._issues if i["check"] == "context_outlier_detection"]
+
+    def test_detection_failure_is_a_warning_and_an_issue_not_a_debug_line(self, tmp_path, monkeypatch):
+        from loguru import logger
+        import src.silver.quality_validator as qv_mod
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+        self._write_context(tmp_path, "SPX", self._make("SPX", outlier_idx=75))
+
+        def boom():
+            raise RuntimeError("synthetic duckdb failure")
+        monkeypatch.setattr(qv_mod, "duckdb_connection", boom)
+
+        msgs = []
+        sink = logger.add(lambda m: msgs.append((m.record["level"].name, m.record["message"])),
+                          level="DEBUG")
+        try:
+            validator = qv_mod.QualityValidator()
+            assert validator._check_context_outliers(date(2025, 1, 1)) is True   # still non-blocking
+        finally:
+            logger.remove(sink)
+        assert any(lvl == "WARNING" and "DETECTION FAILED" in m for lvl, m in msgs)
+        issues = [i for i in validator._issues if i["check"] == "context_outlier_detection"]
+        assert issues and "detection query failed" in issues[0]["detail"]
+
+    def test_layer1_failure_is_equally_loud(self, tmp_path, monkeypatch):
+        import src.silver.quality_validator as qv_mod
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+        from pathlib import Path
+        d = Path(tmp_path) / "us_stocks" / "symbol=AAPL"
+        d.mkdir(parents=True)
+        self._make("AAPL", outlier_idx=75).write_parquet(d / "AAPL_1D_silver.parquet")
+
+        def boom():
+            raise RuntimeError("synthetic duckdb failure")
+        monkeypatch.setattr(qv_mod, "duckdb_connection", boom)
+        validator = qv_mod.QualityValidator()
+        assert validator._check_outliers(date(2025, 1, 1)) is True
+        assert [i for i in validator._issues if i["check"] == "outlier_detection"]
+
+    def test_both_layers_share_one_detection_query(self):
+        """Two copies of the same SQL is how the Layer 2 guard went missing (GAP-PEER-01 precedent)."""
+        import inspect
+        import src.silver.quality_validator as qv_mod
+        for name in ("_check_outliers", "_check_context_outliers"):
+            src = inspect.getsource(getattr(qv_mod.QualityValidator, name))
+            assert "_find_outlier_symbols" in src
+            assert "STDDEV(log_return)" not in src, f"{name} carries its own copy of the outlier SQL"
+        assert "isfinite(log_return)" in inspect.getsource(qv_mod.QualityValidator._find_outlier_symbols)
+
+    def test_failure_detail_reaches_the_gate_log(self, tmp_path, monkeypatch):
+        """The WARNING-tier detail is what Gatekeeper's history reads (ADR-050)."""
+        import polars as pl
+        import src.silver.quality_validator as qv_mod
+        monkeypatch.setattr(qv_mod, "QUALITY_GATE_LOG_PATH", tmp_path / "quality_gate_log.parquet")
+        qv_mod._persist_quality_gate_log(
+            date(2026, 10, 16), {"context_outlier_detection": True},
+            [{"check": "context_outlier_detection", "detail": "outlier detection query failed, x"}])
+        row = pl.read_parquet(tmp_path / "quality_gate_log.parquet").row(0, named=True)
+        assert row["passed"] is True and "query failed" in row["detail"]

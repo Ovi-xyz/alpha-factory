@@ -4439,3 +4439,80 @@ Wave 1 ships `hmm_xgboost` and `gold_xgboost` and the shared engine. What shippi
     row subsampling is positional; frames are now totally ordered before every fit (a regression test shuffles the
     input and requires identical predictions).
 
+
+
+## RISK-41 (NEW): Cross-asset recalibration (guide XAE-R01/R02/R04/R05/R07/R08/R09A/R10) — built and unit-tested in sandbox only, never run against live Silver; several first-pass parameters; R06 and R12/R13 not done
+
+Added 2026-11-02. Source: `cross_asset_recalibration_guide.md` (PROPOSED ADR-056/057). Sandbox baseline 2881 -> 3053
+collected; all new guards mutation-checked (17 mutants, all killed). **Nothing here has run on the M1 or on live data.**
+
+1. **`global_risk_score` and `global_regime_label` changed meaning (R07).** The score now gives SPX/NYA/DJI/IXIC one
+   vote (the old equal-weight count is `global_risk_score_equal`), and the published label is a 3-bar-date debounce of
+   `global_regime_label_raw`. A consumer that read the label as a same-day state now sees it lag a real regime change by
+   up to 3 bar dates (by design). Region weights, `DIST_CLIP_PCT` (5%), `FLICKER_WINDOW` (10) are untuned starting
+   values; `DEBOUNCE_DAYS = 3` is the guide's measured choice. **Acceptance not verified:** <= 12 transitions/yr on a
+   10-year replay, and reproduction of the stored 16-18 Oct rows within +/-1 index (needs live Silver). The label is a
+   volatility conditioner, not a bearish flag (guide G6); its incremental value over trailing volatility is untested.
+2. **The store keyed on bar date broke an exact-date reader (R01).** `screener.py` filtered `date == run_date`; fixed
+   to an as-of read (5-day tolerance). Any other reader of `global_regime.parquet` outside this repo that assumes one
+   row per RUN date will miss weekend run dates. `date` is now the first run that saw the bar.
+3. **Legacy rows are migrated destructively once.** Identical consecutive legacy rows (no `as_of_bar_date`) are
+   collapsed on the first run after this change (the 17/18 Oct weekend duplicates). Back up
+   `data/gold/cross_asset/global_regime.parquet` before the first live run.
+4. **Calendar oracle coverage is unverified on live gaps (R05).** The 71 EM + 15 DM events could not be replayed in
+   the sandbox, so the claim "the isolated count stops being red by construction" is **unproven**. Known facts:
+   `XIDX` covers the 2024 Idul Fitri closure and `XTKS` the New Year closure; `exchange_calendars` bounds its range
+   (outside it the oracle says "unknown" and peers decide). The 50-isolated-gap threshold was NOT changed or
+   re-justified. Verify with `quality_gate_log.detail` after the first live Silver validate: it now reports closures
+   by calendar vs by peers and session days with no bar. A session day with no bar is isolated even if peers share it
+   (the calendar says a bar should exist) — an ad hoc closure the library does not know would be reported, not hidden.
+   Chronic-red -> specialists' `quality` mapping (ADR-050 hysteresis) was not examined.
+5. **Placebo calibration is a [U] rule, validated by simulation only (R08).** The pooled empirical null cannot go
+   below 1/(N+1), so BH over ~10.9k pairs needs a tail extrapolation to reject a handful of real pairs (power-law fit on
+   the lowest 5% of the null; slope capped at 1 — the conservative direction; fitted line, not an anchor on the noisy
+   minimum). Two defects were found and fixed while building it (anchor noise; a slope clamp in the anti-conservative
+   direction). It has not been compared with live data; `p_calibration` flags every extrapolated row. With one placebo
+   shift the null is one draw per pair (the guide's study design). **Cost:** measured ~13 ms per 5-lag Granger run, so
+   the module is ~2.4 min per weekly run and ~5 min with `PLACEBO_SHIFTS = 1` single-core in the sandbox — the guide's
+   "about a minute" estimate was optimistic ~5x. Not benchmarked on the M1.
+6. **`actionable` has no out-of-sample evidence yet.** The guide's acceptance (selected set's OOS persistence exceeds
+   the all-pairs baseline with a CI excluding zero) and the pre-registered pairs report (TWSE -> US tech, AXJO -> AU/AG,
+   EIDO -> IDX30, COAL_NEWC -> ADRO/PTBA/ITMG) need live Silver (R12). Expect small effects (IDX-follower persistence
+   0.025-0.029). `corr_null_p95` is 0.40 at n = 44 (analytic Sidak 0.388); the guide's 0.378 corresponds to n of about
+   46-50. The Granger test remains mis-sized (12.3% at nominal 5% on a placebo); calibration addresses it, no
+   estimator does.
+7. **Winsorisation is currently near a no-op (R08, R10).** It runs on `is_clean = TRUE` bars only. Its purpose (safe
+   handling of crash bars) materialises only once the Silver quality-flag split (**R06, NOT DONE**, decision D3) releases
+   the extreme bars. Until then R07's EMA input still excludes them (IDX30: 24 of 30 names flagged on 16 Oct) and R10's
+   Ledoit-Wolf input is un-winsorised (guide C2: 6.8% of weekly windows differ by > 0.05 if flagged bars are kept).
+8. **Tautology list is DXY-only.** ETF -> constituent pairs are not covered (no constituent data in the registry);
+   NZD_USD is deliberately not listed (not in the DXY basket; a dollar-factor link, not an identity). Both are one
+   config line away once decided.
+9. **Forecast is still a trailing mean for lag-0 symbols (R09 Step A is labelling only).** `has_signal`,
+   `forecast_kind`, NULL `stable` and `forecast_cum_return` make that visible; the screener nulls the value.
+   Step B (pooled panel ridge, promote only if it beats the trailing-mean baseline OOF) and `cross_asset_xgboost`
+   (must exclude `has_signal = false` rows) are NOT done. PCA variance explained is 62.8% with `MAX_PCS = 4`, not 95%.
+10. **Silent-skip class widened, not closed.** The Layer 2 outlier check and `context_gap_detection` now fail loudly.
+    Layer 1 `gap_detection` still logs its failure at DEBUG (`quality_validator.py`, same shape) — not changed here.
+11. **New dependency.** `exchange-calendars` (lazy import; absence degrades to peer agreement with a WARNING).
+    `poetry.lock` was regenerated with Poetry 2.5.1 (4 packages added, no existing pin changed, plus Poetry-version
+    metadata lines); if your Poetry is older, run `poetry lock` once.
+12. **Not done:** R03 (operational: confirm the Silver chain, re-run the three weekly jobs so their `regime` tag
+    comes from the engine's own label, check the Gatekeeper `cross_asset` scope flags weekly outputs older than ~8
+    days — `gatekeeper.py` was not read); R06; R08 information-set lags (decision D1; `lag_basis` is always
+    `date_index`), 250-500 observation windows, leader -> follower-group tests; R09 Step B; R11 (deferred, D5);
+    R12 estimator study on US followers; R13 `cross_asset_xgboost` features. Weekly files on disk still carry the
+    legacy `RISK_ON` tag until R02's re-run.
+13. **Review notes (2026-11-02, pre-apply).** (a) `LeadLagModule._load_dropped_counts` adds two more
+    `CAST(timestamp AS DATE)` to a file already on `test_trade_date.PENDING_DECISION_D1`; the file-level allowlist
+    cannot see a new occurrence, so the guard did not fire. They deliberately match `_load_returns` (same window) and
+    are session-timezone dependent — convert both together in the RISK-37 D1 change. (b) The 5-day staleness rule
+    lives in two constants (`regime_tag.MAX_TAG_AGE_DAYS`, `screener.GLOBAL_REGIME_TOLERANCE_DAYS`), pinned equal by a
+    test. (c) The debounced `global_regime_label` is stable under forward runs but a BACKFILL (`--date` in the past) or
+    a revised Silver bar re-derives every later row's label/transition/days_in_state; already-consumed watchlists are
+    not revised. (d) Placebo calibration originally used the 8-decimal rounded p (everything < 5e-9 became 0 and the
+    strongest pairs lost their order); it now uses the exact p. (e) `n_dropped_bars` adds a second full scan of Layer 1
+    + Layer 2 1D Silver per weekly run (same footprint as `_load_returns`). (f) The calendar-oracle and several other
+    tests use `importorskip("exchange_calendars")`: until the dependency is installed they SKIP silently — install it
+    before trusting a green run. (g) `poetry.lock` is delivered as a separate file: Poetry 2.5.1 re-resolution rewrote
+    six unrelated dependency-spec lines and the header; running `poetry lock` with your own Poetry gives a cleaner diff.

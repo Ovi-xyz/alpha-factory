@@ -69,6 +69,25 @@ class TestGetGlobalRegime:
         _patch(monkeypatch, "GOLD_GLOBAL_REGIME_PATH", tmp_path / "absent.parquet")
         assert loader.get_global_regime(date(2026, 9, 25)) is None
 
+    def test_same_date_rows_resolve_to_the_newest_bar(self, loader, monkeypatch, tmp_path):
+        """XAE-R01: a same-day re-run after Silver advanced one bar leaves two rows with one `date`."""
+        p = tmp_path / "global_regime.parquet"
+        pl.DataFrame({
+            "date": ["2026-09-25", "2026-09-25"],
+            "as_of_bar_date": [date(2026, 9, 23), date(2026, 9, 24)],
+            "global_risk_score": [40.0, 70.0],
+            "global_regime_label": ["MIXED", "RISK_ON"],
+        }).write_parquet(p)
+        _patch(monkeypatch, "GOLD_GLOBAL_REGIME_PATH", p)
+        row = loader.get_global_regime(date(2026, 9, 25))
+        assert row["global_regime_label"] == "RISK_ON"
+
+    def test_legacy_file_without_bar_date_still_reads(self, loader, monkeypatch, tmp_path):
+        p = tmp_path / "global_regime.parquet"
+        self._write(p)
+        _patch(monkeypatch, "GOLD_GLOBAL_REGIME_PATH", p)
+        assert loader.get_global_regime(date(2026, 9, 26))["global_regime_label"] == "RISK_ON"
+
 
 class TestGetCrossAssetCorr:
 

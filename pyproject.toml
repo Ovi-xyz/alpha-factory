@@ -1085,6 +1085,13 @@ statsmodels = "*"
 # the wheel needs the OpenMP runtime: `brew install libomp`. After pulling this change run
 # `poetry lock` (or `poetry add xgboost`) once on the M1 to refresh poetry.lock.
 xgboost = ">=2.0"
+# ADD XAE-R05 (cross_asset_recalibration_guide Q3/Q4, decision D2): exchange-calendar oracle for the Silver
+# gap check (src/utils/calendar_oracle.py, config/exchange_calendars.yaml). It is imported LAZILY: if the
+# package is missing the oracle reports "unknown" for every symbol and the gap check falls back to peer
+# agreement, with a WARNING — so an absent install degrades loudly instead of breaking Silver. >=4.5 for
+# the XIDX (Jakarta) and XTAI calendars. After pulling this change run `poetry lock` (or
+# `poetry add exchange-calendars`) once on the M1 to refresh poetry.lock if it was not regenerated.
+exchange-calendars = ">=4.5"
 httpx = "*"
 requests = "*"
 

@@ -1,5 +1,65 @@
 # CHANGELOG — Data Platform
 
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — rekalibrasi CrossAssetEngine: XAE-R01, R02, R04, R05, R07, R08, R09 Step A, R10 (November 2026)
+
+**Latar.** `cross_asset_recalibration_guide.md` (diusulkan sebagai ADR-056/057) mengukur input dan estimator
+CrossAssetEngine pada Silver sampai bar 16 Okt 2026. Perubahan ini mengimplementasikan paket kerja yang bisa
+diverifikasi di sandbox; yang membutuhkan data live atau keputusan Ovi sengaja tidak dikerjakan (lihat
+"Belum dikerjakan"). Semua perubahan skema bersifat **aditif**.
+
+**Perubahan.**
+- **XAE-R01** `global_regime.parquet`: satu baris per *bar date* (`as_of_bar_date`), bukan per tanggal run.
+  Run Sabtu dan Minggu setelah bar Jumat tidak lagi menambah salinan identik; `date` tetap tanggal run
+  pertama yang melihat bar itu (PIT-aman). `regime_transition` dihitung atas urutan bar date. Baris lama
+  (tanpa `as_of_bar_date`) yang merupakan salinan akhir pekan dibuang saat migrasi.
+  `regime_tag.current_regime_tag()` kini menolak label basi (`max_age_days=5`, diukur dari bar date):
+  hasilnya `UNKNOWN` plus WARNING, bukan RISK_OFF lama yang dibaca sebagai kondisi sekarang.
+  **Temuan di luar guide:** `screener.py` membaca `global_regime` dengan `date == run_date` — dengan satu baris
+  per bar date, watchlist akhir pekan akan kehilangan kolom global regime. Diganti `_load_global_regime()`
+  (as-of, toleransi 5 hari); `PITDataLoader.get_global_regime` dan `regime_tag` memakai `as_of_bar_date`
+  sebagai tie-break bila dua baris berbagi `date`.
+- **XAE-R02** Tes paritas: setiap modul mingguan harus menulis tag yang sama persis dengan
+  `current_regime_tag(computation_date)`. Re-run job mingguan itu sendiri adalah langkah operator.
+- **XAE-R04** (QV-OUT-03) Satu query deteksi outlier bersama untuk Layer 1 dan Layer 2
+  (`_find_outlier_symbols`), dengan guard `isfinite(log_return)` yang sebelumnya hilang di Layer 2. Satu
+  nilai NaN/Inf di salah satu dari 58 simbol Layer 2 dulu mematikan flag outlier untuk semuanya tanpa suara
+  (direproduksi: `STDDEV_SAMP is out of range`). Kegagalan deteksi kini WARNING + `_issues`, bukan DEBUG.
+  `context_gap_detection` mendapat perlakuan yang sama (kegagalan diam-diam di blok itu menyembunyikan bug
+  saat pengembangan).
+- **XAE-R05** Gap Layer 2 diklasifikasikan lebih dulu oleh *calendar oracle* (`src/utils/calendar_oracle.py`,
+  `config/exchange_calendars.yaml`, dependensi baru `exchange-calendars`), peer agreement hanya sebagai
+  cadangan bila kalender tidak tersedia. Oracle tiga nilai: closure / sesi tanpa bar / tidak diketahui.
+  N225, DAX, dan JKSE (sendirian di kalendernya) kini bisa diklasifikasikan. Bila library hilang, perilaku
+  kembali ke peer agreement dengan WARNING, tidak crash. `poetry.lock` ditambah 4 paket
+  (`exchange-calendars`, `korean-lunar-calendar`, `pyluach`, `toolz`); versi paket lain tidak berubah.
+- **XAE-R07** `global_index_regime` (processing_version 1.1): `global_regime_label` kini *debounce* 3 bar date
+  dari label mentah (`global_regime_label_raw`); skor memberi blok AS (SPX/NYA/DJI/IXIC) **satu suara**
+  (`global_risk_score`; hitungan lama dipertahankan sebagai `global_risk_score_equal`); kolom baru
+  `breadth_dist_pct`, `days_in_state`, `flicker_10d`. **Ini mengubah arti `global_risk_score` dan label yang
+  dilihat konsumen** — mohon dikonfirmasi (bobot wilayah adalah nilai awal yang belum dituning).
+- **XAE-R08** `lead_lag_module`: estimator winsorised ±3 robust σ; kalibrasi placebo (leader digeser sirkular)
+  dengan ekor power-law di bawah minimum null; `bh_significant` = BH q=0,03 atas p terkalibrasi (q **tidak**
+  dilonggarkan), kolom lama dipertahankan (`bh_significant_raw`, `p_value_adjusted`); pasangan tautologi
+  (`config/cross_asset_relations.yaml`, DXY → anggota basket) dikeluarkan dari kedua keluarga uji;
+  `actionable` memakai kuantil null n-aware (`corr_null_p95`, ≈0,40 pada n=44) menggantikan 0,15 tetap;
+  kolom pelaporan `n_tests`, `n_obs`, `estimator`, `n_dropped_bars`, `n_null_draws`, `lag_basis`. Screener
+  memakai `actionable` bila ada. Bila null terlalu tipis (< `MIN_NULL_DRAWS`) kalibrasi dilewati dan
+  digunakan BH mentah yang lama, dengan WARNING.
+- **XAE-R09 Step A** `forecast_module`: `forecast_kind` (`var`/`trailing_mean`), `has_signal` (`var_lag > 0`),
+  `stable` bernilai NULL untuk lag-0, `forecast_cum_return`. Screener mengosongkan `forecast_return_1d`
+  untuk baris tanpa sinyal dan menambah `forecast_has_signal`.
+- **XAE-R10** `correlation_module`: tanpa perubahan nilai. Docstring menyatakan matriks adalah *satu* matriks
+  Ledoit-Wolf yang diberi tag regime (bukan per-regime); kontrak screener (skema, satu `cluster_id` per simbol,
+  simetri) di-pin; condition number dicatat tiap run (WARNING di atas 50).
+
+**Belum dikerjakan** (alasan di dev-log dan KNOWN_RISKS RISK-41): R03 (operasional), R06 (pemisahan flag
+Silver — keputusan D3, dampak Layer 1), R08 bagian lag information-set / window 250–500 / uji grup /
+tautologi ETF, R09 Step B, R11 (ditunda sesuai D5), R12, R13.
+
+**Verifikasi.** Sandbox: 3053 tes terkumpul (baseline 2881), 3038 lulus + 15 sengaja dideselect (tes
+`poetry` yang butuh binary `poetry`); 17 mutan pada guard baru, semuanya terbunuh. **Belum dijalankan pada
+Silver live.**
+
 ## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — `legacy_correlation_bridge.py` diarsipkan: screener membaca `cross_asset_corr.parquet` langsung, `v_correlation` dihapus (Oktober 2026)
 
 **Latar.** Jembatan GMI-CORR-RETIRE-01 (RISK-31, 20 Sep 2026) menurunkan

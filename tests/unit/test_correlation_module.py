@@ -371,3 +371,93 @@ class TestRunEntryPoint:
         """run() must log and return, never raise, when upstream
         resolvers haven't produced a file for run_date yet."""
         run(RUN_DATE)  # no exception
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XAE-R10 — the contract gold_screener's cluster dedup depends on
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestContractR10:
+
+    @staticmethod
+    def _factor_universe(paths, n_per_group=8, n_groups=3, seed=11):
+        tmp_path, as_out, ca_out = paths
+        rng = np.random.default_rng(seed)
+        syms = []
+        for g in range(n_groups):
+            common = rng.normal(0, 0.01, N_DAYS)
+            for i in range(n_per_group):
+                s = f"G{g}S{i}"
+                syms.append(s)
+                _write_l1_returns(tmp_path, s, common + rng.normal(0, 0.004, N_DAYS))
+        _write_active_ohlcv(as_out, syms)
+        _write_context_anchors(ca_out, [])
+        return syms
+
+    def test_output_schema_is_pinned(self, paths):
+        self._factor_universe(paths)
+        result = CorrelationModule().compute(RUN_DATE)
+        assert result.columns == ["symbol_a", "symbol_b", "correlation", "regime", "computation_date",
+                                  "cluster_id_a", "cluster_id_b"]
+        assert result.schema["cluster_id_a"].is_integer() and result.schema["cluster_id_b"].is_integer()
+
+    def test_one_cluster_id_per_symbol_across_every_row(self, paths):
+        """The screener unions symbol_a/cluster_id_a with symbol_b/cluster_id_b; a symbol appearing with two
+        different ids would make its dedup partition ambiguous."""
+        self._factor_universe(paths)
+        r = CorrelationModule().compute(RUN_DATE)
+        long = pl.concat([
+            r.select(pl.col("symbol_a").alias("symbol"), pl.col("cluster_id_a").alias("cid")),
+            r.select(pl.col("symbol_b").alias("symbol"), pl.col("cluster_id_b").alias("cid")),
+        ])
+        assert long.group_by("symbol").agg(pl.col("cid").n_unique()).filter(pl.col("cid") != 1).is_empty()
+
+    def test_matrix_is_symmetric_with_unit_diagonal_and_positive_definite(self, paths):
+        syms = self._factor_universe(paths)
+        mod = CorrelationModule()
+        pivot, valid = mod._pivot_returns(mod._load_returns(syms, RUN_DATE))
+        cols = sorted(valid)
+        m = mod._ledoit_wolf_correlation(pivot, cols)
+        assert m.shape == (len(cols), len(cols))
+        assert np.allclose(m, m.T, atol=1e-12)
+        assert np.allclose(np.diag(m), 1.0, atol=1e-9)
+        assert np.linalg.eigvalsh(m).min() > 0
+
+    def test_shrinkage_improves_conditioning_over_the_sample_matrix(self, paths):
+        """Why Ledoit-Wolf is mandatory at p close to n (24 symbols, ~44 observations). NOTE: the
+        Architecture v2.0 §10.1 `condition number < 50` target is NOT asserted here — a tightly
+        factor-structured fixture sits above it (cond ~ 80) for reasons unrelated to the estimator; that
+        acceptance is checked on the live store via the per-run log line instead."""
+        syms = self._factor_universe(paths)
+        mod = CorrelationModule()
+        pivot, valid = mod._pivot_returns(mod._load_returns(syms, RUN_DATE))
+        cols = sorted(valid)
+        lw = mod._ledoit_wolf_correlation(pivot, cols)
+        sample = np.corrcoef(pivot.select(cols).fill_null(strategy="mean").to_numpy(), rowvar=False)
+        assert np.linalg.cond(lw) < np.linalg.cond(sample)
+
+    def test_condition_number_is_logged_every_run_and_warned_above_the_threshold(self, paths, monkeypatch):
+        from loguru import logger
+        import src.gold.cross_asset.correlation_module as cm
+        self._factor_universe(paths)
+        msgs = []
+        sink = logger.add(lambda m: msgs.append((m.record["level"].name, m.record["message"])), level="INFO")
+        try:
+            monkeypatch.setattr(cm, "CONDITION_NUMBER_WARN", 1e9)        # fixture cond ~ 80: below -> INFO
+            CorrelationModule().compute(RUN_DATE)
+            assert any(l == "INFO" and "condition number" in m for l, m in msgs)
+            assert not any(l == "WARNING" and "condition number" in m for l, m in msgs)
+            msgs.clear()
+            monkeypatch.setattr(cm, "CONDITION_NUMBER_WARN", 1.5)        # above the threshold -> WARNING
+            CorrelationModule().compute(RUN_DATE)
+        finally:
+            logger.remove(sink)
+        assert any(l == "WARNING" and "condition number" in m for l, m in msgs)
+
+    def test_ledoit_wolf_keeps_a_p_close_to_n_matrix_invertible(self, paths):
+        """24 symbols on ~44 observations: the raw sample matrix is near-singular, shrinkage must not be."""
+        syms = self._factor_universe(paths, n_per_group=8, n_groups=3)
+        mod = CorrelationModule()
+        pivot, valid = mod._pivot_returns(mod._load_returns(syms, RUN_DATE))
+        m = mod._ledoit_wolf_correlation(pivot, sorted(valid))
+        assert np.linalg.matrix_rank(m) == m.shape[0]

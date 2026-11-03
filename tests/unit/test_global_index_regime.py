@@ -88,8 +88,10 @@ class TestResolveUniverse:
 
 class TestComputeBreadthMath:
     def test_all_dm_up_all_em_down(self, module_with_tmp_paths):
-        """9 DM uptrending, 5 EM downtrending -> dm_score=100, em_score=0,
-        global=9/14≈64.3 (RISK_ON), matches the manual smoke-test values."""
+        """9 DM uptrending, 5 EM downtrending -> dm_score=100, em_score=0.
+        The equal-weight count is 9/14 (kept as global_risk_score_equal); the region-weighted
+        global_risk_score (XAE-R07) gives SPX/NYA/DJI/IXIC ONE vote: 5 other DM + 1 US block up out of
+        10 + 1 votes = 6/11 -> MIXED, where the old count said RISK_ON (guide G5)."""
         module, tmp_path = module_with_tmp_paths
         _write_all_trending(tmp_path, dm_trend=1.0, em_trend=-1.0)
         run_date = date(2026, 1, 1) + timedelta(days=79)
@@ -99,9 +101,11 @@ class TestComputeBreadthMath:
         assert record is not None
         assert record["dm_score"] == 100.0
         assert record["em_score"] == 0.0
-        assert record["global_risk_score"] == pytest.approx(9 / 14 * 100, abs=0.01)
+        assert record["global_risk_score_equal"] == pytest.approx(9 / 14 * 100, abs=0.01)
+        assert record["global_risk_score"] == pytest.approx(6 / 11 * 100, abs=0.01)
         assert record["dm_em_divergence"] == 100.0
-        assert record["global_regime_label"] == "RISK_ON"
+        assert record["global_regime_label_raw"] == "MIXED"
+        assert record["global_regime_label"] == "MIXED"
         assert record["n_dm_covered"] == 9
         assert record["n_em_covered"] == 5
         assert record["partial_coverage_flag"] is False
@@ -191,7 +195,10 @@ class TestRegimeTransition:
         assert record["regime_transition"] is False
         assert record["prev_global_regime_label"] is None
 
-    def test_transition_true_when_label_changes_across_runs(self, module_with_tmp_paths):
+    def test_transition_true_when_label_changes_across_runs(self, module_with_tmp_paths, monkeypatch):
+        """Transition mechanics with the debounce switched off (DEBOUNCE_DAYS=1); the debounce itself is
+        covered in TestDebounceR07."""
+        monkeypatch.setattr(gir, "DEBOUNCE_DAYS", 1)
         _, tmp_path = module_with_tmp_paths
         _write_all_trending(tmp_path, dm_trend=1.0, em_trend=1.0, n_days=80)
         d1 = date(2026, 1, 1) + timedelta(days=79)
@@ -311,3 +318,278 @@ class TestRunEntryPoint:
         # SPX still contributes (via its last clean bar, day 78) — coverage
         # is unaffected by excluding one dirty bar out of many.
         assert record["n_dm_covered"] == 9
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XAE-R01 / XAE-R07 (cross_asset_recalibration_guide) — bar-date keying, debounce, region weighting
+# ═══════════════════════════════════════════════════════════════════════════
+
+from src.gold.cross_asset.global_index_regime import (  # noqa: E402
+    apply_state, debounce_labels, normalize_legacy_rows, upsert_bar_row, US_VOTE_BLOCK,
+)
+
+D0 = date(2026, 1, 1)
+
+
+def _store(tmp_path) -> pl.DataFrame:
+    return pl.read_parquet(tmp_path / "gold" / "global_regime.parquet")
+
+
+def _write_with_last_bar_date(tmp_path, last_bar: date, trend: float = 1.0, em_trend: float | None = None):
+    """Every index trades up to `last_bar` inclusive (calendar-continuous fixture)."""
+    n_days = (last_bar - D0).days + 1
+    _write_all_trending(tmp_path, dm_trend=trend, em_trend=trend if em_trend is None else em_trend,
+                        n_days=n_days)
+
+
+class TestBarDateKeying:
+    """XAE-R01 (guide G1): one row per BAR date; weekend re-runs add nothing."""
+
+    def test_weekend_reruns_after_a_friday_bar_add_no_row(self, module_with_tmp_paths):
+        _, tmp_path = module_with_tmp_paths
+        friday = date(2026, 3, 20)
+        _write_with_last_bar_date(tmp_path, friday)
+        run(date(2026, 3, 21))            # Saturday run, newest bar = Friday
+        run(date(2026, 3, 22))            # Sunday run, same bar
+        store = _store(tmp_path)
+        assert store.height == 1
+        assert store["as_of_bar_date"][0] == friday
+
+    def test_first_seen_run_date_is_kept_for_lineage(self, module_with_tmp_paths):
+        """`date` is when the bar first became available — the PIT-safe choice — not the last re-run."""
+        _, tmp_path = module_with_tmp_paths
+        _write_with_last_bar_date(tmp_path, date(2026, 3, 20))
+        run(date(2026, 3, 21))
+        run(date(2026, 3, 22))
+        assert _store(tmp_path)["date"].to_list() == ["2026-03-21"]
+
+    def test_a_new_bar_adds_a_row(self, module_with_tmp_paths):
+        _, tmp_path = module_with_tmp_paths
+        _write_with_last_bar_date(tmp_path, date(2026, 3, 20))
+        run(date(2026, 3, 21))
+        _write_with_last_bar_date(tmp_path, date(2026, 3, 23))
+        run(date(2026, 3, 24))
+        store = _store(tmp_path).sort("as_of_bar_date")
+        assert store["as_of_bar_date"].to_list() == [date(2026, 3, 20), date(2026, 3, 23)]
+
+    def test_transition_is_counted_per_bar_date_not_per_run(self, module_with_tmp_paths, monkeypatch):
+        """Friday bar scored RISK_ON; Silver then catches up and the Saturday run also sees only Friday —
+        the label cannot 'transition' just because another run happened."""
+        monkeypatch.setattr(gir, "DEBOUNCE_DAYS", 1)
+        _, tmp_path = module_with_tmp_paths
+        _write_with_last_bar_date(tmp_path, date(2026, 3, 20))
+        run(date(2026, 3, 21))
+        run(date(2026, 3, 22))
+        run(date(2026, 3, 23))            # still the Friday bar (no Monday bar yet)
+        store = _store(tmp_path)
+        assert store.height == 1
+        assert store["regime_transition"].to_list() == [False]
+
+    def test_as_of_bar_date_is_the_newest_bar_any_index_contributed(self, module_with_tmp_paths):
+        module, tmp_path = module_with_tmp_paths
+        _write_all_trending(tmp_path, 1.0, 1.0, n_days=70)
+        _write_context_symbol(tmp_path, "SPX", 100.0, 1.0, n_days=75)   # one index is 5 bars ahead
+        record = module.compute(D0 + timedelta(days=100))
+        assert record["as_of_bar_date"] == D0 + timedelta(days=74)
+
+    def test_late_bars_after_run_date_are_not_read(self, module_with_tmp_paths):
+        module, tmp_path = module_with_tmp_paths
+        _write_all_trending(tmp_path, 1.0, 1.0, n_days=80)
+        record = module.compute(D0 + timedelta(days=50))
+        assert record["as_of_bar_date"] == D0 + timedelta(days=50)
+
+    def test_run_writes_the_new_columns(self, module_with_tmp_paths):
+        _, tmp_path = module_with_tmp_paths
+        _write_all_trending(tmp_path, 1.0, -1.0)
+        run(D0 + timedelta(days=79))
+        cols = set(_store(tmp_path).columns)
+        assert {"as_of_bar_date", "global_regime_label_raw", "global_risk_score_equal",
+                "breadth_dist_pct", "days_in_state", "flicker_10d"} <= cols
+
+
+class TestLegacyRows:
+    """Rows written before processing_version 1.1 have no bar date and may be weekend duplicates."""
+
+    @staticmethod
+    def _legacy(rows):
+        base = {"dm_score": 50.0, "em_score": 50.0, "asia_pac_breadth": 50.0}
+        return pl.DataFrame([
+            {**base, "date": d, "global_risk_score": sc, "global_regime_label": lab,
+             "as_of_bar_date": None}
+            for d, sc, lab in rows
+        ], schema_overrides={"as_of_bar_date": pl.Date})
+
+    def test_identical_weekend_copy_is_dropped(self):
+        df = self._legacy([("2026-10-16", 50.0, "MIXED"), ("2026-10-17", 35.7, "RISK_OFF"),
+                           ("2026-10-18", 35.7, "RISK_OFF")])
+        out = normalize_legacy_rows(df).sort("date")
+        assert out["date"].to_list() == ["2026-10-16", "2026-10-17"]
+
+    def test_rows_with_a_bar_date_are_never_dropped(self):
+        df = self._legacy([("2026-10-17", 35.7, "RISK_OFF"), ("2026-10-18", 35.7, "RISK_OFF")]).with_columns(
+            pl.Series("as_of_bar_date", [date(2026, 10, 16), date(2026, 10, 16)], dtype=pl.Date))
+        assert normalize_legacy_rows(df).height == 2
+
+    def test_a_legacy_label_change_is_kept(self):
+        df = self._legacy([("2026-10-16", 50.0, "MIXED"), ("2026-10-17", 35.7, "RISK_OFF")])
+        assert normalize_legacy_rows(df).height == 2
+
+
+class TestUpsert:
+    def _row(self, run_date, bar, label="RISK_ON"):
+        return pl.DataFrame([{"date": run_date, "as_of_bar_date": bar, "global_regime_label": label,
+                              "global_regime_label_raw": label, "global_risk_score": 70.0}])
+
+    def test_same_bar_replaces_and_keeps_earliest_run_date(self):
+        store = self._row("2026-03-21", date(2026, 3, 20))
+        out = upsert_bar_row(store, self._row("2026-03-22", date(2026, 3, 20), "MIXED"))
+        assert out.height == 1
+        assert out["date"][0] == "2026-03-21"
+        assert out["global_regime_label_raw"][0] == "MIXED"     # latest Silver wins
+
+    def test_backfill_with_an_earlier_run_date_takes_the_earlier_date(self):
+        store = self._row("2026-03-22", date(2026, 3, 20))
+        out = upsert_bar_row(store, self._row("2026-03-21", date(2026, 3, 20)))
+        assert out["date"][0] == "2026-03-21"
+
+    def test_different_bar_is_appended(self):
+        store = self._row("2026-03-21", date(2026, 3, 20))
+        assert upsert_bar_row(store, self._row("2026-03-24", date(2026, 3, 23))).height == 2
+
+
+class TestDebounceR07:
+    """XAE-R07 (guide G4): switch only after DEBOUNCE_DAYS consecutive bar dates of a new raw label."""
+
+    def test_two_day_blip_does_not_switch_at_three(self):
+        raw = ["MIXED", "MIXED", "RISK_OFF", "RISK_OFF", "MIXED", "MIXED"]
+        assert debounce_labels(raw, 3) == ["MIXED"] * 6
+
+    def test_three_consecutive_days_switch_on_the_third(self):
+        raw = ["MIXED", "RISK_OFF", "RISK_OFF", "RISK_OFF", "RISK_OFF"]
+        assert debounce_labels(raw, 3) == ["MIXED", "MIXED", "MIXED", "RISK_OFF", "RISK_OFF"]
+
+    def test_a_return_to_the_current_label_cancels_a_pending_switch(self):
+        raw = ["MIXED", "RISK_OFF", "RISK_OFF", "MIXED", "RISK_OFF", "RISK_OFF", "MIXED"]
+        assert set(debounce_labels(raw, 3)) == {"MIXED"}
+
+    def test_candidate_change_restarts_the_count(self):
+        # OFF, OFF, then ON, ON, ON: the pending OFF never reaches 3; ON does.
+        raw = ["MIXED", "RISK_OFF", "RISK_OFF", "RISK_ON", "RISK_ON", "RISK_ON"]
+        assert debounce_labels(raw, 3)[-1] == "RISK_ON"
+        assert debounce_labels(raw, 3)[3] == "MIXED"
+
+    def test_n_one_is_the_identity(self):
+        raw = ["A", "B", "A"]
+        assert debounce_labels(raw, 1) == raw
+
+    def test_replay_is_causal_a_later_label_never_changes_an_earlier_output(self):
+        raw = ["MIXED", "RISK_OFF", "RISK_OFF", "RISK_OFF", "MIXED", "MIXED", "MIXED"]
+        full = debounce_labels(raw, 3)
+        for k in range(1, len(raw) + 1):
+            assert debounce_labels(raw[:k], 3) == full[:k]
+
+    def test_flicker_cuts_transitions_on_a_choppy_series(self):
+        raw = (["MIXED", "RISK_OFF"] * 20)
+        deb = debounce_labels(raw, 3)
+        raw_changes = sum(1 for a, b in zip(raw, raw[1:]) if a != b)
+        deb_changes = sum(1 for a, b in zip(deb, deb[1:]) if a != b)
+        assert raw_changes == 39 and deb_changes == 0
+
+    def test_apply_state_derives_prev_transition_days_and_flicker(self):
+        labels = ["MIXED", "MIXED", "RISK_OFF", "RISK_OFF", "RISK_OFF", "RISK_OFF"]
+        series = pl.DataFrame({
+            "date": [f"2026-03-{20 + i}" for i in range(6)],
+            "as_of_bar_date": [date(2026, 3, 20 + i) for i in range(6)],
+            "global_regime_label": labels, "global_regime_label_raw": labels,
+        })
+        out = apply_state(series, debounce_days=3)
+        assert out["global_regime_label"].to_list() == ["MIXED"] * 4 + ["RISK_OFF"] * 2
+        assert out["regime_transition"].to_list() == [False, False, False, False, True, False]
+        assert out["prev_global_regime_label"].to_list() == [None, "MIXED", "MIXED", "MIXED", "MIXED",
+                                                             "RISK_OFF"]
+        assert out["days_in_state"].to_list() == [1, 2, 3, 4, 1, 2]
+        assert out["flicker_10d"].to_list() == [0, 0, 1, 1, 1, 1]
+
+    def test_apply_state_orders_by_bar_date_not_by_row_order(self):
+        series = pl.DataFrame({
+            "date": ["2026-03-24", "2026-03-21"],
+            "as_of_bar_date": [date(2026, 3, 23), date(2026, 3, 20)],
+            "global_regime_label": ["RISK_OFF", "MIXED"],
+            "global_regime_label_raw": ["RISK_OFF", "MIXED"],
+        })
+        out = apply_state(series, debounce_days=1)
+        assert out["as_of_bar_date"].to_list() == [date(2026, 3, 20), date(2026, 3, 23)]
+        assert out["regime_transition"].to_list() == [False, True]
+
+    def test_end_to_end_one_day_crash_is_debounced(self, module_with_tmp_paths):
+        """Three runs: calm -> one RISK_OFF day -> calm. The published label never leaves its state."""
+        _, tmp_path = module_with_tmp_paths
+        n = 70
+        _write_all_trending(tmp_path, 1.0, 1.0, n_days=n)
+        run(D0 + timedelta(days=n - 1))
+        # one day where every index closes far below its EMA
+        for s in ALL_SYMBOLS:
+            path = tmp_path / "context" / f"symbol={s}" / f"{s}_1D_silver.parquet"
+            df = pl.read_parquet(path)
+            crash = pl.DataFrame({"symbol": [s], "timestamp": [D0 + timedelta(days=n)],
+                                  "close": [10.0], "is_clean": [True]})
+            pl.concat([df, crash]).write_parquet(path)
+        run(D0 + timedelta(days=n))
+        store = _store(tmp_path).sort("as_of_bar_date")
+        assert store["global_regime_label_raw"].to_list() == ["RISK_ON", "RISK_OFF"]
+        assert store["global_regime_label"].to_list() == ["RISK_ON", "RISK_ON"]
+        assert store["flicker_10d"].to_list() == [0, 1]
+
+
+class TestRegionWeighting:
+    """XAE-R07 (guide G5): the four US indices are one vote."""
+
+    def test_us_block_membership_exists_in_the_live_taxonomy(self):
+        dm, _ = GlobalIndexRegimeModule()._resolve_universe()
+        assert US_VOTE_BLOCK <= dm, f"US block symbols missing from context_equity_dm: {US_VOTE_BLOCK - dm}"
+
+    def test_us_block_alone_cannot_flip_the_label_across_the_neutral_band(self, module_with_tmp_paths):
+        """US block up, everything else down: the equal-weight count is 4/14 = 28.6 (RISK_OFF) while a
+        full US swing under the old rule could add 28.6 points. Weighted it is 1/11 = 9.1."""
+        module, tmp_path = module_with_tmp_paths
+        for s in ALL_SYMBOLS:
+            _write_context_symbol(tmp_path, s, 100.0, 1.0 if s in US_VOTE_BLOCK else -1.0)
+        record = module.compute(D0 + timedelta(days=79))
+        assert record["global_risk_score_equal"] == pytest.approx(4 / 14 * 100, abs=0.01)
+        assert record["global_risk_score"] == pytest.approx(1 / 11 * 100, abs=0.01)
+
+    def test_empty_block_restores_equal_weighting(self, module_with_tmp_paths, monkeypatch):
+        monkeypatch.setattr(gir, "US_VOTE_BLOCK", frozenset())
+        module, tmp_path = module_with_tmp_paths
+        _write_all_trending(tmp_path, 1.0, -1.0)
+        record = module.compute(D0 + timedelta(days=79))
+        assert record["global_risk_score"] == record["global_risk_score_equal"]
+
+    def test_partially_covered_block_still_casts_one_vote(self, module_with_tmp_paths):
+        module, tmp_path = module_with_tmp_paths
+        _write_all_trending(tmp_path, 1.0, 1.0)
+        import shutil
+        for s in ("NYA", "DJI"):
+            shutil.rmtree(tmp_path / "context" / f"symbol={s}")
+        record = module.compute(D0 + timedelta(days=79))
+        assert record["global_risk_score"] == 100.0              # everything up, any weighting
+        assert record["n_dm_covered"] == 7
+
+
+class TestBreadthDistance:
+    def test_distance_is_clipped_per_index(self, module_with_tmp_paths):
+        module, tmp_path = module_with_tmp_paths
+        _write_all_trending(tmp_path, 1.0, 1.0)
+        # one index ends 10x above its EMA: unclipped it would dominate the mean
+        path = tmp_path / "context" / "symbol=SPX" / "SPX_1D_silver.parquet"
+        df = pl.read_parquet(path)
+        df = df.with_columns(pl.when(pl.int_range(pl.len()) == pl.len() - 1).then(pl.col("close") * 10)
+                             .otherwise(pl.col("close")).alias("close"))
+        df.write_parquet(path)
+        record = module.compute(D0 + timedelta(days=79))
+        assert record["breadth_dist_pct"] <= gir.DIST_CLIP_PCT + 1e-9
+
+    def test_distance_is_negative_when_everything_trades_below_ema(self, module_with_tmp_paths):
+        module, tmp_path = module_with_tmp_paths
+        _write_all_trending(tmp_path, -1.0, -1.0)
+        assert module.compute(D0 + timedelta(days=79))["breadth_dist_pct"] < 0

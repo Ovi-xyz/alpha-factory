@@ -221,7 +221,8 @@ class TestKArZeroEdgeCase:
         assert result is not None
         row = result.filter(pl.col("horizon_days") == 1).row(0, named=True)
         if row["var_lag"] == 0:
-            assert row["stable"] is True
+            # XAE-R09: a lag-0 model has no dynamics — "stable" is NULL, not a vacuous True
+            assert row["stable"] is None
 
     def test_zero_lag_forecast_equals_training_mean(self, paths, monkeypatch):
         """When k_ar==0, the module's own documented fallback is the
@@ -563,3 +564,96 @@ class TestForecastDimensionalityRegressionV2:
         )
         row = result.row(0, named=True)
         assert row["n_pcs"] <= fm.MAX_PCS
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XAE-R09 Step A — honest labelling of the forecast (cross_asset_recalibration_guide F1-F5)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _run_two_followers(paths, monkeypatch):
+    """A follower driven by the lagged context factor (VAR signal) and one independent of it."""
+    tmp_path, as_out = paths
+    rng = np.random.default_rng(3)
+    ctx = rng.normal(0, 0.02, N_DAYS)
+    dependent = np.zeros(N_DAYS)
+    dependent[1:] = 0.9 * ctx[:-1] + rng.normal(0, 0.002, N_DAYS - 1)
+    _write_series(tmp_path, "DXY", "context", ctx)
+    _write_series(tmp_path, "DEPENDENT", "us_stocks", dependent)
+    _write_series(tmp_path, "NOISE", "us_stocks", rng.normal(0, 0.01, N_DAYS))
+    _write_followers(as_out, ["DEPENDENT", "NOISE"])
+    _set_forecast_context(monkeypatch, ["DXY"])
+    return ForecastModule().compute(RUN_DATE)
+
+
+class TestForecastLabelling:
+
+    def test_new_columns_present(self, paths, monkeypatch):
+        result = _run_two_followers(paths, monkeypatch)
+        assert {"forecast_kind", "has_signal", "forecast_cum_return"} <= set(result.columns)
+
+    def test_kind_and_has_signal_follow_var_lag(self, paths, monkeypatch):
+        result = _run_two_followers(paths, monkeypatch)
+        for row in result.iter_rows(named=True):
+            assert row["has_signal"] == (row["var_lag"] > 0)
+            assert row["forecast_kind"] == ("var" if row["var_lag"] > 0 else "trailing_mean")
+
+    def test_lag_zero_rows_have_null_stable_and_var_rows_do_not(self, paths, monkeypatch):
+        result = _run_two_followers(paths, monkeypatch)
+        lag0 = result.filter(pl.col("var_lag") == 0)
+        assert lag0.height > 0, "fixture must produce at least one lag-0 symbol"
+        assert lag0["stable"].null_count() == lag0.height
+        var = result.filter(pl.col("var_lag") > 0)
+        assert var.height > 0, "fixture must produce at least one VAR symbol"
+        assert var["stable"].null_count() == 0
+
+    def test_lag_zero_forecast_is_constant_across_horizons_and_labelled_as_such(self, paths, monkeypatch):
+        """The measured defect (guide F2): identical values across horizons. It is now declared."""
+        result = _run_two_followers(paths, monkeypatch)
+        lag0 = result.filter(pl.col("var_lag") == 0)
+        for sym in lag0["symbol"].unique().to_list():
+            sub = lag0.filter(pl.col("symbol") == sym)
+            assert sub["forecast_return"].n_unique() == 1
+            assert set(sub["forecast_kind"].to_list()) == {"trailing_mean"}
+            assert set(sub["has_signal"].to_list()) == {False}
+
+    def test_cum_return_is_the_running_sum_of_per_step_returns(self, paths, monkeypatch):
+        result = _run_two_followers(paths, monkeypatch)
+        for sym in result["symbol"].unique().to_list():
+            sub = result.filter(pl.col("symbol") == sym).sort("horizon_days")
+            expect = np.cumsum(sub["forecast_return"].to_numpy())
+            assert sub["forecast_cum_return"].to_numpy() == pytest.approx(expect, abs=1e-7)
+
+    def test_cum_return_h1_equals_forecast_return_h1(self, paths, monkeypatch):
+        result = _run_two_followers(paths, monkeypatch).filter(pl.col("horizon_days") == 1)
+        assert result["forecast_cum_return"].to_list() == pytest.approx(result["forecast_return"].to_list())
+
+    def test_stable_column_is_boolean_even_when_every_row_is_null(self, paths, monkeypatch):
+        """All-None would otherwise infer the Null dtype and break readers that cast the column."""
+        tmp_path, as_out = paths
+        rng = np.random.default_rng(4)
+        _write_series(tmp_path, "DXY", "context", rng.normal(0, 0.01, N_DAYS))
+        _write_series(tmp_path, "NOISE", "us_stocks", rng.normal(0, 0.01, N_DAYS))
+        _write_followers(as_out, ["NOISE"])
+        _set_forecast_context(monkeypatch, ["DXY"])
+        result = ForecastModule().compute(RUN_DATE)
+        assert result.schema["stable"] == pl.Boolean
+
+    def test_run_warns_when_no_symbol_has_a_signal(self, paths, monkeypatch):
+        from loguru import logger
+        tmp_path, as_out = paths
+        rng = np.random.default_rng(4)
+        _write_series(tmp_path, "DXY", "context", rng.normal(0, 0.01, N_DAYS))
+        _write_series(tmp_path, "NOISE", "us_stocks", rng.normal(0, 0.01, N_DAYS))
+        _write_followers(as_out, ["NOISE"])
+        _set_forecast_context(monkeypatch, ["DXY"])
+        monkeypatch.setattr(fm, "write_history_snapshot", lambda *a, **k: None)
+        msgs = []
+        sink = logger.add(lambda m: msgs.append(m.record["message"]), level="WARNING")
+        try:
+            run(RUN_DATE)
+        finally:
+            logger.remove(sink)
+        out = pl.read_parquet(tmp_path / "gold" / "cross_asset" / "cross_asset_forecast.parquet")
+        assert out.filter(pl.col("horizon_days") == 1)["has_signal"].sum() == 0, (
+            "fixture (seed 4, independent noise) must yield a lag-0 fit")
+        assert any("NO symbol has a VAR signal" in m for m in msgs)

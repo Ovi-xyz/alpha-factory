@@ -79,7 +79,8 @@ from loguru import logger
 
 from src.config.pipeline_config import duckdb_connection, get_config
 from src.utils.atomic_io import atomic_write_parquet  # FIX SIL-SQL-001 / SIL-AIO usage
-from src.utils.gap_analysis import GapEvent, classify_gaps_by_peer_agreement  # ADD GAP-PEER-01
+from src.utils.calendar_oracle import CalendarOracle  # ADD XAE-R05
+from src.utils.gap_analysis import GapEvent, classify_gaps, classify_gaps_by_peer_agreement  # ADD GAP-PEER-01 / XAE-R05
 from src.utils.silver_scope import (  # FIX QV-L2-01, ADD GAP-PEER-01
     context_glob,
     context_peer_groups,
@@ -162,6 +163,7 @@ class QualityValidator:
 
     def __init__(self) -> None:
         self._issues: list[dict] = []
+        self._last_gap_classification = None   # XAE-R05: GapClassification of the last gap check
 
     def run(self, run_date: date) -> dict[str, bool]:
         """
@@ -406,24 +408,34 @@ class QualityValidator:
         peer_map: dict[str, str],
         peer_sizes: dict[str, int],
         threshold_days: int = 5,
+        oracle: Optional[CalendarOracle] = None,
     ) -> tuple[int, int, dict[str, int]]:
         """Fetch + classify in one call. Returns (isolated_count,
         closure_count, closures_by_group) — the third element is only for
         the caller's DEBUG log line, e.g. {'idx': 282} or
-        {'context_equity_em': 66, 'context_equity_dm': 2}."""
+        {'context_equity_em': 66, 'context_equity_dm': 2}.
+
+        XAE-R05: with an `oracle` each event is first checked against the exchange calendar (closure /
+        genuinely missing / unknown) and only the unknown ones go to the peer rule. How each event was
+        decided is kept on self._last_gap_classification for the caller's log line."""
         raw = self._fetch_raw_gap_events(con, glob_or_globs, threshold_days)
         events = [
             GapEvent(symbol=r[0], prev_ts=r[1], ts=r[2], day_gap=r[3],
                      peer_group=peer_map.get(r[0]))
             for r in raw
         ]
-        isolated, closures = classify_gaps_by_peer_agreement(events, peer_sizes)
+        verdict_fn = None
+        if oracle is not None:
+            def verdict_fn(e: GapEvent):
+                return oracle.is_closure(e.symbol, e.prev_ts, e.ts)
+        c = classify_gaps(events, peer_sizes, oracle=verdict_fn)
+        self._last_gap_classification = c
 
         closures_by_group: dict[str, int] = {}
-        for e in closures:
+        for e in c.closures:
             closures_by_group[e.peer_group] = closures_by_group.get(e.peer_group, 0) + 1
 
-        return len(isolated), len(closures), closures_by_group
+        return len(c.isolated), len(c.closures), closures_by_group
 
     def _check_gap_detection(self, run_date: date) -> bool:
         """
@@ -487,6 +499,59 @@ class QualityValidator:
             logger.debug(f"[QV] gap_detection skipped: {e}")
         return True
 
+    def _find_outlier_symbols(
+        self, src, threshold: float, check_name: str
+    ) -> Optional[list[tuple[str, int]]]:
+        """
+        FIX QV-OUT-03 [XAE-R04, cross_asset_recalibration_guide Q1/Q2]: the ONE PASS-1 outlier query,
+        shared by Layer 1 (_check_outliers) and Layer 2 (_check_context_outliers).
+
+        The Layer 2 copy had never received QV-OUT-01's `isfinite(log_return)` guard, and its `try`
+        wrapped the whole query with an `except` that logged at DEBUG and returned True: a single
+        NaN/Inf return (a sign-crossing close, a zero price) in ANY of the 58 Layer 2 symbols made
+        DuckDB's STDDEV overflow and silently disabled outlier flagging for ALL of them. Two copies of
+        the same SQL is exactly how that happened (the GAP-PEER-01 precedent), so there is now one.
+
+        `src` is a glob string (Layer 2) or a list of globs (Layer 1); read_parquet takes either.
+        Returns [(symbol, outlier_count), ...] ([] when none), or None when the detection itself FAILED —
+        logged at WARNING and appended to self._issues so a disabled check can never look like a clean
+        one. The check still returns True (outliers are non-blocking by design); what changed is that
+        a failure is visible in the log and in quality_gate_log.detail.
+        """
+        try:
+            con = duckdb_connection()
+            return con.execute(
+                """
+                SELECT symbol, COUNT(*) AS outlier_count
+                FROM (
+                    SELECT
+                        symbol,
+                        log_return,
+                        AVG(log_return)    OVER (PARTITION BY symbol) AS mean_lr,
+                        STDDEV(log_return) OVER (PARTITION BY symbol) AS std_lr
+                    FROM read_parquet($src, hive_partitioning=true)
+                    WHERE log_return IS NOT NULL AND isfinite(log_return)
+                    -- FIX QV-OUT-01 (2 Sep 2026): a sign-crossing close (e.g. CL/WTI negative on
+                    -- 2020-04-20/21) makes ln(close/prev_close) NaN/Inf; without this filter DuckDB's
+                    -- STDDEV_SAMP window function overflows on that one partition and aborts the whole
+                    -- cross-symbol query. FIX QV-OUT-03: now applied to Layer 2 as well.
+                )
+                WHERE std_lr > 0
+                  AND ABS((log_return - mean_lr) / std_lr) > $threshold
+                GROUP BY symbol
+                """,
+                {"src": src, "threshold": threshold},
+            ).fetchall()
+        except Exception as e:
+            logger.warning(
+                f"[QV] {check_name} DETECTION FAILED — outlier flagging is OFF for this run: {e}"
+            )
+            self._issues.append({
+                "check":  check_name,
+                "detail": f"outlier detection query failed, no bars were flagged this run: {e}",
+            })
+            return None
+
     def _check_outliers(self, run_date: date) -> bool:
         """
         FIX F-QV-03 [P2]: result key renamed from 'ohlcv_outlier' to 'outlier_detection'
@@ -529,38 +594,9 @@ class QualityValidator:
             logger.debug("[QV] outlier_detection skipped: no Layer 1 data yet")
             return True
 
-        try:
-            con = duckdb_connection()
-            affected = con.execute(
-                """
-                SELECT symbol, COUNT(*) AS outlier_count
-                FROM (
-                    SELECT
-                        symbol,
-                        log_return,
-                        AVG(log_return)    OVER (PARTITION BY symbol) AS mean_lr,
-                        STDDEV(log_return) OVER (PARTITION BY symbol) AS std_lr
-                    FROM read_parquet($globs, hive_partitioning=true)
-                    WHERE log_return IS NOT NULL AND isfinite(log_return)
-                    -- FIX QV-OUT-01 [chat thread, 2 Sep 2026]: a sign-crossing
-                    -- close (e.g. CL/WTI negative on 2020-04-20/21, a real
-                    -- historical event, not bad data) makes
-                    -- ln(close/prev_close) undefined (NaN/Inf). Without this
-                    -- filter, DuckDB's STDDEV_SAMP window fn overflows on
-                    -- that one symbol's partition and aborts the whole query
-                    -- ("STDDEV_SAMP is out of range!"), silently skipping
-                    -- outlier detection for all 639 Layer 1 symbols at once,
-                    -- not just the offending one.
-                )
-                WHERE std_lr > 0
-                  AND ABS((log_return - mean_lr) / std_lr) > $threshold
-                GROUP BY symbol
-                """,
-                {"globs": globs, "threshold": threshold},
-            ).fetchall()
-        except Exception as e:
-            logger.debug(f"[QV] outlier_detection skipped: {e}")
-            return True
+        affected = self._find_outlier_symbols(globs, threshold, "outlier_detection")
+        if affected is None:
+            return True   # detection failed — already logged at WARNING and recorded in _issues
 
         if not affected:
             logger.debug("[QV] outlier_detection: no outliers found")
@@ -958,9 +994,24 @@ class QualityValidator:
                 return True
 
             peer_map, peer_sizes = context_peer_groups()
+            oracle = CalendarOracle.from_config()      # XAE-R05: calendar first, peers as fallback
             isolated_count, closure_count, closures_by_group = self._classified_gap_counts(
-                con, glob, peer_map, peer_sizes
+                con, glob, peer_map, peer_sizes, oracle=oracle
             )
+            cls = self._last_gap_classification        # None only if _classified_gap_counts is stubbed
+            ostat = oracle.status()
+            if ostat["failed_calendars"]:
+                logger.warning(
+                    f"[QV] context_gap_detection: calendar oracle degraded — calendars that could not "
+                    f"load: {ostat['failed_calendars']}; their symbols used peer agreement only"
+                )
+            if cls is not None:
+                logger.debug(
+                    f"[QV] context_gap_detection: {cls.closure_by_oracle} closure(s) by calendar, "
+                    f"{cls.isolated_by_oracle} genuinely missing session day(s) by calendar, "
+                    f"{cls.decided_by_peers} decided by peers; symbols without a calendar answer: "
+                    f"{sorted(ostat['unknown_symbols'])}"
+                )
 
             if closure_count:
                 logger.debug(
@@ -973,8 +1024,12 @@ class QualityValidator:
                 self._issues.append({
                     "check":  "context_gap_detection",
                     "detail": f"{isolated_count} isolated Layer 2 gaps > 5 "
-                              f"calendar days ({closure_count} peer-confirmed "
-                              f"market closures excluded)"
+                              f"calendar days ({closure_count} market closures excluded"
+                              + (f": {cls.closure_by_oracle} by exchange calendar, "
+                                 f"{closure_count - cls.closure_by_oracle} peer-confirmed; "
+                                 f"{cls.isolated_by_oracle} are session days with no bar"
+                                 if cls is not None else "")
+                              + ")"
                 })
                 return False
             logger.debug(
@@ -982,7 +1037,13 @@ class QualityValidator:
                 f"found (threshold=50; {closure_count} market-closure gaps excluded)"
             )
         except Exception as e:
-            logger.debug(f"[QV] context_gap_detection skipped: {e}")
+            # XAE-R05: was logger.debug — the same silent-skip shape as QV-OUT-03: a check that cannot
+            # run must not look like a check that passed (a bug in this very block was hidden by it).
+            logger.warning(f"[QV] context_gap_detection COULD NOT RUN — gap check is OFF this run: {e}")
+            self._issues.append({
+                "check":  "context_gap_detection",
+                "detail": f"gap check could not run, nothing was evaluated: {e}",
+            })
         return True
 
     def _check_context_outliers(self, run_date: date) -> bool:
@@ -998,29 +1059,9 @@ class QualityValidator:
         if glob is None:
             return True
 
-        try:
-            con = duckdb_connection()
-            affected = con.execute(
-                """
-                SELECT symbol, COUNT(*) AS outlier_count
-                FROM (
-                    SELECT
-                        symbol,
-                        log_return,
-                        AVG(log_return)    OVER (PARTITION BY symbol) AS mean_lr,
-                        STDDEV(log_return) OVER (PARTITION BY symbol) AS std_lr
-                    FROM read_parquet($glob, hive_partitioning=true)
-                    WHERE log_return IS NOT NULL
-                )
-                WHERE std_lr > 0
-                  AND ABS((log_return - mean_lr) / std_lr) > $threshold
-                GROUP BY symbol
-                """,
-                {"glob": glob, "threshold": threshold},
-            ).fetchall()
-        except Exception as e:
-            logger.debug(f"[QV] context_outlier_detection skipped: {e}")
-            return True
+        affected = self._find_outlier_symbols(glob, threshold, "context_outlier_detection")
+        if affected is None:
+            return True   # detection failed — already logged at WARNING and recorded in _issues
 
         if not affected:
             return True

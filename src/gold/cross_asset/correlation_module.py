@@ -39,6 +39,24 @@ requirement — Ledoit-Wolf is explicitly named there as one of the two
 acceptable choices (the other, MinCovDet, is not used here) — SSEC gets
 no separate special-casing.
 
+XAE-R10 (cross_asset_recalibration_guide C1/C2) — estimator and contract notes, NO value change:
+    * The matrix is ONE Ledoit-Wolf matrix per run, tagged with the current regime label. It is NOT
+      regime-conditional in the sense Architecture v2.0 §6.2.1 / ADR text describe (guide C1: 31,375 pairs =
+      251 symbols under a single tag). Any document that says "regime-conditional matrices" describes an
+      intention this module does not implement; the `regime` column is a tag.
+    * Input returns are the `is_clean = TRUE` bars, NOT winsorised. Guide C2 measured that keeping flagged
+      bars moves the mean pairwise correlation of the 14 indices by +0.006 on average, with 35 of 511 weekly
+      windows (6.8%) differing by more than 0.05 (up to +0.13 on 27 Mar 2020, 0.455 vs 0.585): a rare-episode
+      effect. Winsorising already-clean returns changes almost nothing, so feeding winsorised returns into
+      Ledoit-Wolf is deliberately deferred until the Silver quality-flag split (XAE-R06) releases the extreme
+      bars — that is when it starts to matter (robust.winsorise_columns is ready).
+    * CONTRACT with gold_screener (which reads this store directly since the legacy bridge was archived):
+      columns symbol_a, symbol_b, correlation, regime, computation_date, cluster_id_a, cluster_id_b; one
+      cluster_id per symbol per run; the matrix is symmetric with a unit diagonal and (for a realistic
+      universe) a condition number well under 50 (Architecture v2.0 §10.1). Pinned in
+      tests/unit/test_correlation_module.py::TestContractR10 — a schema change here breaks the screener's
+      cluster dedup.
+
 Regime conditioning: each weekly run is tagged with the CURRENT regime
 label — the engine's OWN global_regime_label (most recent row in
 gold/cross_asset/global_regime.parquet with date <= run_date; see
@@ -127,6 +145,7 @@ MIN_OBSERVATIONS   = 40   # FIX XAE-CAL-01 (16 Sep 2026): absolute count of real
                            # ceiling.
 N_CLUSTERS_TARGET  = 10
 MAX_PAIRS_RAM_WARN = 40_000  # ~283 symbols — informational only, Ledoit-Wolf does not
+CONDITION_NUMBER_WARN = 50   # XAE-R10: Architecture v2.0 §10.1 acceptance — logged every run, warned above
                               # share old correlation_matrix.py's RAM/instability
                               # concern at this symbol count; this just flags Parquet
                               # row-count growth for awareness.
@@ -157,6 +176,10 @@ class CorrelationModule:
             return None
 
         corr_matrix = self._ledoit_wolf_correlation(pivot, valid_symbols)
+        cond = float(np.linalg.cond(corr_matrix))
+        msg = (f"[gold_cross_asset_correlation] correlation matrix {len(valid_symbols)}x{len(valid_symbols)}: "
+               f"condition number {cond:.1f} (Architecture v2.0 §10.1 acceptance: < {CONDITION_NUMBER_WARN})")
+        (logger.warning if cond > CONDITION_NUMBER_WARN else logger.info)(msg)
         cluster_ids = self._cluster(corr_matrix, valid_symbols)
         regime = self._get_current_regime(run_date)
 

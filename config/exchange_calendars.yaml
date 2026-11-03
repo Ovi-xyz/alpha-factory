@@ -1,0 +1,37 @@
+# config/exchange_calendars.yaml — XAE-R05 (cross_asset_recalibration_guide Q3/Q4, decision D2)
+#
+# symbol -> `exchange_calendars` code, used ONLY by the Silver gap check to decide whether a calendar-day
+# gap in a Layer 2 series is an official market closure. A symbol that is absent here has NO calendar: its
+# gaps fall back to the peer-agreement rule (GAP-PEER-01), exactly as before.
+#
+# Why this exists: peer agreement cannot classify an index that is the only member of its holiday calendar.
+# N225 (13 events) and DAX (2) sit in a nine-member "context_equity_dm" group whose other members trade
+# normally on Japanese / German holidays, and JKSE has 12 of 13 events that no Asian peer shares (Indonesian
+# national holidays and "cuti bersama"). 17 closures stay "isolated" under ANY loosening of the overlap
+# definition (guide Q4), which made `context_gap_detection` red by construction. A calendar oracle needs no
+# peers.
+#
+# Entries are the exchange that PUBLISHES the series, not the instrument's currency. The Layer 2 commodity
+# futures (BZ=F, HG=F, ...) and the dollar index trade on calendars `exchange_calendars` does not model in a
+# way that matches yfinance's continuous series; they are deliberately left out (peer fallback). Coverage of
+# a calendar is bounded: outside [first_session, last_session] the oracle answers "unknown" and the peer
+# rule applies.
+version: "1.0"
+calendars:
+  # Global equity indices (context_equity_dm / context_equity_em)
+  SPX:   XNYS
+  NYA:   XNYS
+  DJI:   XNYS
+  IXIC:  XNYS
+  FTSE:  XLON
+  DAX:   XETR
+  CAC:   XPAR
+  N225:  XTKS
+  AXJO:  XASX
+  TWSE:  XTAI
+  KOSPI: XKRX
+  HSI:   XHKG
+  SSEC:  XSHG
+  JKSE:  XIDX
+  # Volatility index: calculated on NYSE session days
+  VIX:   XNYS

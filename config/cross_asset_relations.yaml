@@ -1,0 +1,21 @@
+# config/cross_asset_relations.yaml — XAE-R08 (cross_asset_recalibration_guide L2, section R08 "Tautologies")
+#
+# (leader, follower) pairs whose "lead-lag" is an ACCOUNTING IDENTITY, not an information channel. LeadLagModule
+# marks them `is_tautology = true`, leaves them out of both multiple-testing families (they would otherwise
+# be the only BH-significant rows: on the 16 Oct 2026 store all 5 significant pairs were DXY -> FX majors at
+# lag 1 with R2 0.41-0.73 and not one of 9,912 non-FX pairs survived), and never marks them actionable.
+#
+# DXY is a fixed basket (ICE: EUR 57.6%, JPY 13.6%, GBP 11.9%, CAD 9.1%, SEK 4.2%, CHF 3.6%), so a daily DXY
+# return is a weighted sum of these pairs' returns. Only members that are Layer 1 followers are listed
+# (SEK is not in the universe). NZD_USD is deliberately NOT here: it is not in the DXY basket, so a
+# DXY -> NZD_USD link is a dollar-factor relationship, which is real (if unsurprising) structure rather than
+# an identity — add it only if you decide to treat the broad USD factor as a tautology too.
+#
+# NOT YET COVERED: ETF -> constituent pairs (SPY -> AAPL, XLK -> MSFT, ...). The guide asks for them, but
+# constituent lists are not in the instrument registry, so they cannot be derived without inventing data. A
+# new `relation:` entry with an explicit follower list is all that is needed once a source exists.
+version: "1.0"
+tautologies:
+  - relation: dxy_basket
+    leader: DXY
+    followers: [EUR_USD, USD_JPY, GBP_USD, USD_CAD, USD_CHF]

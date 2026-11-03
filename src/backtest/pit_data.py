@@ -290,17 +290,34 @@ class PITDataLoader:
         Return the global equity-index breadth regime
         (gold_global_regime / global_index_regime.py) as of trade_date.
         Single-row idiom — 'date' column, most recent row on or before
-        trade_date.
+        trade_date. XAE-R01: two rows can share a `date` (a same-day re-run after Silver advanced one
+        bar), so the newest bar (`as_of_bar_date`, absent in files written before processing_version
+        1.1) breaks the tie. The two ORDER BY forms are separate static literals (GD §17.7: no
+        f-string SQL).
         """
         try:
-            result = self._con.execute(
-                """
+            try:
+                has_bar = "as_of_bar_date" in pl.read_parquet_schema(GOLD_GLOBAL_REGIME_PATH)
+            except Exception:
+                has_bar = False
+            if has_bar:
+                sql = """
                 SELECT *
-                FROM read_parquet($path)
+                FROM read_parquet($path, union_by_name=true)
+                WHERE CAST(date AS DATE) <= $trade_date
+                ORDER BY date DESC, as_of_bar_date DESC NULLS LAST
+                LIMIT 1
+                """
+            else:
+                sql = """
+                SELECT *
+                FROM read_parquet($path, union_by_name=true)
                 WHERE CAST(date AS DATE) <= $trade_date
                 ORDER BY date DESC
                 LIMIT 1
-                """,
+                """
+            result = self._con.execute(
+                sql,
                 {"path": GOLD_GLOBAL_REGIME_PATH, "trade_date": trade_date.isoformat()},
             ).pl()
 

@@ -72,13 +72,15 @@ retirement:
 
     lead_lag_tbl (data/gold/cross_asset/lead_lag_matrix.parquet,
         LeadLagModule, weekly) -> lead_lag_signal (bool: at least one
-        BH-significant leader this week), lead_lag_top_leader,
+        actionable — BH-significant, above the n-aware null correlation and not a basket tautology (XAE-R08);
+        pre-R08 files fall back to bh_significant — leader this week), lead_lag_top_leader,
         lead_lag_optimal_lag. Pre-aggregated per follower symbol in
         Python before registration — the raw store is one row per
         (leader, follower), screener wants one row per symbol.
 
     forecast_tbl (data/gold/cross_asset/cross_asset_forecast.parquet,
         ForecastModule, weekly) -> forecast_return_1d, forecast_stable,
+        forecast_has_signal (XAE-R09: NULL return/stable when var_lag = 0, i.e. a trailing mean),
         filtered to horizon_days=1 (nearest-term, most relevant to a
         watchlist of current candidates) — one row per symbol.
 
@@ -158,6 +160,7 @@ MIN_DOLLAR_VOLUME  = 1_000_000   # USD 1M/day
 # MIN_SECTOR_WEIGHT removed (ADR-055 v2): the sector concentration guard needed the regime-keyed
 # sector_weight_adj, which no longer exists (gold_sector archived); the `sector` column is gone too.
 CONTEXT_REGIME_TOLERANCE_DAYS = 5   # first-pass: same as context_regime.MARKET_TOLERANCE_DAYS
+GLOBAL_REGIME_TOLERANCE_DAYS  = 5   # XAE-R01: as-of read of global_regime, same tolerance as the regime tag
 TOP_N_WATCHLIST    = 20
 MAX_PER_CLUSTER    = 2       # Correlation concentration guard (GD §15.1)
 
@@ -227,6 +230,44 @@ def _load_context_regime(run_date: date) -> pl.DataFrame:
               .select(_empty_context_regime_df().columns))
 
 
+def _load_global_regime(run_date: date) -> pl.DataFrame:
+    """
+    XAE-R01: the latest global_regime row on or before run_date (as-of, PIT-safe), within
+    GLOBAL_REGIME_TOLERANCE_DAYS of its bar date. This used to filter `date == run_date` exactly, which was
+    correct only while the store wrote one row per RUN date; since processing_version 1.1 it holds one row
+    per BAR date (a weekend re-run no longer adds a copy), so an exact-date match would leave every
+    weekend watchlist without global-regime columns. Zero rows when the store is missing, empty before
+    run_date, too stale, or unreadable (the last two are logged).
+    """
+    if not GLOBAL_REGIME_PATH.exists():
+        return _empty_global_regime_df()
+    try:
+        raw = pl.read_parquet(GLOBAL_REGIME_PATH)
+        has_bar = "as_of_bar_date" in raw.columns
+        cols = ["date", "global_risk_score", "global_regime_label", "dm_em_divergence"]
+        df = (raw.select(cols + (["as_of_bar_date"] if has_bar else []))
+                 .with_columns(pl.col("date").cast(pl.Utf8).str.to_date(strict=False).alias("_d"))
+                 .filter(pl.col("_d") <= run_date)
+                 .sort(["_d", "as_of_bar_date"] if has_bar else ["_d"], descending=True,
+                       nulls_last=True)
+                 .head(1))
+    except Exception as e:
+        logger.warning(f"[gold_screener] global_regime unreadable ({e}) — global columns will be NULL")
+        return _empty_global_regime_df()
+    if df.is_empty():
+        return _empty_global_regime_df()
+    row = df.row(0, named=True)
+    basis = row.get("as_of_bar_date") or row["_d"]
+    age = (run_date - basis).days
+    if age > GLOBAL_REGIME_TOLERANCE_DAYS:
+        logger.warning(
+            f"[gold_screener] latest global_regime row is {age} days old "
+            f"(> {GLOBAL_REGIME_TOLERANCE_DAYS}) — global columns will be NULL"
+        )
+        return _empty_global_regime_df()
+    return df.select(["global_risk_score", "global_regime_label", "dm_em_divergence"])
+
+
 def _empty_active_df() -> pl.DataFrame:
     """Placeholder active symbols DataFrame dengan schema minimal."""
     return pl.DataFrame({
@@ -263,7 +304,32 @@ def _empty_forecast_df() -> pl.DataFrame:
         "symbol":              pl.Series([], dtype=pl.Utf8),
         "forecast_return_1d":  pl.Series([], dtype=pl.Float64),
         "forecast_stable":     pl.Series([], dtype=pl.Boolean),
+        "forecast_has_signal": pl.Series([], dtype=pl.Boolean),
     })
+
+
+def _load_forecast_1d() -> pl.DataFrame:
+    """
+    The horizon-1 row per symbol. XAE-R09 Step A: a row with has_signal = false (var_lag = 0) is the
+    trailing-window MEAN return, not a forecast, so its `forecast_return_1d` is NULL here and
+    `forecast_has_signal` says why. `forecast_stable` is NULL for those rows too. Files written before
+    XAE-R09 carry neither has_signal nor a NULLable stable: has_signal is then derived from var_lag when
+    present, and left NULL (value kept, as before) when neither column exists.
+    """
+    raw = pl.read_parquet(CROSS_ASSET_FORECAST_PATH).filter(pl.col("horizon_days") == 1)
+    if "has_signal" in raw.columns:
+        sig = pl.col("has_signal")
+    elif "var_lag" in raw.columns:
+        sig = pl.col("var_lag") > 0
+    else:
+        sig = pl.lit(None, dtype=pl.Boolean)
+    return (raw.with_columns(sig.alias("forecast_has_signal"))
+               .with_columns(
+                   pl.when(pl.col("forecast_has_signal") == False)       # noqa: E712 — NULL keeps the value
+                   .then(None).otherwise(pl.col("forecast_return")).alias("forecast_return_1d"),
+                   pl.when(pl.col("forecast_has_signal") == False)       # noqa: E712
+                   .then(None).otherwise(pl.col("stable")).alias("forecast_stable"))
+               .select(["symbol", "forecast_return_1d", "forecast_stable", "forecast_has_signal"]))
 
 
 def _empty_signal_agg_df() -> pl.DataFrame:
@@ -429,19 +495,9 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     # ADD GMI Wave 1 Cycle 4 — CrossAssetEngine sources (see module
     # docstring). Same has_X / try-except / _empty_*_df() idiom as above.
 
-    # Global regime table (GlobalIndexRegimeModule, daily) — single row
-    # for run_date, broadcast via LEFT JOIN ON TRUE like regime_tbl.
-    if GLOBAL_REGIME_PATH.exists():
-        try:
-            global_regime_df = pl.read_parquet(GLOBAL_REGIME_PATH).filter(
-                pl.col("date").cast(pl.Utf8) == str(run_date)
-            ).select(
-                ["global_risk_score", "global_regime_label", "dm_em_divergence"]
-            ).head(1)
-        except Exception:
-            global_regime_df = _empty_global_regime_df()
-    else:
-        global_regime_df = _empty_global_regime_df()
+    # Global regime table (GlobalIndexRegimeModule, daily) — the as-of row
+    # for run_date (XAE-R01), broadcast via LEFT JOIN ON TRUE like regime_tbl.
+    global_regime_df = _load_global_regime(run_date)
     con.register("global_regime_tbl", global_regime_df.to_arrow())
 
     # Lead-lag table (LeadLagModule, weekly) — pre-aggregated per follower
@@ -449,10 +505,17 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     if LEAD_LAG_PATH.exists():
         try:
             lead_lag_raw = pl.read_parquet(LEAD_LAG_PATH)
+            # XAE-R08: `actionable` (BH-significant AND above the n-aware null correlation AND not a
+            # tautology) is the signal when the store has it; a pre-R08 file only has bh_significant.
+            gate_col = "actionable" if "actionable" in lead_lag_raw.columns else "bh_significant"
+            rank_col = ("p_value_calibrated_adjusted"
+                        if "p_value_calibrated_adjusted" in lead_lag_raw.columns
+                        and lead_lag_raw["p_value_calibrated_adjusted"].null_count() < lead_lag_raw.height
+                        else "p_value_adjusted")
             lead_lag_df = (
                 lead_lag_raw
-                .filter(pl.col("bh_significant"))
-                .sort("p_value_adjusted")
+                .filter(pl.col(gate_col))
+                .sort(rank_col, nulls_last=True)
                 .group_by("follower", maintain_order=True)
                 .agg([
                     pl.len().alias("lead_lag_signal_count"),
@@ -470,12 +533,7 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     # horizon only, one row per symbol.
     if CROSS_ASSET_FORECAST_PATH.exists():
         try:
-            forecast_df = (
-                pl.read_parquet(CROSS_ASSET_FORECAST_PATH)
-                .filter(pl.col("horizon_days") == 1)
-                .select(["symbol", "forecast_return", "stable"])
-                .rename({"forecast_return": "forecast_return_1d", "stable": "forecast_stable"})
-            )
+            forecast_df = _load_forecast_1d()
         except Exception:
             forecast_df = _empty_forecast_df()
     else:
@@ -551,6 +609,7 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
         ll.lead_lag_top_lag,
         f.forecast_return_1d,
         f.forecast_stable,
+        f.forecast_has_signal,
         sa.composite_score,
         sa.composite_grade,
         sa.sector_breadth_pct,

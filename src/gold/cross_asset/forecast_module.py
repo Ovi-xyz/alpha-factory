@@ -133,11 +133,33 @@ global_regime.parquet's regime_transition column and issuing a
 something ForecastModule.compute() itself does. Out of scope for this
 module; noted so it isn't mistaken for an oversight.
 
+XAE-R09 Step A (cross_asset_recalibration_guide F1-F5, processing label only — no model change): HONEST
+LABELLING of what the forecast is.
+  Measured on the 16 Oct 2026 store: var_lag = 0 for 195 of 195 symbols (BIC at ~44 observations and 5
+  variables finds no lag structure), so every `forecast_return` was the trailing-window MEAN return,
+  identical across horizons 1-5 (max difference 0); `stable = True` was vacuous for a lag-0 model; the PCs
+  and the regime had no effect on a single value; week-over-week Spearman 0.88 is just the persistence of a
+  trailing mean. Presenting those rows as a forecast is a silent-failure shape, so each row now says what
+  it is:
+    forecast_kind        "var"  when a VAR with lag >= 1 produced it, "trailing_mean" when var_lag = 0.
+    has_signal           var_lag > 0. A consumer that wants a forecast MUST filter on it —
+                         cross_asset_xgboost (ADR-053 Wave 2) must exclude has_signal = false rows.
+    stable               NULL when var_lag = 0 (a lag-0 model has no dynamics to be stable or unstable);
+                         it used to be reported True.
+    forecast_return      HORIZON SEMANTICS: the per-step forecast of the equity's log return for step
+                         `horizon_days` (NOT cumulative). For a 2-7 day target use forecast_cum_return.
+    forecast_cum_return  sum of forecast_return over steps 1..horizon_days for that symbol.
+  Realised PCA variance is `pca_variance_explained` (62.8% measured with MAX_PCS = 4), not the 0.95
+  PCA_VARIANCE_TARGET in the original spec — do not quote 95%.
+  Step B of the guide (replace the model with a pooled panel ridge, promoted only if it beats the
+  trailing-mean baseline out-of-fold) needs live Silver and the ADR-053 engine and is NOT part of this change.
+
 Output: data/gold/cross_asset/cross_asset_forecast.parquet
 Schema (not given explicitly anywhere in Architecture v2.0 — only a code
 sketch exists, unlike CorrelationModule/LeadLagModule's schema tables —
 defined here): symbol, computation_date, horizon_days (1-5),
-forecast_return, n_pcs, pca_variance_explained, var_lag, stable, regime.
+forecast_return, n_pcs, pca_variance_explained, var_lag, stable, regime,
+forecast_kind, has_signal, forecast_cum_return   (the last three: XAE-R09 Step A, additive).
 
 Job registry: 'gold_forecast', depends_on=['silver_active_symbols',
 'silver_context_anchors', 'gold_cross_asset_correlation', 'gold_lead_lag']
@@ -254,6 +276,12 @@ MIN_PAIR_OBS         = 40    # FIX GMI-FORECAST-DIM-02 (19 Sep 2026): raised
                               # al-Fitr closure landing inside the window).
 
 
+def forecast_kind(var_lag: int) -> str:
+    """XAE-R09: "var" when a VAR with at least one lag produced the number, else "trailing_mean"
+    (a lag-0 VAR is an intercept-only model — the training-window mean return)."""
+    return "var" if var_lag > 0 else "trailing_mean"
+
+
 class ForecastModule:
     """Architecture v2.0 §6.4 — PCA(Layer 2 + Broad Dollar) -> per-equity
     VAR(PCs, equity_return), BIC lag selection, 1-5 day forecast."""
@@ -284,7 +312,9 @@ class ForecastModule:
             )
             if forecast_rows is None:
                 continue
-            for horizon, value, var_lag, stable in forecast_rows:
+            cum = 0.0
+            for horizon, value, var_lag, stable in sorted(forecast_rows, key=lambda r: r[0]):
+                cum += float(value)
                 rows.append({
                     "symbol":                  symbol,
                     "computation_date":        str(run_date),
@@ -293,14 +323,17 @@ class ForecastModule:
                     "n_pcs":                   n_pcs,
                     "pca_variance_explained":  round(variance_explained, 6),
                     "var_lag":                 var_lag,
-                    "stable":                  stable,
+                    "stable":                  stable,     # None when var_lag == 0 (XAE-R09)
                     "regime":                  regime,
+                    "forecast_kind":           forecast_kind(var_lag),
+                    "has_signal":              var_lag > 0,
+                    "forecast_cum_return":     round(cum, 8),
                 })
 
         if not rows:
             logger.warning("[gold_forecast] No equity produced a fittable VAR — nothing to write")
             return None
-        return pl.DataFrame(rows)
+        return pl.DataFrame(rows, schema_overrides={"stable": pl.Boolean})
 
     # ── Layer 1 followers ─────────────────────────────────────────────────
 
@@ -591,7 +624,7 @@ class ForecastModule:
         pc_cols: list[str],
         equity_returns: pl.DataFrame,
         symbol: str,
-    ) -> Optional[list[tuple[int, float, int, bool]]]:
+    ) -> Optional[list[tuple[int, float, int, Optional[bool]]]]:
         merged = pca_scores_df.join(
             equity_returns.select(["date", symbol]), on="date", how="inner"
         ).drop_nulls()
@@ -615,7 +648,9 @@ class ForecastModule:
             # docstring for why this is handled explicitly rather than
             # calling .forecast()/.is_stable() (both raise on k_ar=0).
             mean_return = float(np.mean(data[:, -1]))
-            return [(h, mean_return, 0, True) for h in FORECAST_HORIZONS]
+            # XAE-R09: stable is NULL here, not True — "stable" is a property of VAR dynamics and a lag-0
+            # model has none; reporting True made an intercept-only mean look like a validated forecast.
+            return [(h, mean_return, 0, None) for h in FORECAST_HORIZONS]
 
         try:
             stable = bool(results.is_stable())
@@ -663,8 +698,20 @@ def run(run_date: date) -> None:
     )
     write_history_snapshot(result, FORECAST_HISTORY_NAME, run_date)   # ADD GMI-PIT-001 follow-up
     n_symbols = result["symbol"].n_unique()
-    n_unstable = int((~result["stable"]).sum())
+    n_unstable = int((result["stable"] == False).sum())          # noqa: E712 — NULL (lag-0) is not unstable
+    # The summary line must never fail a job whose store is already written: tolerate a frame without the
+    # XAE-R09 columns (an older-shaped compute() result) by treating every symbol as signal-bearing.
+    if "has_signal" in result.columns:
+        n_signal = int(result.filter(pl.col("horizon_days") == 1)["has_signal"].sum())
+    else:
+        n_signal = n_symbols
     logger.info(
         f"[gold_forecast] {n_symbols} symbols x {len(FORECAST_HORIZONS)} horizons "
-        f"({n_unstable} unstable-VAR rows) -> {FORECAST_STORE_PATH.name}"
+        f"({n_unstable} unstable-VAR rows; {n_signal}/{n_symbols} symbols have a VAR signal, "
+        f"the rest are trailing-mean rows) -> {FORECAST_STORE_PATH.name}"
     )
+    if n_signal == 0:
+        logger.warning(
+            "[gold_forecast] NO symbol has a VAR signal (var_lag = 0 everywhere): every forecast_return "
+            "is the trailing-window mean and carries has_signal = false"
+        )
