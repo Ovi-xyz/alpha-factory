@@ -174,8 +174,10 @@ class TestSchedule:
     def test_raw_macro_is_daily_with_weekly_macro_stale_tolerance(self):
         j = JOB_REGISTRY["gold_raw_macro"]
         assert "gold_raw_macro" in DAILY_SEQUENCE and "gold_raw_macro" in WEEKLY_SEQUENCE
-        assert j["depends_on"] == ["silver_macro"]
-        assert j["stale_tolerance"] == {"silver_macro": 7}
+        # ADR-058 HMM-R03: + the daily FRED slice, tolerance 3 (weekend + one holiday); the weekly
+        # silver_macro edge (the weekly series' Bronze job rests behind it) and its 7 days are unchanged.
+        assert j["depends_on"] == ["silver_macro", "silver_fred_daily"]
+        assert j["stale_tolerance"] == {"silver_macro": 7, "silver_fred_daily": 3}
         assert "run_on_weekdays" not in j                  # daily job
 
     def test_raw_market_is_daily_and_silver_only(self):
@@ -184,8 +186,8 @@ class TestSchedule:
         job upstream at all — in particular not gold_global_regime."""
         j = JOB_REGISTRY["gold_raw_market"]
         assert "gold_raw_market" in DAILY_SEQUENCE and "gold_raw_market" in WEEKLY_SEQUENCE
-        assert j["depends_on"] == ["silver_ohlcv", "silver_macro"]
-        assert j["stale_tolerance"] == {"silver_macro": 7}
+        assert j["depends_on"] == ["silver_ohlcv", "silver_macro", "silver_fred_daily"]    # ADR-058 HMM-R03
+        assert j["stale_tolerance"] == {"silver_macro": 7, "silver_fred_daily": 3}
         assert "run_on_weekdays" not in j
         assert "gold_global_regime" not in _upstream("gold_raw_market")
         assert all(JOB_REGISTRY[u]["layer"] in ("bronze", "silver") for u in _upstream("gold_raw_market"))

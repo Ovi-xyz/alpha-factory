@@ -1,5 +1,75 @@
 # CHANGELOG — Data Platform
 
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — pembaruan HMM Regime Engine: HMM-R01, R02, R03, R06, R11 (November 2026)
+
+**Latar.** `hmm_update_implementation_guide.md` (diusulkan sebagai ADR-058) mengukur input, provenance, dan
+status operasi mesin HMM sampai bar 16 Okt 2026, tanpa membaca kode job. Perubahan ini mengimplementasikan
+paket kerja yang bisa diverifikasi di sandbox setelah membaca sumbernya; yang butuh data live, store
+walk-forward/OOF, atau keputusan Ovi sengaja tidak dikerjakan (lihat "Belum dikerjakan"). Semua perubahan
+skema bersifat **aditif**; tidak ada fit ulang dan tidak ada perubahan emisi/fitur model.
+
+**Perubahan.**
+- **HMM-R01** Pagar celah untuk job fit. Pembacaan sumber menjawab pertanyaan [U] guide: satu panggilan
+  classify memang mengisi *seluruh* celah (`append_new_rows` menulis semua baris setelah tanggal terakhir di
+  store, dengan model yang tersimpan, `in_sample=False`). Bahayanya ada di urutan terbalik: `run_fit` mem-fit
+  pada seluruh panel *lebih dulu* lalu mengisi riwayat, jadi setiap baris celah tersimpan `in_sample=True`
+  selamanya (store insert-only). `run_fit` kedua branch kini menolak (`MacroRegimeGapError` /
+  `MarketRegimeGapError`) selama panel `raw_*` punya tanggal setelah tanggal terakhir store, dan pesannya
+  menyebut job classify yang harus dijalankan lebih dulu. **Menyimpang dari guide:** guide meminta "tolak
+  kecuali `--force`", tetapi runner memanggil `fn(run_date)` dan tidak pernah meneruskan `--force` ke job,
+  dan `--force` justru cara rutin menjalankan fit di luar hari Minggu (runbook ADR-051) — mengikatkan
+  override ke `--force` akan mematikan pagar tepat saat dipakai. Override-nya variabel lingkungan
+  `HMM_ALLOW_REGIME_GAP=1` (nilai lain ditolak), dicatat WARNING beserta celahnya. Tanpa store atau tanpa
+  model, tidak ada celah (fit pertama memang mengisi seluruh riwayat).
+- **HMM-R02** Kolom provenance. `market_regime` dan `macro_regime` mendapat `model_train_end` (Date; macro =
+  akhir training terakhir di antara model domain), `macro_regime` mendapat `<domain>_age_days` (Int32; hari
+  kalender dari observasi *terbaru* di antara fitur domain, dari `raw_macro.obs_date__*`, ke tanggal as-of).
+  `PROCESSING_VERSION` 1.0 → 1.1 pada kedua modul; baris lama tetap 1.0 dan bernilai NULL di kolom baru.
+  Invarian yang kini bisa diuji: tidak ada baris `in_sample=False` dengan `model_train_end >= date`.
+  **Temuan:** `append_store` sebelumnya menolak *setiap* perbedaan skema (ADR-051), sehingga "kolom aditif,
+  baris lama NULL" dari guide tidak bisa dijalankan. Ditambahkan satu pengecualian yang dideklarasikan
+  pemanggil (`additive=`): hanya kolom yang disebut, hanya superset murni, dtype kolom tersimpan harus sama,
+  nilai tersimpan tidak berubah, dicatat WARNING. Kolom tak dideklarasikan, kolom tersimpan yang hilang, atau
+  dtype berubah tetap ditolak seperti dulu. Aturan konsumen didokumentasikan di kedua modul, `pit_data.py`, dan
+  `screener.py` (docstring `regime_in_sample` yang lama menyuruh "filter on it" — menyesatkan, karena OR
+  kedua sisi itu True di setiap baris selama macro belum punya baris out-of-sample): penilaian out-of-sample
+  memakai `macro_in_sample` / `market_in_sample`, bukan `context_regime.in_sample`.
+- **HMM-R03** FRED harian ke Silver. Job baru `silver_fred_daily` (`MacroProcessor.process_fred` saja, tanpa
+  BLS/BEA/EIA mingguan; bergantung persis pada `bronze_fred_daily` dan `bronze_treasury`), diletakkan di
+  `DAILY_SEQUENCE` tepat sebelum `gold_raw_macro` supaya kegagalannya tidak menghentikan mesin teknikal.
+  `gold_raw_macro` / `gold_raw_market` kini bergantung pada `silver_macro` (7 hari, tetap) **dan**
+  `silver_fred_daily` (toleransi 3 hari). Scope Gatekeeper `hmm` otomatis ikut memantau `bronze_fred_daily` dan
+  `bronze_treasury` — sebelumnya closure hulunya hanya job Bronze mingguan. **Temuan:**
+  `_find_latest_silver` mengambil file terakhir *termasuk keluaran run itu sendiri*; run kedua pada tanggal
+  yang sama (mulai sekarang: Minggu, ketika `silver_macro` dan irisan harian sama-sama jalan; atau `--force`)
+  membandingkan snapshot dengan dirinya, sehingga `is_revision` hasil run pertama tertimpa False; backfill
+  dengan `--date` lampau membandingkan dengan snapshot *masa depan*. Kini revisi dideteksi terhadap snapshot
+  yang tanggalnya **sebelum** `run_date`; run ulang idempoten. Tidak ada fitur yang didefinisikan ulang, jadi
+  tidak ada fit ulang.
+- **HMM-R06** `scripts/studies/hmm_replay.py` (alat offline, tidak di-import dari `src/`, tanpa SQL, tidak
+  meng-import apa pun dari `src`): forward filter independen dari JSON model — gerbang reproduksi (selisih
+  posterior maksimum <= 1e-3, label 100% sama) — dan harness sensitivitas lag untuk satu fitur terhadap deret
+  referensi (parameter tetap). `scripts/studies/hmm_catchup_audit.py`: empat query audit Lampiran A.2 guide
+  (DuckDB berparameter): baris OOS yang sudah dilihat modelnya, akuntansi OOS, baris konteks dengan dua sisi
+  OOS, sidik jari model. Baris lama dengan `model_train_end` NULL dilaporkan sebagai *tak terverifikasi*, bukan
+  dianggap bersih.
+- **HMM-R11** Temuan, tanpa perubahan kode: `raw_market` memfilter `is_clean = TRUE` pada bar saham AS untuk
+  breadth/median return/dispersi/realised vol (`raw_market.py`). Pada hari kejadian pasar-luas bar yang
+  ditandai berkelompok, jadi breadth atas bar yang selamat condong tenang. Replay pada semua bar valid-DQ
+  membutuhkan Silver live dan digabung ke pemisahan flag XAE-R06 supaya keputusan fit ulang diambil sekali.
+
+**Belum dikerjakan** (alasan di dev-log dan KNOWN_RISKS RISK-42): R04 (ditunda oleh guide sampai chain
+berjalan lagi; beririsan dengan penanda jeda GHR-09), R05/R07/R08/R10/R12 (butuh store walk-forward dan OOF
+live yang tidak ada di sandbox; R08 juga butuh `<domain>_age_days` di baris walk-forward), R09 (bersyarat pada
+R05), verifikasi live R01/R03 (butuh baris as-operated), reproduksi tabel I5 R06 (butuh Silver `^VIX` live).
+
+**Tes.** Sandbox: 3128 tes terkumpul (baseline 3053), 3113 lulus + 15 sengaja dideselect (tes
+`test_check_poetry_env.py` yang butuh binary `poetry`). `tests/unit/test_hmm_update_adr058.py` (40) dan
+`tests/integration/test_hmm_update_adr058.py` (35) baru; 4 pin lama diperbarui secara sengaja (deps `gold_raw_*`, `PROCESSING_VERSION` 1.1 pada dua modul). 17
+mutan pada guard baru terbunuh; dua yang sempat selamat (fixture macro yang membuat `min` dan `max`
+`model_train_end` tak terbedakan; batas inklusif `>=` pada audit) diperkuat, dan satu kesalahan perkakas
+(`.pyc` basi setelah mutan `max`→`min` yang sama panjang) dicatat. **Belum dijalankan pada store live.**
+
 ## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — rekalibrasi CrossAssetEngine: XAE-R01, R02, R04, R05, R07, R08, R09 Step A, R10 (November 2026)
 
 **Latar.** `cross_asset_recalibration_guide.md` (diusulkan sebagai ADR-056/057) mengukur input dan estimator

@@ -13,6 +13,8 @@ cannot drift apart (the GAP-1 failure class — a second copy of the same logic)
     output columns            state_columns                    <prefix>_label / _probability /
                                                                _score / _post_<label> / ...
     persistence               atomic_write_text / save_json / load_model_file / append_store
+    catch-up safety           unscored_gap / enforce_gap_guard   (ADR-058 HMM-R01: a fit must never run
+                                                               while the regime store has an unscored gap)
 
 Branch-specific code stays in its own module: which features feed which model, the label
 vocabulary, the store layout, the macro business-cycle rule. This module imports NOTHING from
@@ -40,6 +42,7 @@ from typing import Any, Mapping, Optional, Sequence, Type
 
 import numpy as np
 import polars as pl
+from loguru import logger
 
 from src.gold.hmm.config import FitSettings
 from src.utils.atomic_io import atomic_write_parquet
@@ -325,13 +328,38 @@ def load_model_file(path: Path, schema: int, name: str, error_cls: Type[Exceptio
     return m
 
 
+def _widen_additively(existing: pl.DataFrame, rows: pl.DataFrame, additive: Sequence[str]) -> pl.DataFrame:
+    """`existing` with the columns that `rows` introduces AND the caller declared `additive` appended as
+    NULL columns, in `rows`' column order. Only a pure superset is ever widened: a column the caller did
+    not declare, a column `rows` lacks, or a changed dtype is left for the caller's schema check to
+    refuse. Stored VALUES are never touched — a legacy row simply has no value for a column that did
+    not exist when it was written (ADR-058 HMM-R02)."""
+    new_cols = [c for c in rows.columns if c not in existing.columns]
+    if not new_cols or not set(new_cols) <= set(additive):
+        return existing
+    if not set(existing.columns) <= set(rows.columns):
+        return existing                                         # a stored column the build dropped: refuse
+    if any(existing.schema[c] != rows.schema[c] for c in existing.columns):
+        return existing                                         # a stored column changed dtype: refuse
+    widened = existing.with_columns([pl.lit(None, dtype=rows.schema[c]).alias(c) for c in new_cols])
+    return widened.select(rows.columns)
+
+
 def append_store(existing: Optional[pl.DataFrame], rows: pl.DataFrame, path: Path,
-                 error_cls: Type[Exception], key: str = "date") -> int:
+                 error_cls: Type[Exception], key: str = "date", additive: Sequence[str] = ()) -> int:
     """Append `rows` (already restricted to dates after the stored maximum) to the append-only store
     at `path` and write it atomically. A schema that differs from the stored one raises: the store
-    cannot be migrated in place. Returns the number of rows added."""
+    cannot be migrated in place — with ONE declared exception: columns named in `additive` that the
+    stored file does not have yet are added as null columns (see `_widen_additively`; logged). Returns
+    the number of rows added."""
     n_new = rows.height
     if existing is not None:
+        widened = _widen_additively(existing, rows, additive)
+        if widened is not existing:
+            logger.warning(f"[hmm_core] {path.name}: store widened additively with "
+                           f"{[c for c in rows.columns if c not in existing.columns]} "
+                           f"(legacy rows keep NULL there; no stored value changed)")
+            existing = widened
         if existing.columns != rows.columns or existing.schema != rows.schema:
             raise error_cls(
                 f"{path} has a different schema than this build produces — the store is "
@@ -339,3 +367,41 @@ def append_store(existing: Optional[pl.DataFrame], rows: pl.DataFrame, path: Pat
         rows = pl.concat([existing, rows])
     atomic_write_parquet(rows.sort(key), path)
     return n_new
+
+
+# ═══ Catch-up safety (ADR-058 HMM-R01) ═══════════════════════════════════════
+
+ALLOW_GAP_ENV = "HMM_ALLOW_REGIME_GAP"
+
+
+def unscored_gap(store_path: Path, panel_path: Path, panel_key: str, run_date: date,
+                 store_key: str = "date") -> list[date]:
+    """Panel dates (<= run_date) that lie AFTER the regime store's last stored date — rows the daily
+    classify job has not scored yet. Empty when either file is absent (nothing to compare: a first
+    fit legitimately fills the whole history) or the store is empty. Reads one column of each file."""
+    if not Path(store_path).exists() or not Path(panel_path).exists():
+        return []
+    stored = pl.scan_parquet(store_path).select(pl.col(store_key).max()).collect().item()
+    if stored is None:
+        return []
+    panel = (pl.scan_parquet(panel_path).select(pl.col(panel_key).alias("d"))
+             .filter((pl.col("d") > stored) & (pl.col("d") <= run_date)).unique().sort("d").collect())
+    return panel["d"].to_list()
+
+
+def enforce_gap_guard(gap: Sequence[date], tag: str, classify_job: str, error_cls: Type[Exception]) -> None:
+    """Refuse a fit while `gap` is non-empty. WHY: the insert-only store gives a row the `in_sample`
+    value of whichever job writes it first; a fit's own history fill runs AFTER the model is
+    refitted on the whole panel, so every gap row would be stored in-sample for good (HMM-R01).
+    The only override is the environment variable HMM_ALLOW_REGIME_GAP=1 (not `--force`: the runner
+    does not pass `--force` to a job, and `--force` is how a fit is routinely run off its Sunday
+    slot). An override is logged at WARNING with the gap."""
+    if not gap:
+        return
+    msg = (f"{len(gap)} panel date(s) {gap[0]}..{gap[-1]} are not scored in the regime store yet — a fit now "
+           f"would store them as in-sample permanently. Run {classify_job} first (it scores the whole gap "
+           f"with the persisted model, in_sample=False), then re-run the fit.")
+    if os.environ.get(ALLOW_GAP_ENV) == "1":
+        logger.warning(f"[{tag}] gap guard OVERRIDDEN ({ALLOW_GAP_ENV}=1): {msg}")
+        return
+    raise error_cls(f"{msg} (override, accepting in-sample rows: set {ALLOW_GAP_ENV}=1)")

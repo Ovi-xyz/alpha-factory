@@ -4516,3 +4516,69 @@ collected; all new guards mutation-checked (17 mutants, all killed). **Nothing h
     tests use `importorskip("exchange_calendars")`: until the dependency is installed they SKIP silently — install it
     before trusting a green run. (g) `poetry.lock` is delivered as a separate file: Poetry 2.5.1 re-resolution rewrote
     six unrelated dependency-spec lines and the header; running `poetry lock` with your own Poetry gives a cleaner diff.
+
+## RISK-42 (NEW): HMM regime engine update (guide HMM-R01/R02/R03/R06/R11) — built and unit-tested in sandbox only, never run against the live stores; the first live write widens both regime stores; R04/R05/R07-R10/R12 not done
+
+Added 2026-11-03. Source: `hmm_update_implementation_guide.md` (PROPOSED ADR-058). Sandbox baseline 3053 -> 3128
+collected (3113 passed + 15 deselected `test_check_poetry_env.py`); all new guards mutation-checked (17 mutants, all killed after two weak tests were
+strengthened). **Nothing here has run on the M1 or on live data.**
+
+1. **The first live write after this change rewrites `market_regime.parquet` and `macro_regime.parquet`.** Adding
+   `model_train_end` (both) and `<domain>_age_days` (macro) goes through the new declared-additive path in
+   `append_store`: the file is rewritten atomically once, every stored value unchanged, the new columns NULL on
+   legacy rows, `processing_version` 1.0 on legacy rows and 1.1 on new rows (WARNING "widened additively" is the
+   marker). The stores were insert-only by design; this is the one sanctioned exception and only for columns the
+   caller names. **Back up `data/gold/hmm/` first** (HMM-R01's own precondition). Legacy rows keep a NULL
+   `model_train_end`, so the invariant "no `in_sample=False` row with `model_train_end >= date`" is unverifiable on
+   them: the catch-up audit reports their count as `unverifiable_legacy_oos` instead of calling them clean (live: the
+   single 2026-10-16 market row).
+2. **The gap guard raises; it does not skip.** `run_fit` raises `MarketRegimeGapError` / `MacroRegimeGapError` while
+   the raw panel has dates the store lacks. `run_layer` has no try/except, so in a `--job gold` run a refused fit
+   aborts the rest of the layer, and the Gatekeeper sees a failed fit. The normal Sunday order cannot trigger it
+   (fits precede the daily raw jobs in the weekly prefix, so the raw panel is as old as the store); it fires only
+   when a `raw_*` job ran without its classify job, which is exactly the contaminating case. Chosen over a silent
+   skip because a skipped fit would still write a sentinel through `run_job` and look done.
+3. **The override is an environment variable, not `--force`** (deviation from the guide: the runner never passes
+   `--force` to a job, and `--force` is the routine way to run a fit off Sunday). `HMM_ALLOW_REGIME_GAP=1` is
+   process-wide: do not export it in a shell profile. Only the literal `1` counts; an override logs the gap and
+   makes every gap row in-sample permanently.
+4. **`<domain>_age_days` is the age of the FRESHEST observation in the domain** (first-pass definition, untuned):
+   it answers "when did this domain last receive new information", which is what a stopped daily feed changes. For
+   `growth` it is bounded by the monthly UNRATE, so it never shows the quarterly GDP lag; the per-feature dates stay
+   in `raw_macro`. The guide's wording ("the series driving that domain") is ambiguous; if a stale-input measure is
+   wanted, use the oldest observation instead. Not in the walk-forward rows: `hmm_xgboost` cannot use the age
+   columns until `walk_forward.py` produces them (R08 prerequisite).
+5. **`silver_fred_daily` adds a daily Silver step and a hard 3-day edge into the HMM chain.** A stalled Bronze FRED
+   or Treasury fetch now stops `gold_raw_*` (dependency check), and because the runner stops at the first failing
+   job a failure of the slice itself also skips the screener and later jobs in that run (same exposure as a
+   `gold_raw_macro` failure today; the technical engine is earlier in the sequence and unaffected). Snapshots are
+   about 1.71 MB per day (~430 MB/yr, measured by the guide, not re-measured) and nothing prunes old
+   `fred_<date>_silver.parquet`. `est_minutes = 3` is a guess: `process_fred` reads all of Bronze FRED.
+6. **Sunday runs both `silver_macro` and the slice, and both write `fred_<date>_silver.parquet`.** Same content,
+   last writer wins. Revision detection is now idempotent (previous vintage = latest snapshot strictly BEFORE the
+   run date), but a re-run that spans a Bronze change between the two runs would take the later content.
+7. **Revision-detection fix changes backfill semantics.** `--date` in the past previously compared against the
+   latest snapshot of ANY date (including future ones); it now compares against the latest earlier one, or none.
+   Existing snapshots are not rewritten.
+8. **`PROCESSING_VERSION` 1.1 reaches the model JSON on the next fit.** Checked: nothing outside `src/gold/hmm`
+   imports the two regime modules except the registry wrapper, `walk_forward.py` keys its rebuild on its own version
+   ("1.0") and `intelligence/core.py` on its own, so the bump does not trigger a walk-forward or OOF rebuild.
+9. **Input freshness is not verified.** R03's acceptance (over the first 20 as-operated rows: VIXCLS / DGS5_D1 /
+   DGS10_D1 median calendar age <= 1, p90 <= 3, `avail_basis = recorded`) needs live rows. Recorded-basis
+   availability uses Silver `_ingested_at` carried from Bronze, so it is unaffected by when Silver ran; what the slice
+   changes is whether the row is VISIBLE to the panel at all.
+10. **R06 reproduction not run on live files.** The harness reproduces a synthetic production store to <1e-9 (same
+    maths, independently written). The guide's I5 table (label change rate and entry delay by VIX lag) and the live
+    reproduction gate (<= 1e-3, 100% labels against the stored 2,542 market rows) are untested here. Caveats carried
+    from the guide: one feature varied, in-sample parameters, fixed lags, Silver `^VIX` as the ideal.
+11. **R11 finding, unchanged code:** `raw_market` filters `is_clean = TRUE` for the US breadth features. On
+    market-wide event days many bars are flagged together, so breadth over survivors skews calm. Folded into XAE-R06
+    (flag split) so the refit decision is made once; until then the market HMM's breadth inputs share that defect.
+12. **Not done:** R04 (deferred by the guide; overlaps GHR-09's pause marker); R05 (walk-forward / OOF stores and
+    `validation.json` were not available); R07 emission candidates, R08 macro ablation, R10 refit-cadence parity (all
+    need walk-forward/OOF runs or live weekly fits); R09 IDX scope (conditional on R05); R12 long-history HMM
+    (deferred). Open decisions D1 (cadence after the pause), D3 (shadow store for any promoted candidate), D4-D6 stay
+    with the owner.
+13. **Tooling lesson recorded, not a code risk:** a mutation harness that restores a same-length mutant within the
+    same second leaves a stale `.pyc` that runs the mutant (pyc validity is mtime-in-seconds plus size). Mutants were
+    re-run with `python -B` and the mutated module's cache deleted after each restore.

@@ -503,8 +503,11 @@ class PITDataLoader:
         """
         Return the dual-HMM context regime (ADR-051, context_regime.py) — the platform's
         regime since ADR-055 v2 — as of trade_date: the latest row on or before it (single-row
-        idiom, 'date' column). Rows carry `in_sample`; anything judging the regime's accuracy
-        must filter on it. Returns None when the store does not exist yet (no HMM fit has run).
+        idiom, 'date' column). Rows carry `in_sample` (the OR of both sides) and the side flags
+        `macro_in_sample` / `market_in_sample`; anything judging the regime's out-of-sample
+        behaviour must filter on the SIDE flags, never on `in_sample` — while the macro store has no
+        out-of-sample row `in_sample` is True on every row (ADR-058 HMM-R02 consumer rule).
+        Returns None when the store does not exist yet (no HMM fit has run).
         """
         try:
             result = self._con.execute(

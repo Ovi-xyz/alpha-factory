@@ -23,6 +23,9 @@ Output  data/gold/hmm/market_regime.parquet        (keyed on `date`, the platfor
             market_model_fit_date      Date    fit date of the model that produced the row
             n_features_observed        Int32   how many model features were non-null on the row
             in_sample                  Boolean see HONEST HISTORY
+            model_train_end            Date    training end of the model that scored the row (ADR-058
+                                               HMM-R02; NULL on rows written before 1.1). INVARIANT: a row
+                                               with in_sample = False has model_train_end < date.
             computation_date / processing_version / model_config_fingerprint
 
 The HMM mechanics (robust scaling, composite-start-vs-random-starts fit, forward filter with null
@@ -50,6 +53,16 @@ HONEST HISTORY (ADR-051 Amendment 2 §E)
                           the store is append-only, such a row is NOT recomputed when the late
                           bars arrive (KNOWN_RISKS: partial latest day).
 
+CATCH-UP SAFETY (ADR-058 HMM-R01). One classify call scores EVERY panel row after the last stored date
+(append_new_rows), with the persisted model, so a multi-day gap is filled out-of-sample in one call.
+The fit job fits on the whole panel FIRST and fills history after, so a fit that runs while such a gap
+exists would store the gap in-sample for good. run_fit therefore refuses while the store lacks panel
+dates (gap_guard); override only with HMM_ALLOW_REGIME_GAP=1 (logged).
+
+CONSUMER RULE (ADR-058 HMM-R02): anything judging out-of-sample behaviour filters on `in_sample` of THIS
+store or on `market_in_sample` of context_regime — never on context_regime.in_sample, which is the OR of
+both sides and is True on every row while the macro store has no out-of-sample row.
+
 DOMAIN INDEPENDENCE (ADR-051 Amendment 2 §A): reads only raw_market and its own model; no
 CrossAssetEngine / technical-chain store (in particular not gold_global_regime), and none of
 them reads this one.
@@ -67,21 +80,27 @@ from loguru import logger
 
 from src.gold.hmm import raw_market
 from src.gold.hmm.config import MarketModelConfig, market_model_config
-from src.gold.hmm.hmm_core import append_store, fit_model, load_model_file, save_json, state_columns
+from src.gold.hmm.hmm_core import (append_store, enforce_gap_guard, fit_model, load_model_file, save_json,
+                                   state_columns, unscored_gap)
 
 GOLD_HMM_PATH      = Path("data/gold/hmm")
 MARKET_REGIME_PATH = GOLD_HMM_PATH / "market_regime.parquet"
 MODELS_DIR         = GOLD_HMM_PATH / "models"
-PROCESSING_VERSION = "1.0"
+PROCESSING_VERSION = "1.1"      # 1.1 (ADR-058 HMM-R02): + model_train_end; legacy rows are 1.0 and keep it
 MODEL_SCHEMA       = 1
 MODEL_NAME         = "market"
 
 RAW_KEY = "as_of_date"
 PREFIX = "market"
+PROVENANCE_COLUMNS = ("model_train_end",)      # columns a legacy (1.0) store lacks: widened in additively
 
 
 class MarketRegimeError(RuntimeError):
     """Registry/config/data defect that makes the market regime unbuildable."""
+
+
+class MarketRegimeGapError(MarketRegimeError):
+    """A fit was refused because the regime store has an unscored gap (ADR-058 HMM-R01)."""
 
 
 # ═══ Model persistence ═══════════════════════════════════════════════════════
@@ -112,6 +131,15 @@ def _require_columns(panel: pl.DataFrame, feats: Sequence[str]) -> None:
     missing = [f for f in feats if f not in panel.columns]
     if missing:
         raise MarketRegimeError(f"raw_market is missing market features {missing} — rebuild raw_market (gold_raw_market)")
+
+
+def gap_dates(run_date: date) -> list[date]:
+    """raw_market dates <= run_date that the market store has not scored yet. Empty when no model
+    exists (the fit is then the only way forward and its rows are in-sample by construction) or when
+    either file is absent (first fit)."""
+    if load_model() is None:
+        return []
+    return unscored_gap(MARKET_REGIME_PATH, raw_market.RAW_MARKET_PATH, RAW_KEY, run_date)
 
 
 # ═══ Weekly fit ══════════════════════════════════════════════════════════════
@@ -153,7 +181,7 @@ def _column_order(cfg: MarketModelConfig) -> list[str]:
     return (["date", f"{PREFIX}_label", f"{PREFIX}_probability", f"{PREFIX}_score"]
             + [f"{PREFIX}_post_{lab}" for lab in cfg.labels]
             + [f"{PREFIX}_short_history", f"{PREFIX}_model_fit_date", "n_features_observed", "in_sample",
-               "computation_date", "processing_version", "model_config_fingerprint"])
+               "model_train_end", "computation_date", "processing_version", "model_config_fingerprint"])
 
 
 def append_new_rows(panel: pl.DataFrame, cfg: MarketModelConfig, run_date: date) -> int:
@@ -177,11 +205,12 @@ def append_new_rows(panel: pl.DataFrame, cfg: MarketModelConfig, run_date: date)
         logger.info(f"[hmm_market] {run_date}: store already current — no new rows")
         return 0
     rows = rows.with_columns(
+        pl.lit(date.fromisoformat(model["train_end"]), dtype=pl.Date).alias("model_train_end"),
         pl.lit(run_date).alias("computation_date"),
         pl.lit(PROCESSING_VERSION).alias("processing_version"),
         pl.lit(model["config_fingerprint"]).alias("model_config_fingerprint"),
     ).select(_column_order(cfg))
-    return append_store(existing, rows, MARKET_REGIME_PATH, MarketRegimeError)
+    return append_store(existing, rows, MARKET_REGIME_PATH, MarketRegimeError, additive=PROVENANCE_COLUMNS)
 
 
 # ═══ Job entry points ════════════════════════════════════════════════════════
@@ -190,6 +219,7 @@ def run_fit(run_date: date) -> None:
     """Weekly job ('gold_hmm_market_fit'): fit, persist, then append the rows the store lacks."""
     cfg = market_model_config()
     panel = _load_panel(run_date)
+    enforce_gap_guard(gap_dates(run_date), "hmm_market", "gold_hmm_market_regime", MarketRegimeGapError)
     status = fit(panel, run_date, cfg)
     added = append_new_rows(panel, cfg, run_date)
     logger.info(f"[hmm_market] fit {run_date}: {'fitted' if status.startswith('fitted') else 'not fitted'}, "

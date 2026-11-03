@@ -350,7 +350,7 @@ class MacroProcessor:
         Mark is_revision=True, revision_seq where value changed.
         """
         # Find most recent Silver vintage for this source
-        prev_path = self._find_latest_silver(source)
+        prev_path = self._find_latest_silver(source, before=run_date)
 
         if prev_path is None:
             # Initial release — all rows are revision_seq=0
@@ -441,11 +441,46 @@ class MacroProcessor:
                 pl.lit(0).cast(pl.Int16).alias("revision_seq"),
             ])
 
-    def _find_latest_silver(self, source: str) -> Optional[Path]:
-        """Find most recent Silver file for this source."""
+    def _find_latest_silver(self, source: str, before: Optional[date] = None) -> Optional[Path]:
+        """Find most recent Silver file for this source.
+
+        FIX HMM-R03 (ADR-058): with `before`, only snapshots dated STRICTLY BEFORE it are considered.
+        The previous vintage that revision detection compares against must be an EARLIER run: with
+        daily FRED runs, a same-day re-run (or `--force`) would otherwise find its own earlier output
+        as "the previous vintage" and overwrite that run's `is_revision` flags with False (and a
+        backfill with a past `--date` would compare against a FUTURE snapshot). Excluding the run's
+        own date and later makes a re-run idempotent. A file whose name carries no ISO date is
+        skipped when `before` is given (the snapshot naming is `<source>_YYYY-MM-DD_silver.parquet`).
+        """
         pattern = SILVER_MACRO_PATH.glob(f"{source}_*_silver.parquet")
         files   = sorted(pattern)
+        if before is not None:
+            kept = []
+            for f in files:
+                stamp = f.name[len(source) + 1: len(source) + 11]
+                try:
+                    if date.fromisoformat(stamp) < before:
+                        kept.append(f)
+                except ValueError:
+                    continue
+            files = kept
         return files[-1] if files else None
+
+
+def run_fred(run_date: date) -> None:
+    """Daily FRED slice (job 'silver_fred_daily', ADR-058 HMM-R03).
+
+    Promotes Bronze FRED to the Silver snapshot `fred_<run_date>_silver.parquet` WITHOUT the weekly
+    BLS / BEA / EIA cost. WHY: the weekly `silver_macro` was the only path from Bronze to Silver, so the
+    daily FRED series the HMM engine reads (VIXCLS, DGS5/DGS10, ...) reached Silver at most weekly while
+    Bronze held them daily — live input ages of 3-10 days against a ~1-day lag the models were fitted on.
+    Each snapshot carries the full FRED history (see `_process_domain`), so the latest one is sufficient
+    for every reader (`fred_pit.latest_snapshot`). The Sunday `silver_macro` still writes the same file
+    name on the same day: both runs compare against the previous EARLIER snapshot (FIX HMM-R03,
+    `_find_latest_silver(before=...)`), so running both on one day is idempotent.
+    """
+    MacroProcessor().process_fred(run_date)
+    logger.info(f"[silver_fred_daily] Complete for {run_date}")
 
 
 def run(run_date: date) -> None:

@@ -95,7 +95,7 @@ class TestFit:
         assert m["domain"] == "market" and m["schema"] == 1 and m["labels"] == LABELS
         assert m["features"] == cfg.feature_names() and m["weights"] == [cfg.weights[f] for f in cfg.feature_names()]
         assert m["config_fingerprint"] == cfg.fingerprint() and m["fit_date"] == FIT_DATE.isoformat()
-        assert m["processing_version"] == "1.0" and m["train_end"] <= FIT_DATE.isoformat()
+        assert m["processing_version"] == "1.1" and m["train_end"] <= FIT_DATE.isoformat()
 
     def test_states_are_ordered_risk_off_first_along_the_signed_weights(self, world):
         m = hk.load_model()

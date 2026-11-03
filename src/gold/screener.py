@@ -27,8 +27,11 @@ optional source here):
     context_transition, context_transition_alert
                                         the label changed vs the previous known one (data, not a
                                         decision — GD §0.3)
-    regime_in_sample                    True if the row lies inside a model's training window;
-                                        anything judging the regime's accuracy must filter on it
+    regime_in_sample                    True if the row lies inside ANY model's training window (the
+                                        OR of both sides: True on every row while the macro store has
+                                        no out-of-sample row). Not an out-of-sample indicator — a
+                                        consumer judging out-of-sample behaviour needs the side flags
+                                        of context_regime (ADR-058 HMM-R02 consumer rule)
 
 Also gone, for the same reason: `sector_weight_adj`, the sector concentration guard built on it,
 and the `sector` column itself. `gold_sector` (regime -> sector weights) was archived with

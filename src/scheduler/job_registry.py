@@ -194,6 +194,16 @@ def _silver_macro(run_date: date) -> None:
     macro_run(run_date)
 
 
+def _silver_fred_daily(run_date: date) -> None:
+    """
+    ADD HMM-R03 (ADR-058) — daily FRED slice of silver_macro. Promotes Bronze FRED to the Silver
+    snapshot every day (no BLS / BEA / EIA), so the dual-HMM engine's inputs are as fresh in Silver as
+    they are in Bronze. Delegates to macro_processor.run_fred() (delegate-only pattern, GAP-1).
+    """
+    from src.silver.macro_processor import run_fred as fred_daily_silver_run
+    fred_daily_silver_run(run_date)
+
+
 def _silver_global_rates(run_date: date) -> None:
     """
     ADD GMI-JR-001 — Data Source & Rates Adjustment v1.0 §9.
@@ -602,6 +612,24 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "est_minutes": 10,
     },
 
+    "silver_fred_daily": {
+        # ADD HMM-R03 (ADR-058, hmm_update_implementation_guide §HMM-R03). silver_macro is weekly, so
+        # the daily FRED series Bronze ingests every day (bronze_fred_daily; DGS5/DGS10/MORTGAGE30US
+        # via bronze_treasury) reached Silver — and therefore raw_macro / raw_market — at most weekly:
+        # measured 2026-10-30, VIX age at decision time median 3 / max 10 days over the last 60 rows
+        # vs a ~1-day lag in the training window. This job runs MacroProcessor.process_fred only (no
+        # BLS/BEA/EIA) every day. Exact-date dependencies on its two Bronze sources: a stalled Bronze
+        # fetch must show up here, not be absorbed by a staleness window.
+        "description": (
+            "Daily FRED slice of silver_macro — Bronze FRED -> fred_<date>_silver.parquet "
+            "(HMM input freshness, no BLS/BEA/EIA)"
+        ),
+        "fn":          _silver_fred_daily,
+        "depends_on":  ["bronze_fred_daily", "bronze_treasury"],
+        "layer":       "silver",
+        "est_minutes": 3,
+    },
+
     "silver_global_rates": {
         # ADD GMI-JR-001 — Data Source & Rates Adjustment v1.0 §9.
         "description": (
@@ -864,8 +892,11 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
     "gold_raw_macro": {
         "description":     "Dual-HMM raw_macro — PIT-gated, forward-filled FRED panel, 5 domains (ADR-051)",
         "fn":              _gold_raw_macro,
-        "depends_on":      ["silver_macro"],
-        "stale_tolerance": {"silver_macro": 7},
+        # HMM-R03 (ADR-058): + silver_fred_daily (exact-ish: 3 days = weekend + one holiday) so a stale
+        # FRED snapshot raises an alarm instead of being absorbed by the weekly window; silver_macro
+        # stays (the weekly series NFCI/UNRATE/CPI/GDP arrive through the weekly Bronze job it rests on).
+        "depends_on":      ["silver_macro", "silver_fred_daily"],
+        "stale_tolerance": {"silver_macro": 7, "silver_fred_daily": 3},
         "layer":           "gold",
         "est_minutes":     1,
     },
@@ -879,8 +910,8 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
     "gold_raw_market": {
         "description":     "Dual-HMM raw_market — Silver-only market-behaviour panel: FRED market series + Layer 1 US-stock breadth (ADR-051)",
         "fn":              _gold_raw_market,
-        "depends_on":      ["silver_ohlcv", "silver_macro"],
-        "stale_tolerance": {"silver_macro": 7},
+        "depends_on":      ["silver_ohlcv", "silver_macro", "silver_fred_daily"],
+        "stale_tolerance": {"silver_macro": 7, "silver_fred_daily": 3},
         "layer":           "gold",
         "est_minutes":     2,
     },
@@ -1107,6 +1138,10 @@ DAILY_SEQUENCE: list[str] = [
     "gold_gold_xgboost_predict",  # ADR-053: technical-domain specialist, scored from the bars just built
 
     # Gold dual-HMM regime engine (ADR-051; the platform's regime since ADR-055 v2).
+    # silver_fred_daily (ADR-058 HMM-R03) sits HERE, not in the Silver block: a failure of this slice
+    # must not stop the technical engine above (the runner stops at the first failing job), and its
+    # only consumers are the two raw_* jobs below. It is a Silver job by layer (`--job silver` runs it).
+    "silver_fred_daily",
     "gold_raw_macro",
     "gold_hmm_macro_regime",
     "gold_raw_market",

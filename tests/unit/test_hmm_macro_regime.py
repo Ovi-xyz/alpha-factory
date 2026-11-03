@@ -135,7 +135,7 @@ class TestSurface:
 
     def test_errors_and_constants_stay_local(self):
         assert issubclass(hm.MacroRegimeError, RuntimeError)
-        assert (hm.RAW_KEY, hm.MODEL_SCHEMA, hm.PROCESSING_VERSION) == ("as_of_date", 1, "1.0")
+        assert (hm.RAW_KEY, hm.MODEL_SCHEMA, hm.PROCESSING_VERSION) == ("as_of_date", 1, "1.1")   # 1.1: ADR-058 HMM-R02 provenance columns
         assert str(hm.MACRO_REGIME_PATH).endswith("data/gold/hmm/macro_regime.parquet")
         assert hm.model_path("growth").name == "macro_growth.json"
 

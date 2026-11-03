@@ -21,10 +21,16 @@ Output  data/gold/hmm/macro_regime.parquet         (keyed on `date` — the plat
               <d>_post_<label> x3      Float64 the full filtered posterior, one column per label
               <d>_short_history        Boolean training window < hmm.fit.short_history_min_obs
               <d>_model_fit_date       Date    fit date of the model that produced the row
+              <d>_age_days             Int32   ADR-058 HMM-R02: calendar days from the FRESHEST observation
+                                               among the domain's features (raw_macro obs_date__*) to the
+                                               as-of date; NULL on rows written before 1.1
             macro_activity             Float64 mean oriented domain score (see the rule)
             macro_momentum             Float64 activity change over momentum_window_bd weekdays
             macro_label                String  expansion | slowdown | recession | recovery
             in_sample                  Boolean see HONEST HISTORY
+            model_train_end            Date    latest training end among the domain models that scored the
+                                               row (ADR-058 HMM-R02; NULL before 1.1). INVARIANT: a row with
+                                               in_sample = False has model_train_end < date.
             computation_date / processing_version / model_config_fingerprint
 
 TWO JOBS, ONE STORE
@@ -69,6 +75,17 @@ HONEST HISTORY (ADR-051 Amendment 2 §E)
                        an out-of-sample row is never overwritten by a refit. Anything training
                        on this table (ADR-053/054) must filter on in_sample.
 
+CATCH-UP SAFETY (ADR-058 HMM-R01). One classify call scores EVERY panel row after the last stored date
+with the persisted models, so a multi-day gap is filled out-of-sample in one call. The fit job fits on the
+whole panel FIRST and fills history after, so a fit that runs while such a gap exists would store the gap
+in-sample for good. run_fit therefore refuses while the store lacks panel dates (gap_dates); override only
+with HMM_ALLOW_REGIME_GAP=1 (logged).
+
+CONSUMER RULE (ADR-058 HMM-R02): anything judging out-of-sample behaviour filters on `in_sample` of THIS
+store or on `macro_in_sample` / `market_in_sample` of context_regime — never on context_regime.in_sample
+(the OR of both sides). `macro_label` is a display label (ADR-051 A2 §F): models consume the domain
+scores / posteriors (and `<d>_age_days`), not the label.
+
 MACRO LABEL (ADR-051 Amendment 2 §F; first-pass calibration, review per ADR-055 E7)
     activity = mean of sign x score over hmm.macro_label.axes, short_history domains excluded,
     the `required` domain mandatory; momentum = activity - activity 63 weekdays earlier.
@@ -95,11 +112,12 @@ from loguru import logger
 
 from src.gold.hmm import raw_macro
 from src.gold.hmm.config import MacroLabelRule, MacroModelConfig, macro_model_config
+from src.gold.hmm.hmm_core import enforce_gap_guard, unscored_gap
 
 GOLD_HMM_PATH      = Path("data/gold/hmm")
 MACRO_REGIME_PATH  = GOLD_HMM_PATH / "macro_regime.parquet"
 MODELS_DIR         = GOLD_HMM_PATH / "models"
-PROCESSING_VERSION = "1.0"
+PROCESSING_VERSION = "1.1"      # 1.1 (ADR-058 HMM-R02): + model_train_end, <d>_age_days; legacy rows are 1.0
 MODEL_SCHEMA       = 1
 
 RAW_KEY = "as_of_date"
@@ -108,6 +126,10 @@ EXPANSION, SLOWDOWN, RECESSION, RECOVERY = "expansion", "slowdown", "recession",
 
 class MacroRegimeError(RuntimeError):
     """Registry/config/data defect that makes the macro regime unbuildable."""
+
+
+class MacroRegimeGapError(MacroRegimeError):
+    """A fit was refused because the regime store has an unscored gap (ADR-058 HMM-R01)."""
 
 
 # The shared engine lives in hmm_core (ADR-051: one implementation for both branches). Every moved
@@ -152,6 +174,19 @@ def _require_columns(panel: pl.DataFrame, feats: Sequence[str], domain: str) -> 
     missing = [f for f in feats if f not in panel.columns]
     if missing:
         raise MacroRegimeError(f"raw_macro is missing {domain} features {missing} — rebuild raw_macro (gold_raw_macro)")
+
+
+def provenance_columns(cfg: MacroModelConfig) -> tuple[str, ...]:
+    """Columns a legacy (1.0) store lacks; `append_store` widens them in as null (ADR-058 HMM-R02)."""
+    return ("model_train_end",) + tuple(f"{d}_age_days" for d in cfg.domains)
+
+
+def gap_dates(run_date: date, cfg: MacroModelConfig) -> list[date]:
+    """raw_macro dates <= run_date that the macro store has not scored yet. Empty when no domain has a
+    model (the fit is then the only way forward) or when either file is absent (first fit)."""
+    if all(load_model(d) is None for d in cfg.domains):
+        return []
+    return unscored_gap(MACRO_REGIME_PATH, raw_macro.RAW_MACRO_PATH, RAW_KEY, run_date)
 
 
 # ═══ Weekly fit ══════════════════════════════════════════════════════════════
@@ -248,6 +283,24 @@ def add_macro_label(rows: pl.DataFrame, history_activity: pl.DataFrame, seed: Op
     return rows.with_columns(pl.Series("macro_label", labels, dtype=pl.String))
 
 
+def domain_age_frame(panel: pl.DataFrame, cfg: MacroModelConfig) -> pl.DataFrame:
+    """`date` + `<domain>_age_days` for every panel row: calendar days from the FRESHEST observation
+    among the domain's features (raw_macro `obs_date__<feature>`) to the as-of date. Freshest, not
+    stalest: the column answers "when did this domain last receive new information", which is what a
+    stopped daily feed changes; the per-feature dates stay in raw_macro for anything finer. NULL when
+    the panel carries none of the domain's obs_date columns or none is observed yet. Nothing here is a
+    threshold — it is provenance, not a gate."""
+    exprs = []
+    for d in cfg.domains:
+        cols = [f"obs_date__{f}" for f in _feats(cfg, d) if f"obs_date__{f}" in panel.columns]
+        if cols:
+            e = (pl.col(RAW_KEY) - pl.max_horizontal([pl.col(c) for c in cols])).dt.total_days().cast(pl.Int32)
+        else:
+            e = pl.lit(None, dtype=pl.Int32)
+        exprs.append(e.alias(f"{d}_age_days"))
+    return panel.select(pl.col(RAW_KEY).alias("date"), *exprs)
+
+
 # ═══ Append-only store ═══════════════════════════════════════════════════════
 
 def _fingerprint_of(models: Mapping[str, Optional[Mapping[str, Any]]]) -> str:
@@ -289,13 +342,17 @@ def append_new_rows(panel: pl.DataFrame, cfg: MacroModelConfig, run_date: date) 
     history = existing.select("date", "macro_activity") if existing is not None else \
         pl.DataFrame(schema={"date": pl.Date, "macro_activity": pl.Float64})
     seed = existing.sort("date")["macro_label"][-1] if existing is not None else None
-    rows = add_macro_label(rows, history, seed, cfg.label_rule).with_columns(
+    train_end = max(date.fromisoformat(m["train_end"]) for m in models.values() if m is not None)
+    rows = add_macro_label(rows, history, seed, cfg.label_rule).join(
+        domain_age_frame(panel, cfg), on="date", how="left",
+    ).with_columns(
+        pl.lit(train_end, dtype=pl.Date).alias("model_train_end"),
         pl.lit(run_date).alias("computation_date"),
         pl.lit(PROCESSING_VERSION).alias("processing_version"),
         pl.lit(_fingerprint_of(models)).alias("model_config_fingerprint"),
     )
     rows = rows.select(_column_order(cfg))
-    return append_store(existing, rows, MACRO_REGIME_PATH, MacroRegimeError)
+    return append_store(existing, rows, MACRO_REGIME_PATH, MacroRegimeError, additive=provenance_columns(cfg))
 
 
 def _column_order(cfg: MacroModelConfig) -> list[str]:
@@ -303,8 +360,8 @@ def _column_order(cfg: MacroModelConfig) -> list[str]:
     for d in cfg.domains:
         cols += [f"{d}_label", f"{d}_probability", f"{d}_score"]
         cols += [f"{d}_post_{lab}" for lab in cfg.labels[d]]
-        cols += [f"{d}_short_history", f"{d}_model_fit_date"]
-    return cols + ["macro_activity", "macro_momentum", "macro_label", "in_sample",
+        cols += [f"{d}_short_history", f"{d}_model_fit_date", f"{d}_age_days"]
+    return cols + ["macro_activity", "macro_momentum", "macro_label", "in_sample", "model_train_end",
                    "computation_date", "processing_version", "model_config_fingerprint"]
 
 
@@ -314,6 +371,7 @@ def run_fit(run_date: date) -> None:
     """Weekly job ('gold_hmm_macro_fit'): fit, persist, then append the rows the store lacks."""
     cfg = macro_model_config()
     panel = _load_panel(run_date)
+    enforce_gap_guard(gap_dates(run_date, cfg), "hmm_macro", "gold_hmm_macro_regime", MacroRegimeGapError)
     status = fit_all(panel, run_date, cfg)
     added = append_new_rows(panel, cfg, run_date)
     logger.info(f"[hmm_macro] fit {run_date}: "
