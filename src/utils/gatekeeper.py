@@ -83,12 +83,37 @@ Design simplifications vs. hmm-gatekeeper-xgboost.md's fuller notation:
       local signal is job-completion only. This is a known, named gap
       (matches the CI/CD guide's own open item: Gold layer has never had a
       formal audit), not something this ADR closes.
+
+ADR-059 amendments (GHR-04 / GHR-05 / GHR-09, GMI-GHR-REC-001):
+    - `skipped` raw status. A day covered by a deliberate-pause marker for a layer scope
+      (src/utils/pause_markers.py, `runner.py --pause`) is `skipped`, not `block`; a DOMAIN scope is
+      `skipped` when any layer in its chain is paused. `skipped` is TRANSPARENT in two places: when
+      layers combine (`_worse`) and in the streak (`_emit_status`) — it neither extends nor breaks a
+      streak, so the 2-day recovery and 4-day block windows count only evaluated days. A failing job on
+      the first day after a long pause therefore emits `warn`, not an immediate `block`
+      (GK5, "resume trap"). A scope that is `skipped` TODAY emits gate_status 'skipped'.
+    - `pending` weekly jobs. On the EVALUATION day only (offset 0), a due weekly-only job (guarded by
+      run_on_weekdays alone, not in DAILY_SEQUENCE) that has no sentinel is `pending`, not `missing`,
+      while NO weekly-only job due that day has started (GK3: Sunday's gate ran 35 minutes before the
+      weekly sentinels were written). As soon as one weekly job has a sentinel the sequence has
+      started and any still-unfinished one is `missing`. Past days (offset >= 1) are final: a weekly
+      job without a sentinel is `missing`, so a wrongly-`pending` evaluation self-corrects on the
+      next day's recomputation. The recovery/block windows are NOT changed.
+    - Append-only evidence: every `run()` also writes one part file
+      data/health/gate_log/evaluated_at=<ts>.parquet holding, per (scope, day), the raw status, the
+      quality verdict and quarantine files consulted, and per member job its state and sentinel
+      mtime. History is recomputed from sentinels (mutable files), so without this log a sentinel
+      cleanup rewrites the past; with it `gate_status` is derivable from the log alone
+      (`derive_gate_status`). Part files are never rewritten.
+    - Code/ADR note (GK6): ADR-050 says the Gatekeeper reads `pipeline_runs.db`; it never did, and
+      must not while that store holds test fixtures (HR4). The ADR text is amended, not the code.
 """
 
 from __future__ import annotations
 
 import glob as glob_module
-from datetime import date, timedelta
+import json
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import polars as pl
@@ -96,12 +121,24 @@ from loguru import logger
 
 from src.scheduler.dependency_guard import DependencyGuard
 from src.utils.atomic_io import atomic_write_parquet
+from src.utils.data_paths import health_dir, quarantine_dir
+from src.utils.pause_markers import is_paused, load_pauses, paused_layers_on
 
-GATE_STATUS_PATH      = Path("data/health/gate_status.parquet")
-QUALITY_GATE_LOG_PATH = Path("data/health/quality_gate_log.parquet")
-QUARANTINE_GLOB       = "data/quarantine/*.parquet"
+GATE_STATUS_PATH      = health_dir() / "gate_status.parquet"          # GHR-01: $ALPHA_FACTORY_DATA_DIR-aware
+QUALITY_GATE_LOG_PATH = health_dir() / "quality_gate_log.parquet"
+QUARANTINE_GLOB       = str(quarantine_dir() / "*.parquet")
 
 SCOPES = ("bronze", "silver", "gold")
+
+# ADR-059 GHR-05: append-only evidence log (one part file per evaluation).
+GATE_LOG_DIR = health_dir() / "gate_log"
+
+# ADR-059 GHR-09: a raw status for days covered by a pause marker. Not part of _SEVERITY on purpose:
+# it is transparent (see _worse / _emit_status), never "worse" or "better" than anything.
+SKIPPED = "skipped"
+
+# Per-job states recorded in the evidence log.
+JOB_DONE, JOB_MISSING, JOB_PENDING, JOB_PAUSED = "done", "missing", "pending", "paused"
 
 # Cascading/hysteresis ordering — index = severity rank.
 _SEVERITY = {"pass": 0, "warn": 1, "block": 2}
@@ -125,7 +162,12 @@ LOOKBACK_DAYS = 14
 
 
 def _worse(a: str, b: str) -> str:
-    """Return whichever of two statuses is more severe (block > warn > pass)."""
+    """Return whichever of two statuses is more severe (block > warn > pass). `skipped` (a paused
+    layer, ADR-059 GHR-09) is transparent: it contributes nothing to a cascade."""
+    if a == SKIPPED:
+        return b
+    if b == SKIPPED:
+        return a
     return a if _SEVERITY[a] >= _SEVERITY[b] else b
 
 
@@ -205,34 +247,160 @@ def _job_completed(
     return guard.is_done_within(job_name, run_date, max_age)
 
 
-def _quarantine_today(run_date: date) -> bool:
-    """Any Bronze schema-registry quarantine file (schema_validator.py)
-    written on run_date? Matched by file mtime date, the same idiom
-    health_reporter.py's IDX coverage check already uses for "did this
-    happen today" against a timestamp that isn't itself a run_date column
-    — quarantine filenames carry a wall-clock timestamp, not run_date."""
+def _quarantine_day_and_kind(fname: str) -> tuple[date | None, str | None]:
+    """(day, kind) a quarantine file records about ITSELF (ADR-059 GHR-07): `_quarantined_at` and
+    `_quarantine_kind`, written by SchemaValidator.handle_mismatch. A file without them (written before
+    GHR-07) or one that cannot be read falls back to its mtime date with kind None — the legacy rule.
+    The recorded day is a naive LOCAL timestamp, the same clock `run_date` (date.today()) uses."""
     try:
-        for fname in glob_module.glob(QUARANTINE_GLOB):
-            try:
-                if date.fromtimestamp(Path(fname).stat().st_mtime) == run_date:
-                    return True
-            except (OSError, ValueError):
-                continue
+        names = pl.scan_parquet(fname).collect_schema().names()
+        if "_quarantined_at" in names:
+            cols = ["_quarantined_at"] + (["_quarantine_kind"] if "_quarantine_kind" in names else [])
+            row = pl.scan_parquet(fname).select(cols).head(1).collect()
+            if row.height:
+                stamp = row["_quarantined_at"][0]
+                kind = row["_quarantine_kind"][0] if "_quarantine_kind" in cols else None
+                return date.fromisoformat(str(stamp)[:10]), kind
+    except Exception:                                   # noqa: BLE001 — unreadable/odd file: use mtime
+        pass
+    try:
+        return date.fromtimestamp(Path(fname).stat().st_mtime), None
+    except (OSError, ValueError):
+        return None, None
+
+
+def _quarantine_files(run_date: date) -> list[str]:
+    """Bronze schema-mismatch quarantine files (schema_validator.py) quarantined on run_date.
+
+    ADR-059 GHR-07: the day comes from the file's own `_quarantined_at` and only `schema_mismatch`
+    files count; mtime is used only for legacy files that lack the marker. Previously mtime alone
+    decided, so a copied/restored/touched file read as "quarantined today". Returned, not just counted,
+    so the evidence log can name what a verdict rested on (ADR-059 GHR-05)."""
+    found: list[str] = []
+    try:
+        for fname in sorted(glob_module.glob(QUARANTINE_GLOB)):
+            day, kind = _quarantine_day_and_kind(fname)
+            if day == run_date and kind in (None, "schema_mismatch"):
+                found.append(fname)
     except OSError:
         pass
-    return False
+    return found
+
+
+def _quarantine_today(run_date: date) -> bool:
+    """Any Bronze schema-registry quarantine file written on run_date? (see _quarantine_files)"""
+    return bool(_quarantine_files(run_date))
+
+
+def _max_age_for(job_name: str, daily_sequence: set[str]) -> int:
+    """The sentinel window _job_completed() applies to this job (0 = exact date)."""
+    from src.scheduler.job_registry import JOB_REGISTRY
+
+    if job_name in daily_sequence or _due_exactly_on_guard_days(JOB_REGISTRY[job_name]):
+        return 0
+    return WEEKLY_STALE_DAYS
+
+
+def _sentinel_mtime(guard: DependencyGuard, job_name: str, run_date: date, max_age: int) -> str | None:
+    """ISO mtime (UTC) of the newest sentinel inside the job's window, else None. Evidence only."""
+    for back in range(max_age + 1):
+        path = guard._sentinel_path(job_name, run_date - timedelta(days=back))
+        try:
+            if path.exists():
+                return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+        except OSError:
+            continue
+    return None
+
+
+def _is_weekly_only_guard_job(job_name: str, daily_sequence: set[str]) -> bool:
+    from src.scheduler.job_registry import JOB_REGISTRY
+
+    return job_name not in daily_sequence and _due_exactly_on_guard_days(JOB_REGISTRY[job_name])
+
+
+def _weekly_sequence_started(guard: DependencyGuard, run_date: date, daily_sequence: set[str]) -> bool:
+    """True once ANY weekly-only job that is due on run_date has its sentinel (ADR-059 GHR-04)."""
+    from src.scheduler.job_registry import JOB_REGISTRY, WEEKLY_SEQUENCE, _passes_schedule
+
+    due = [
+        j for j in dict.fromkeys(WEEKLY_SEQUENCE)
+        if _is_weekly_only_guard_job(j, daily_sequence) and _passes_schedule(JOB_REGISTRY[j], run_date)
+    ]
+    return any(guard.is_done(j, run_date) for j in due)
+
+
+def _classify_jobs(
+    guard: DependencyGuard,
+    jobs: list[str],
+    run_date: date,
+    daily_sequence: set[str],
+    *,
+    allow_pending: bool = False,
+    paused_layers: frozenset[str] = frozenset(),
+) -> dict[str, str]:
+    """{job: done | missing | pending | paused}. `pending` only with allow_pending (the evaluation
+    day) and only for a due weekly-only job while the weekly sequence has not started (GHR-04)."""
+    from src.scheduler.job_registry import JOB_REGISTRY
+
+    started: bool | None = None
+    states: dict[str, str] = {}
+    for job_name in jobs:
+        if JOB_REGISTRY[job_name]["layer"] in paused_layers:
+            states[job_name] = JOB_PAUSED
+        elif _job_completed(guard, job_name, run_date, daily_sequence):
+            states[job_name] = JOB_DONE
+        elif allow_pending and _is_weekly_only_guard_job(job_name, daily_sequence):
+            if started is None:
+                started = _weekly_sequence_started(guard, run_date, daily_sequence)
+            states[job_name] = JOB_MISSING if started else JOB_PENDING
+        else:
+            states[job_name] = JOB_MISSING
+    return states
+
+
+def _record(
+    evidence: list[dict] | None, *, scope: str, run_date: date, day_offset: int, raw: str,
+    states: dict[str, str], guard: DependencyGuard, daily_sequence: set[str],
+    quality_local: str | None = None, quarantine_files: list[str] | None = None,
+) -> None:
+    """Append this (scope, day)'s header row and one row per member job to the evidence list."""
+    if evidence is None:
+        return
+    day = run_date.isoformat()
+    evidence.append({
+        "scope": scope, "day": day, "day_offset": day_offset, "raw_status": raw,
+        "quality_local": quality_local,
+        "quarantine_files": json.dumps(quarantine_files) if quarantine_files else None,
+        "job": None, "job_state": None, "expected": None, "sentinel_mtime": None,
+    })
+    for job_name, state in states.items():
+        evidence.append({
+            "scope": scope, "day": day, "day_offset": day_offset, "raw_status": None,
+            "quality_local": None, "quarantine_files": None,
+            "job": job_name, "job_state": state, "expected": True,
+            "sentinel_mtime": _sentinel_mtime(guard, job_name, run_date, _max_age_for(job_name, daily_sequence)),
+        })
 
 
 def _bronze_raw_status(
-    guard: DependencyGuard, run_date: date, daily_sequence: set[str]
+    guard: DependencyGuard, run_date: date, daily_sequence: set[str], *,
+    allow_pending: bool = False, pauses: dict | None = None,
+    evidence: list[dict] | None = None, day_offset: int = 0,
 ) -> str:
+    pauses = load_pauses() if pauses is None else pauses
     expected = _expected_jobs_for_layer("bronze", run_date)
-    missing  = [j for j in expected if not _job_completed(guard, j, run_date, daily_sequence)]
-    if missing:
-        return "block"
-    if _quarantine_today(run_date):
-        return "warn"
-    return "pass"
+    if is_paused(pauses, "bronze", run_date):
+        _record(evidence, scope="bronze", run_date=run_date, day_offset=day_offset, raw=SKIPPED,
+                states={j: JOB_PAUSED for j in expected}, guard=guard, daily_sequence=daily_sequence)
+        return SKIPPED
+    states = _classify_jobs(guard, expected, run_date, daily_sequence, allow_pending=allow_pending)
+    qfiles = _quarantine_files(run_date)
+    missing = [j for j, st in states.items() if st == JOB_MISSING]
+    raw = "block" if missing else ("warn" if qfiles else "pass")
+    _record(evidence, scope="bronze", run_date=run_date, day_offset=day_offset, raw=raw, states=states,
+            guard=guard, daily_sequence=daily_sequence, quarantine_files=qfiles)
+    return raw
 
 
 def _quality_local_status(quality_log: pl.DataFrame, run_date: date) -> str:
@@ -255,16 +423,29 @@ def _silver_raw_status(
     daily_sequence: set[str],
     quality_log: pl.DataFrame,
     bronze_status: str,
+    *,
+    allow_pending: bool = False, pauses: dict | None = None,
+    evidence: list[dict] | None = None, day_offset: int = 0,
 ) -> str:
+    pauses = load_pauses() if pauses is None else pauses
     expected = _expected_jobs_for_layer("silver", run_date)
-    missing  = [j for j in expected if not _job_completed(guard, j, run_date, daily_sequence)]
+    if is_paused(pauses, "silver", run_date):
+        _record(evidence, scope="silver", run_date=run_date, day_offset=day_offset, raw=SKIPPED,
+                states={j: JOB_PAUSED for j in expected}, guard=guard, daily_sequence=daily_sequence)
+        return SKIPPED
+    states = _classify_jobs(guard, expected, run_date, daily_sequence, allow_pending=allow_pending)
+    missing = [j for j, st in states.items() if st == JOB_MISSING]
 
+    quality_local = None
     if missing:
         local = "block"
     else:
-        local = _quality_local_status(quality_log, run_date)
+        local = quality_local = _quality_local_status(quality_log, run_date)
 
-    return _worse(bronze_status, local)
+    raw = _worse(bronze_status, local)
+    _record(evidence, scope="silver", run_date=run_date, day_offset=day_offset, raw=raw, states=states,
+            guard=guard, daily_sequence=daily_sequence, quality_local=quality_local)
+    return raw
 
 
 def _gold_raw_status(
@@ -272,13 +453,25 @@ def _gold_raw_status(
     run_date: date,
     daily_sequence: set[str],
     silver_status: str,
+    *,
+    allow_pending: bool = False, pauses: dict | None = None,
+    evidence: list[dict] | None = None, day_offset: int = 0,
 ) -> str:
+    pauses = load_pauses() if pauses is None else pauses
     expected = _expected_jobs_for_layer("gold", run_date)
-    missing  = [j for j in expected if not _job_completed(guard, j, run_date, daily_sequence)]
+    if is_paused(pauses, "gold", run_date):
+        _record(evidence, scope="gold", run_date=run_date, day_offset=day_offset, raw=SKIPPED,
+                states={j: JOB_PAUSED for j in expected}, guard=guard, daily_sequence=daily_sequence)
+        return SKIPPED
+    states = _classify_jobs(guard, expected, run_date, daily_sequence, allow_pending=allow_pending)
+    missing = [j for j, st in states.items() if st == JOB_MISSING]
     # No per-check Gold quality validator exists yet (see module docstring)
     # -- job completion is the only local Gold signal available today.
     local = "block" if missing else "pass"
-    return _worse(silver_status, local)
+    raw = _worse(silver_status, local)
+    _record(evidence, scope="gold", run_date=run_date, day_offset=day_offset, raw=raw, states=states,
+            guard=guard, daily_sequence=daily_sequence)
+    return raw
 
 
 def _raw_status_for_day(
@@ -286,10 +479,15 @@ def _raw_status_for_day(
     run_date: date,
     daily_sequence: set[str],
     quality_log: pl.DataFrame,
+    *,
+    allow_pending: bool = False, pauses: dict | None = None,
+    evidence: list[dict] | None = None, day_offset: int = 0,
 ) -> dict[str, str]:
-    bronze = _bronze_raw_status(guard, run_date, daily_sequence)
-    silver = _silver_raw_status(guard, run_date, daily_sequence, quality_log, bronze)
-    gold   = _gold_raw_status(guard, run_date, daily_sequence, silver)
+    pauses = load_pauses() if pauses is None else pauses
+    kw = dict(allow_pending=allow_pending, pauses=pauses, evidence=evidence, day_offset=day_offset)
+    bronze = _bronze_raw_status(guard, run_date, daily_sequence, **kw)
+    silver = _silver_raw_status(guard, run_date, daily_sequence, quality_log, bronze, **kw)
+    gold   = _gold_raw_status(guard, run_date, daily_sequence, silver, **kw)
     return {"bronze": bronze, "silver": silver, "gold": gold}
 
 
@@ -326,35 +524,66 @@ def _domain_raw_status(
     run_date: date,
     daily_sequence: set[str],
     quality_log: pl.DataFrame,
+    *,
+    allow_pending: bool = False, pauses: dict | None = None,
+    evidence: list[dict] | None = None, day_offset: int = 0,
 ) -> str:
     """One day's raw status of a domain chain: block when any member job that was due did not
     complete; otherwise the worst of (a) Silver's persisted-check verdict, ONLY when silver_validate
-    is part of the chain, and (b) a Bronze quarantine warning, ONLY when a Bronze job is."""
+    is part of the chain, and (b) a Bronze quarantine warning, ONLY when a Bronze job is.
+
+    ADR-059: `skipped` when any layer the chain runs through is paused that day (GHR-09); due
+    weekly-only members are `pending` rather than `missing` on the evaluation day (GHR-04)."""
     from src.scheduler.job_registry import GATE_DOMAINS, JOB_REGISTRY
 
+    pauses = load_pauses() if pauses is None else pauses
     members = domain_members(domain, run_date)
-    if any(not _job_completed(guard, j, run_date, daily_sequence) for j in members):
-        return "block"
     chain = _upstream_closure(GATE_DOMAINS[domain], JOB_REGISTRY)
+    chain_layers = {JOB_REGISTRY[j]["layer"] for j in chain}
+    paused = paused_layers_on(pauses, run_date)
+
+    if chain_layers & paused:
+        _record(evidence, scope=domain, run_date=run_date, day_offset=day_offset, raw=SKIPPED,
+                states={j: JOB_PAUSED for j in members}, guard=guard, daily_sequence=daily_sequence)
+        return SKIPPED
+
+    states = _classify_jobs(guard, members, run_date, daily_sequence, allow_pending=allow_pending)
+    if any(st == JOB_MISSING for st in states.values()):
+        _record(evidence, scope=domain, run_date=run_date, day_offset=day_offset, raw="block",
+                states=states, guard=guard, daily_sequence=daily_sequence)
+        return "block"
+
     status = "pass"
+    quality_local = None
     if "silver_validate" in chain:
-        status = _worse(status, _quality_local_status(quality_log, run_date))
-    if any(JOB_REGISTRY[j]["layer"] == "bronze" for j in chain) and _quarantine_today(run_date):
-        status = _worse(status, "warn")
+        quality_local = _quality_local_status(quality_log, run_date)
+        status = _worse(status, quality_local)
+    qfiles: list[str] = []
+    if any(JOB_REGISTRY[j]["layer"] == "bronze" for j in chain):
+        qfiles = _quarantine_files(run_date)
+        if qfiles:
+            status = _worse(status, "warn")
+    _record(evidence, scope=domain, run_date=run_date, day_offset=day_offset, raw=status, states=states,
+            guard=guard, daily_sequence=daily_sequence, quality_local=quality_local, quarantine_files=qfiles)
     return status
 
 
 def domain_status(domain: str, run_date: date, guard: DependencyGuard | None = None,
-                  quality_log: pl.DataFrame | None = None) -> dict:
+                  quality_log: pl.DataFrame | None = None, *,
+                  pauses: dict | None = None, evidence: list[dict] | None = None) -> dict:
     """{'layer_health', 'gate_status', 'streak_days'} for one domain scope — the same hysteresis
     (_emit_status) as the layer scopes, recomputed from the sentinels over LOOKBACK_DAYS."""
     from src.scheduler.job_registry import DAILY_SEQUENCE
 
     guard = guard or DependencyGuard()
     quality_log = _read_quality_log() if quality_log is None else quality_log
+    pauses = load_pauses() if pauses is None else pauses
     daily_sequence = set(DAILY_SEQUENCE)
-    history = [_domain_raw_status(domain, guard, run_date - timedelta(days=o), daily_sequence, quality_log)
-               for o in range(LOOKBACK_DAYS)]
+    history = [
+        _domain_raw_status(domain, guard, run_date - timedelta(days=o), daily_sequence, quality_log,
+                           allow_pending=(o == 0), pauses=pauses, evidence=evidence, day_offset=o)
+        for o in range(LOOKBACK_DAYS)
+    ]
     emitted, streak = _emit_status(history)
     return {"layer_health": history[0], "gate_status": emitted, "streak_days": streak}
 
@@ -374,10 +603,24 @@ def _emit_status(raw_history: list[str]) -> tuple[str, int]:
     raw_history[0] = run_date's raw status, raw_history[1] = run_date-1,
     etc. (most recent first). Returns (gate_status, streak_days) per the
     hysteresis rule in the module docstring.
+
+    ADR-059 GHR-09: `skipped` days are TRANSPARENT. They neither extend nor break a streak, so the
+    recovery (2-day) and block (4-day) windows count only evaluated days; a scope that is `skipped`
+    today emits 'skipped' with the length of the leading skipped run as its streak.
     """
     current = raw_history[0]
+    if current == SKIPPED:
+        run = 1
+        for prev in raw_history[1:]:
+            if prev != SKIPPED:
+                break
+            run += 1
+        return SKIPPED, run
+
     streak = 1
     for prev in raw_history[1:]:
+        if prev == SKIPPED:
+            continue
         if prev == current:
             streak += 1
         else:
@@ -407,21 +650,40 @@ def _read_quality_log() -> pl.DataFrame:
         return pl.DataFrame(schema=empty_schema)
 
 
-def compute(run_date: date) -> pl.DataFrame:
-    """Compute this run_date's gate_status rows for every scope (bronze, silver, gold + the ADR-053 domains),
-    recomputing up to LOOKBACK_DAYS of raw history from the underlying
-    signals each time (never trusts a previously-written gate_status.parquet
-    row) so a bad historical write can never propagate forward."""
+_EVIDENCE_SCHEMA = {
+    "evaluated_at": pl.Utf8, "run_date": pl.Utf8, "evidence": pl.Utf8, "scope": pl.Utf8,
+    "day": pl.Utf8, "day_offset": pl.Int32, "raw_status": pl.Utf8, "quality_local": pl.Utf8,
+    "quarantine_files": pl.Utf8, "job": pl.Utf8, "job_state": pl.Utf8, "expected": pl.Boolean,
+    "sentinel_mtime": pl.Utf8, "gate_status": pl.Utf8, "streak_days": pl.Int32,
+}
+
+_GATE_STATUS_SCHEMA = {
+    "run_date": pl.Utf8, "scope": pl.Utf8, "layer_health": pl.Utf8,
+    "gate_status": pl.Utf8, "streak_days": pl.Int64,
+}
+
+
+def compute_with_evidence(run_date: date) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """(gate_status rows, evidence rows) for this run_date.
+
+    Recomputes up to LOOKBACK_DAYS of raw history from the underlying signals each time (never
+    trusts a previously-written gate_status.parquet row), so a bad historical write can never
+    propagate forward. The evidence frame records what each verdict rested on (ADR-059 GHR-05)."""
     from src.scheduler.job_registry import DAILY_SEQUENCE, GATE_DOMAINS
 
     guard = DependencyGuard()
     daily_sequence = set(DAILY_SEQUENCE)
     quality_log = _read_quality_log()
+    pauses = load_pauses()
+    evidence: list[dict] = []
 
     history: dict[str, list[str]] = {s: [] for s in SCOPES}
     for offset in range(LOOKBACK_DAYS):
         day = run_date - timedelta(days=offset)
-        day_status = _raw_status_for_day(guard, day, daily_sequence, quality_log)
+        day_status = _raw_status_for_day(
+            guard, day, daily_sequence, quality_log,
+            allow_pending=(offset == 0), pauses=pauses, evidence=evidence, day_offset=offset,
+        )
         for scope in SCOPES:
             history[scope].append(day_status[scope])
 
@@ -436,7 +698,7 @@ def compute(run_date: date) -> pl.DataFrame:
             "streak_days":  streak,
         })
     for domain in GATE_DOMAINS:                              # ADR-053 D4: one row per intelligence domain
-        st = domain_status(domain, run_date, guard, quality_log)
+        st = domain_status(domain, run_date, guard, quality_log, pauses=pauses, evidence=evidence)
         rows.append({
             "run_date":     run_date.isoformat(),
             "scope":        domain,
@@ -444,7 +706,93 @@ def compute(run_date: date) -> pl.DataFrame:
             "gate_status":  st["gate_status"],
             "streak_days":  st["streak_days"],
         })
-    return pl.DataFrame(rows)
+
+    # The emitted verdict rides on each scope's offset-0 header row, so the log alone says what was
+    # published (and `derive_gate_status` can be checked against it).
+    emitted_by_scope = {r["scope"]: r for r in rows}
+    for ev in evidence:
+        if ev["job"] is None and ev["day_offset"] == 0:
+            ev["gate_status"] = emitted_by_scope[ev["scope"]]["gate_status"]
+            ev["streak_days"] = emitted_by_scope[ev["scope"]]["streak_days"]
+
+    evaluated_at = datetime.now(timezone.utc).isoformat()
+    ev_rows = [{
+        "evaluated_at": evaluated_at, "run_date": run_date.isoformat(), "evidence": "evaluated",
+        "gate_status": None, "streak_days": None, **e,
+    } for e in evidence]
+    return pl.DataFrame(rows), pl.DataFrame(ev_rows, schema=_EVIDENCE_SCHEMA)
+
+
+def compute(run_date: date) -> pl.DataFrame:
+    """Compute this run_date's gate_status rows for every scope (bronze, silver, gold + the ADR-053
+    domains). See compute_with_evidence()."""
+    return compute_with_evidence(run_date)[0]
+
+
+def _write_gate_log(frame: pl.DataFrame) -> Path:
+    """Append one evaluation as its own part file; an existing part is NEVER rewritten."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    path = GATE_LOG_DIR / f"evaluated_at={stamp}.parquet"
+    n = 0
+    while path.exists():
+        n += 1
+        path = GATE_LOG_DIR / f"evaluated_at={stamp}-{n}.parquet"
+    atomic_write_parquet(frame, path, compression="zstd", compression_level=3)
+    return path
+
+
+def read_gate_log(log_dir: Path | None = None) -> pl.DataFrame:
+    """Every part file of the evidence log as one frame (empty frame when there is none)."""
+    base = Path(log_dir) if log_dir is not None else GATE_LOG_DIR
+    parts = sorted(base.glob("*.parquet")) if base.exists() else []
+    if not parts:
+        return pl.DataFrame(schema=_EVIDENCE_SCHEMA)
+    return pl.concat([pl.read_parquet(f) for f in parts], how="diagonal_relaxed")
+
+
+def _seed_legacy_gate_log() -> bool:
+    """One-time: when the log does not exist yet but a gate_status.parquet does, carry its rows in as
+    evidence='legacy' so the history that predates the log is not orphaned. Idempotent."""
+    if GATE_LOG_DIR.exists() and any(GATE_LOG_DIR.glob("*.parquet")):
+        return False
+    if not GATE_STATUS_PATH.exists():
+        return False
+    legacy = pl.read_parquet(GATE_STATUS_PATH)
+    if legacy.height == 0:
+        return False
+    rows = [{
+        "evaluated_at": "legacy", "run_date": r["run_date"], "evidence": "legacy", "scope": r["scope"],
+        "day": r["run_date"], "day_offset": 0, "raw_status": r["layer_health"],
+        "quality_local": None, "quarantine_files": None, "job": None, "job_state": None,
+        "expected": None, "sentinel_mtime": None,
+        "gate_status": r["gate_status"], "streak_days": r["streak_days"],
+    } for r in legacy.to_dicts()]
+    atomic_write_parquet(pl.DataFrame(rows, schema=_EVIDENCE_SCHEMA), GATE_LOG_DIR / "legacy_seed.parquet",
+                         compression="zstd", compression_level=3)
+    return True
+
+
+def derive_gate_status(log: pl.DataFrame, run_date: date) -> pl.DataFrame:
+    """Re-derive run_date's gate_status rows from the evidence log ALONE (ADR-059 GHR-05): the
+    latest evaluation of that date, its per-day raw statuses through `_emit_status`. Falls back to
+    the stored verdict for dates that only exist as legacy seed rows. Empty frame when unknown."""
+    day_str = run_date.isoformat()
+    heads = log.filter((pl.col("run_date") == day_str) & pl.col("job").is_null()) if log.height else log
+    ev = heads.filter(pl.col("evidence") == "evaluated") if heads.height else heads
+    rows = []
+    if ev.height:
+        latest = ev["evaluated_at"].max()
+        ev = ev.filter(pl.col("evaluated_at") == latest)
+        for scope in ev["scope"].unique(maintain_order=True).to_list():
+            hist = ev.filter(pl.col("scope") == scope).sort("day_offset")["raw_status"].to_list()
+            emitted, streak = _emit_status(hist)
+            rows.append({"run_date": day_str, "scope": scope, "layer_health": hist[0],
+                         "gate_status": emitted, "streak_days": streak})
+    elif heads.height:
+        for r in heads.filter(pl.col("evidence") == "legacy").to_dicts():
+            rows.append({"run_date": day_str, "scope": r["scope"], "layer_health": r["raw_status"],
+                         "gate_status": r["gate_status"], "streak_days": r["streak_days"]})
+    return pl.DataFrame(rows, schema=_GATE_STATUS_SCHEMA)
 
 
 def run(run_date: date) -> None:
@@ -452,7 +800,12 @@ def run(run_date: date) -> None:
     before health_report in DAILY_SEQUENCE, so it reads that day's fully
     completed sentinels/checks before health_report surfaces gate status
     alongside its own summary."""
-    result = compute(run_date)
+    result, evidence = compute_with_evidence(run_date)
+
+    try:                                                      # ADR-059 GHR-05/09: keep pre-log history
+        _seed_legacy_gate_log()
+    except Exception as e:
+        logger.warning(f"[Gatekeeper] legacy gate_log seed failed (non-blocking): {e}")
 
     try:
         day_str = run_date.isoformat()
@@ -468,6 +821,11 @@ def run(run_date: date) -> None:
         # health_report (the very next job) degrades gracefully if gate
         # status is unavailable for today.
         logger.warning(f"[Gatekeeper] gate_status persistence failed (non-blocking): {e}")
+
+    try:                                                      # ADR-059 GHR-05: append-only evidence
+        _write_gate_log(evidence)
+    except Exception as e:
+        logger.warning(f"[Gatekeeper] gate_log write failed (non-blocking): {e}")
 
     summary = ", ".join(
         f"{r['scope']}={r['gate_status']}({r['layer_health']}, streak={r['streak_days']})"

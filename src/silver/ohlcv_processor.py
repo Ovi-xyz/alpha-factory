@@ -30,6 +30,7 @@ from typing import Optional
 
 import polars as pl
 from src.utils.atomic_io import atomic_write_parquet  # FIX SIL-AIO-001
+from src.utils.job_result import JobResult
 from loguru import logger
 
 CURRENT_SILVER_VERSION = "1.2"
@@ -814,9 +815,12 @@ def _read_bronze_symbol(
     return df
 
 
-def run(run_date: date) -> None:
+def run(run_date: date) -> JobResult:
     """
     Job entry point for 'silver_ohlcv' — dipanggil oleh job_registry.py.
+
+    ADR-059 GHR-03: returns a JobResult; rows_written is the number of rows in the Silver files
+    this call wrote (each per-symbol file is rewritten, so this is rows WRITTEN, not rows new).
 
     FIX GAP-6 [P1] (Production Readiness Assessment v1.7.2, GD §14.3.2): this
     module previously had no module-level run(run_date) function. GD §14.3.2
@@ -847,6 +851,7 @@ def run(run_date: date) -> None:
 
     proc   = OHLCVProcessor()
     loader = get_loader()
+    rows_written = 0
 
     # ── PASS 1: Bronze raw TFs → Silver ──────────────────────────────────────
     logger.info(f"[silver_ohlcv] PASS 1: Bronze raw TFs → Silver | run_date={run_date}")
@@ -906,6 +911,7 @@ def run(run_date: date) -> None:
                 )
                 if silver_df is not None and len(silver_df) > 0:
                     proc.write(silver_df, inst.symbol, inst.market, tf)
+                    rows_written += len(silver_df)
 
                 ckpt.mark_done(inst.symbol, timeframe=tf)
             except Exception as e:
@@ -950,6 +956,7 @@ def run(run_date: date) -> None:
 
             if silver_4h_df is not None and len(silver_4h_df) > 0:
                 proc.write(silver_4h_df, inst.symbol, inst.market, "4H")
+                rows_written += len(silver_4h_df)
 
             ckpt_4h.mark_done(inst.symbol, timeframe="4H")
         except Exception as e:
@@ -963,6 +970,7 @@ def run(run_date: date) -> None:
         f"P1={ProgressCheckpoint('silver_ohlcv_p1', run_date).summary()} | "
         f"P2={ckpt_4h.summary()}"
     )
+    return JobResult(rows_written=rows_written)
 
 
 # ── ADD GMI-SIL-001 — Layer 2 Context OHLCV (Bronze → Silver) ────────────────

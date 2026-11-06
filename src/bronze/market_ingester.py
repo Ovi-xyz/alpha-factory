@@ -46,6 +46,7 @@ from src.bronze.base_ingester import BronzeIngester
 from src.bronze.inc_fetch import FALLBACK_DAYS, FALLBACK_YEARS, IncFetchProtocol
 from src.bronze.schema_validator import SchemaValidator
 from src.config.instrument_loader import Instrument, get_loader
+from src.utils.job_result import JobResult
 from src.utils.progress_checkpoint import ProgressCheckpoint
 from src.utils.symbol_utils import to_api_symbol
 
@@ -112,11 +113,15 @@ class MarketOHLCVIngester(BronzeIngester):
                 for source in sources:
                     self._schema_validators[source] = validator
 
-    def run(self, run_date: date) -> None:
+    def run(self, run_date: date) -> JobResult:
         """
         Ingest OHLCV untuk semua 643 instruments × configured timeframes.
         Menggunakan ProgressCheckpoint untuk resume jika crash.
+
+        ADR-059 GHR-03: returns a JobResult whose rows_written is the number of rows THIS call
+        wrote (idempotent same-day skips contribute 0), so the audit table records a real count.
         """
+        rows_before = self.rows_written_total
         loader = get_loader()
         all_instruments = loader.all_symbols()
         total = len(all_instruments)
@@ -154,6 +159,8 @@ class MarketOHLCVIngester(BronzeIngester):
             logger.info(
                 f"[MarketIngester] TF={tf} done | {summary}"
             )
+
+        return JobResult(rows_written=self.rows_written_total - rows_before)
 
     def _run_symbol(
         self,

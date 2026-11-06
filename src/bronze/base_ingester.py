@@ -36,6 +36,10 @@ class BronzeIngester(ABC):
 
     BASE_PATH: Path = Path("data/bronze")
 
+    # ADR-059 GHR-03: rows this instance has actually written (idempotent skips add nothing).
+    # Class default 0; the first write creates the instance attribute.
+    rows_written_total: int = 0
+
     def write(
         self,
         df: pl.DataFrame,
@@ -109,6 +113,7 @@ class BronzeIngester(ABC):
             compression="snappy", compression_level=None,
             row_group_size=100_000, statistics=False, use_pyarrow=False,
         )
+        self.rows_written_total += len(df)
         logger.debug(
             f"[Bronze] Wrote {len(df):,} rows → {fname.relative_to(self.BASE_PATH)}"
         )
@@ -185,6 +190,7 @@ class BronzeIngester(ABC):
             compression="snappy", compression_level=None,
             row_group_size=100_000, statistics=False, use_pyarrow=False,
         )
+        self.rows_written_total += len(df)
         logger.debug(
             f"[Bronze] Macro: {len(df):,} rows → {fname.relative_to(self.BASE_PATH)}"
         )

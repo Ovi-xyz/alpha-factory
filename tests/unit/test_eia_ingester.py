@@ -193,10 +193,14 @@ class TestSchemaValidatorGate:
                              __import__("pathlib").Path("config/schemas/eia_oil.yaml"))
         monkeypatch.setenv("EIA_API_KEY", "fake-key")
         malformed = pl.DataFrame({"series_id": ["PET.RWTC.W"]})
+        # UPDATED GHR-07 (ADR-059): quarantine into tmp_path (was the live data/quarantine) and assert it.
+        from src.bronze.schema_validator import SchemaValidator
+        monkeypatch.setattr(SchemaValidator, "QUARANTINE_PATH", tmp_path / "quarantine")
         with patch.object(EIAIngester, "_fetch_series", return_value=malformed):
             EIAIngester().run(date(2026, 6, 1))
         out_dir = tmp_path / "bronze" / "macro" / "eia" / "crude_oil"
         assert not out_dir.exists() or not list(out_dir.rglob("*.parquet"))
+        assert len(list((tmp_path / "quarantine").glob("*.parquet"))) >= 1
 
 
 class TestRunEntryPoint:

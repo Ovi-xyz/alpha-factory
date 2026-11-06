@@ -15,6 +15,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from loguru import logger as loguru_logger
+from src.utils.data_paths import health_dir
 
 
 # ── ANSI Color Codes ──────────────────────────────────────────────────────────
@@ -35,7 +36,7 @@ _LAYER_COLORS = {
     "util":   GRAY,
 }
 
-DB_PATH = Path("data/health/pipeline_runs.db")
+DB_PATH = health_dir() / "pipeline_runs.db"   # GHR-01: $ALPHA_FACTORY_DATA_DIR-aware
 
 
 def _c(text: str, code: str) -> str:
@@ -51,8 +52,10 @@ class PipelineLogger:
     - SQLite:   pipeline_runs table (GD Section 13.2) untuk health_reporter
     """
 
-    def __init__(self, db_path: Path = DB_PATH) -> None:
-        self.db_path = db_path
+    def __init__(self, db_path: Path | None = None) -> None:
+        # GHR-01: default resolved at CALL time from the module constant, not frozen as a default
+        # argument at definition time (which a monkeypatch of DB_PATH could never reach).
+        self.db_path = db_path if db_path is not None else DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
         self._start_times: dict[str, float] = {}
@@ -77,6 +80,13 @@ class PipelineLogger:
                     created_at   TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # ADR-059 GHR-03: `rows_known` (0/1) separates a REPORTED count from an unknown one.
+            # History is not rewritten: every pre-existing row had rows_written = 0 because nothing
+            # ever reported a count, so those rows are flagged rows_known = 0 (legacy zero = unknown).
+            cols = {row[1] for row in con.execute("PRAGMA table_info(pipeline_runs)")}
+            if "rows_known" not in cols:
+                con.execute("ALTER TABLE pipeline_runs ADD COLUMN rows_known INTEGER")
+                con.execute("UPDATE pipeline_runs SET rows_known = 0")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -100,11 +110,12 @@ class PipelineLogger:
     def success(
         self,
         job_name: str,
-        rows_written: int = 0,
+        rows_written: int | None = None,
         layer: str = "",
         source: str = "",
     ) -> None:
-        """Log job success with duration."""
+        """Log job success with duration. `rows_written=None` means the job did not report a count
+        (stored as NULL / rows_known = 0), which is NOT the same as reporting 0 (ADR-059 GHR-03)."""
         dur = self._elapsed(job_name)
         ts  = datetime.now().strftime("%H:%M:%S")
         print(
@@ -131,7 +142,7 @@ class PipelineLogger:
             + f"  {_c('FAILED ', RED)}  {job_name}"
         )
         print(_c(f"         ERROR: {error_msg[:120]}", RED))
-        self._write_db(job_name, "failed", 0, dur, error_msg[:500], layer, source)
+        self._write_db(job_name, "failed", None, dur, error_msg[:500], layer, source)
 
     def warn(self, message: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -185,7 +196,7 @@ class PipelineLogger:
         self,
         job_name: str,
         status: str,
-        rows: int,
+        rows: int | None,
         dur: float,
         error: str | None,
         layer: str,
@@ -196,8 +207,8 @@ class PipelineLogger:
             con.execute(
                 "INSERT INTO pipeline_runs"
                 " (run_id, run_date, layer, source, status,"
-                "  rows_written, duration_sec, error_msg)"
-                " VALUES (?,?,?,?,?,?,?,?)",
+                "  rows_written, rows_known, duration_sec, error_msg)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     job_name,
                     run_date,
@@ -205,6 +216,7 @@ class PipelineLogger:
                     source,
                     status,
                     rows,
+                    0 if rows is None else 1,
                     round(dur, 2),
                     error,
                 ),

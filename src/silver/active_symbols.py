@@ -463,6 +463,16 @@ class ActiveSymbolsResolver:
                 tmp_path.unlink(missing_ok=True)
                 raise
 
+        # ADD GHR-14 (ADR-059): log who entered / left the active set (append-only, never blocking).
+        try:
+            from src.silver.membership_log import record_membership
+
+            n_events = record_membership(output_path, run_date)
+            if n_events:
+                logger.info(f"[ActiveSymbols] membership_log: {n_events} event(s) appended for {run_date}")
+        except Exception as exc:                                 # noqa: BLE001
+            logger.warning(f"[ActiveSymbols] membership_log not updated (non-blocking): {exc}")
+
     def _save_fallback(self, symbols: list[str], run_date: date) -> None:
         """
         AS-2: fallback save — Silver not ready, full universe, flagged is_fallback=True.

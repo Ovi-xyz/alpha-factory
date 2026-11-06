@@ -16,11 +16,12 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from loguru import logger
+from src.utils.data_paths import health_dir
 
 from src.utils.silver_scope import layer1_globs, context_glob
 
-DB_PATH          = Path("data/health/pipeline_runs.db")
-PROGRESS_DB_PATH = Path("data/health/progress.db")
+DB_PATH          = health_dir() / "pipeline_runs.db"     # GHR-01: $ALPHA_FACTORY_DATA_DIR-aware
+PROGRESS_DB_PATH = health_dir() / "progress.db"
 
 # Storage thresholds (GD §15.2)
 STORAGE_RED_GB   = 70.0

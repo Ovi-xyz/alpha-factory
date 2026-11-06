@@ -19,9 +19,9 @@ G6: --reset flag untuk clear ProgressCheckpoint sebelum force-rerun.
 """
 
 import argparse
+import os
 import sys
 from datetime import date
-from pathlib import Path
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -43,17 +43,20 @@ from src.scheduler.dependency_guard import DependencyGuard
 from src.scheduler.job_registry import (
     JOB_REGISTRY,
     PIPELINE_SEQUENCE,
+    due_weekly_head_jobs,
     DAILY_SEQUENCE,
     WEEKLY_SEQUENCE,
     LAYER_JOB_NAMES,
     _passes_schedule,
 )
 from src.utils.pipeline_logger import PipelineLogger
+from src.utils.data_paths import sentinels_dir
+from src.utils.job_result import JobResult
 from src.utils.progress_checkpoint import ProgressCheckpoint
 
 # ── Global instances ──────────────────────────────────────────────────────────
 pipeline_logger = PipelineLogger()
-guard = DependencyGuard(sentinel_dir=Path("data/.sentinels"))
+guard = DependencyGuard(sentinel_dir=sentinels_dir())   # GHR-01: $ALPHA_FACTORY_DATA_DIR-aware
 
 
 # ── Core Runner ───────────────────────────────────────────────────────────────
@@ -118,10 +121,15 @@ def run_job(
     # Execute
     pipeline_logger.start(job_name, job["description"])
     try:
-        job["fn"](run_date)
+        result = job["fn"](run_date)
         guard.mark_done(job_name, run_date)
+        # ADR-059 GHR-03: a job may report what it wrote (JobResult); anything else is "unknown"
+        # (NULL), never a silent 0.
+        for warning in JobResult.warnings_from(result):
+            pipeline_logger.warn(f"{job_name}: {warning}")
         pipeline_logger.success(
             job_name,
+            rows_written=JobResult.rows_from(result),
             layer=job.get("layer", ""),
         )
     except Exception as e:
@@ -156,7 +164,9 @@ def run_all(force: bool = False, run_date: date | None = None) -> None:
     # KeyboardInterrupt (BaseException) sengaja tidak ditangkap — operator
     # yang membatalkan tidak boleh memicu job apa pun.
     first_failure: BaseException | None = None
-    for job_name in PIPELINE_SEQUENCE:
+    # ADD GHR-04 (ADR-059): weekly jobs that are due today and need no upstream (the Bronze weekly
+    # set) run FIRST, so the Gatekeeper at the end of this chain sees their sentinels (GK3).
+    for job_name in [*due_weekly_head_jobs(run_date), *PIPELINE_SEQUENCE]:
         if first_failure is not None and not JOB_REGISTRY[job_name].get("run_on_failure", False):
             continue
         try:
@@ -246,6 +256,14 @@ Examples:
         default=None,
         help="Override run date YYYY-MM-DD (default: today)",
     )
+    # ADD GHR-09 (ADR-059): deliberate-pause markers, so a paused chain is `skipped`, not `block`.
+    p.add_argument("--pause",  type=str, default=None,
+                   help="Pause layer scopes (comma list of bronze,silver,gold) from --date (default today)")
+    p.add_argument("--reason", type=str, default="", help="Reason recorded with --pause")
+    p.add_argument("--expected-resume", type=str, default=None,
+                   help="Expected resume date YYYY-MM-DD recorded with --pause")
+    p.add_argument("--resume", type=str, default=None,
+                   help="Close the open pause of these layer scopes at --date (default today)")
     return p.parse_args()
 
 
@@ -255,7 +273,21 @@ def main() -> None:
         date.fromisoformat(args.date) if args.date else date.today()
     )
 
-    if args.list:
+    if args.pause or args.resume:
+        from src.utils import pause_markers
+
+        if args.pause:
+            pause_markers.add_pause(
+                [s.strip() for s in args.pause.split(",") if s.strip()], from_date=run_date,
+                reason=args.reason, created_by=os.environ.get("USER", ""),
+                expected_resume=date.fromisoformat(args.expected_resume) if args.expected_resume else None,
+            )
+            pipeline_logger.info(f"Paused {args.pause} from {run_date} ({args.reason or 'no reason given'})")
+        if args.resume:
+            pause_markers.end_pause([s.strip() for s in args.resume.split(",") if s.strip()], resumed_on=run_date)
+            pipeline_logger.info(f"Resumed {args.resume} on {run_date}; earlier paused days stay 'skipped'")
+
+    elif args.list:
         pipeline_logger.print_job_list(JOB_REGISTRY)
 
     elif args.status:

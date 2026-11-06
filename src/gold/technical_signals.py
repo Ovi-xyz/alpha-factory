@@ -53,6 +53,7 @@ import duckdb
 import polars as pl
 from loguru import logger
 
+from src.gold import gold_manifest
 from src.gold.indicators.core_indicators import (
     add_atr,
     add_ema,
@@ -62,6 +63,7 @@ from src.gold.indicators.core_indicators import (
 )
 from src.gold.indicators.pandas_indicators import add_adx, add_bbands
 from src.utils.atomic_io import atomic_write_parquet
+from src.utils.job_result import JobResult
 from src.utils.progress_checkpoint import ProgressCheckpoint
 from src.utils.silver_scope import layer1_globs  # FIX GLD-L2-01
 from src.utils.trade_date import with_trade_date  # FIX TS-DATE-01
@@ -217,10 +219,14 @@ def _resolve_active_ohlcv_symbols(run_date: date) -> list[str] | None:
     return symbols
 
 
-def run(run_date: date) -> None:
+def run(run_date: date) -> JobResult:
     """
     Entry point untuk gold_signals job.
     G6: Checkpoint per timeframe — resume-safe jika crash mid-way.
+
+    ADR-059 GHR-03/GHR-08: returns a JobResult whose rows_written is the number of rows written by
+    THIS invocation (timeframes skipped as already done contribute 0), and records a run manifest +
+    key snapshots (src/gold/gold_manifest.py) so a changed row count can be decomposed afterwards.
 
     ADD GLD-ACTIVE-001: active_ohlcv resolved ONCE per run (not per
     timeframe) — the list is the same across all 7 TFs for a given
@@ -228,6 +234,8 @@ def run(run_date: date) -> None:
     """
     checkpoint = ProgressCheckpoint("gold_signals", run_date)
     active_symbols = _resolve_active_ohlcv_symbols(run_date)
+    manifest_rows: list[dict] = []
+    rows_total = 0
 
     for tf in TIMEFRAMES:
         if checkpoint.is_done("ALL", timeframe=tf):
@@ -235,7 +243,8 @@ def run(run_date: date) -> None:
             continue
 
         try:
-            rows = _process_timeframe(tf, run_date, active_symbols)
+            rows = _process_timeframe(tf, run_date, active_symbols, manifest_rows)
+            rows_total += rows
             checkpoint.mark_done("ALL", timeframe=tf)
             logger.info(f"[gold_signals] TF={tf} ✓ — {rows:,} rows written")
         except Exception as e:
@@ -244,12 +253,19 @@ def run(run_date: date) -> None:
             # Continue to next TF rather than abort entire job
             continue
 
+    try:                                                      # never blocks the job (ADR-059 GHR-08)
+        gold_manifest.write_manifest(manifest_rows, run_date)
+    except Exception as e:                                    # noqa: BLE001
+        logger.warning(f"[gold_signals] run manifest not written (non-blocking): {e}")
+
     summary = checkpoint.summary()
     logger.info(f"[gold_signals] Run complete | {summary}")
+    return JobResult(rows_written=rows_total)
 
 
 def _process_timeframe(
-    tf: str, run_date: date, active_symbols: list[str] | None = None
+    tf: str, run_date: date, active_symbols: list[str] | None = None,
+    manifest_rows: list[dict] | None = None,
 ) -> int:
     """
     Process satu timeframe: read Silver → compute indicators → write Gold.
@@ -343,5 +359,12 @@ def _process_timeframe(
         statistics=True,
         use_pyarrow=True,
     )
+
+    # ADR-059 GHR-08: snapshot this file's keys and explain it against the previous run's.
+    if manifest_rows is not None:
+        try:
+            manifest_rows.append(gold_manifest.record_run(df, tf, run_date))
+        except Exception as e:                                # noqa: BLE001 — never fail the job
+            logger.warning(f"[gold_signals] TF={tf}: manifest snapshot failed (non-blocking): {e}")
 
     return len(df)

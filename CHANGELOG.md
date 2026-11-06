@@ -1,5 +1,103 @@
 # CHANGELOG — Data Platform
 
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — pembaruan Gatekeeper, Health Report, dan integritas baris Gold: GHR-01..09, GHR-14 (sebagian) (November 2026)
+
+**Latar.** `gate_health_gold_update_implementation_guide.md` (diusulkan sebagai ADR-059) menganalisis state
+penyimpanan sampai run 18 Okt 2026. Perubahan ini mengimplementasikan paket kerja yang bisa diverifikasi di
+sandbox setelah membaca sumbernya; yang butuh data live, keputusan Ovi, atau perubahan di luar lingkup
+sengaja tidak dikerjakan (lihat "Belum dikerjakan"). Semua perubahan skema bersifat **aditif**. Tidak ada
+perubahan pada jendela konfirmasi Gatekeeper (pemulihan 2 hari, block 4 hari) dan tidak ada fit ulang model.
+
+**Perubahan.**
+- **GHR-01** Isolasi test dari pohon `data/` live. Diukur di clone pristine: menjalankan suite *tanpa
+  modifikasi* membuat `data/health/pipeline_runs.db`, `data/health/progress.db`, dan 18 stub karantina satu
+  baris di pohon live. Penyebab terverifikasi di sumber: `src/runner.py` membuat `PipelineLogger` dan
+  `DependencyGuard` saat import pada path relatif, test runner hanya mengisolasi guard, dan tiga test
+  `TestSchemaValidatorGate` (FRED/IMF/EIA) mengirim frame satu baris ke validator asli. Mekanisme: `conftest.py`
+  menjalankan seluruh sesi dari **direktori kerja sandbox** yang mencerminkan repo lewat symlink kecuali
+  `data/`, sehingga semua default relatif `data/...` jatuh ke scratch tanpa mengubah test yang sudah memakai
+  `monkeypatch.chdir`. `ALPHA_FACTORY_DATA_DIR` (resolver baru `src/utils/data_paths.py`) tetap ada untuk
+  operator, default tanpa variabel identik byte-per-byte dengan path lama. Guard sesi gagal bila pohon
+  operasional live berubah selama suite. Skrip offline `scripts/maintenance/clean_pipeline_runs_fixtures.py`
+  (dry-run default, arsip dulu, menolak menimpa arsip) membersihkan polusi yang sudah ada.
+- **GHR-02** Jendela IDX memakai hari kalender WIB yang dinyatakan dalam UTC (`LOCAL_UTC_OFFSET_HOURS = 7`),
+  bukan `CAST(_ingested_at AS DATE) = run_date`. Alert Telegram disusun dari daftar alert aktif; baris sukses
+  hanya bila tidak ada alert.
+- **GHR-03** Kontrak `JobResult` (`src/utils/job_result.py`): hanya `JobResult` yang dihormati; `int` mentah
+  *bukan* jumlah baris. Job yang tidak melapor mencatat `rows_written = NULL` dan `rows_known = 0` (tidak
+  diketahui, bukan 0); baris lama ditandai `rows_known = 0` tanpa menulis ulang riwayat. Produsen: Bronze
+  OHLCV (penghitung di `BronzeIngester.write`/`write_macro`), Silver OHLCV (baris yang ditulis ulang), Gold
+  signals. Health report menjumlah hanya hitungan yang dilaporkan, menampilkan `rows n/a` bila tidak ada, dan
+  menandai `ZERO_ROWS` untuk job bertanda `must_write_rows` yang sukses dengan total 0 pada hari kerja.
+- **GHR-04** Status `pending`: pada hari evaluasi saja, job mingguan yang jatuh tempo dan belum punya sentinel
+  dianggap `pending`, bukan `missing`, selama belum ada job mingguan yang mulai. Hari-hari lampau final.
+  `runner.py --job all` kini menjalankan job mingguan *Bronze* yang jatuh tempo dan bebas dependensi sebelum
+  rantai harian (`due_weekly_head_jobs`).
+- **GHR-05** Log bukti append-only `data/health/gate_log/evaluated_at=<ts>.parquet`: per (scope, hari) status
+  mentah, verdict kualitas, dan file karantina yang dirujuk; per job status dan mtime sentinel. `gate_status`
+  dapat diturunkan dari log saja (`derive_gate_status`). `gate_status.parquet` lama di-seed sekali sebagai
+  `evidence = legacy`.
+- **GHR-06** Severity gap sadar-baseline untuk `context_gap_detection`: hitungan stabil yang diketahui → `info`
+  (lolos, tercatat); hitungan lebih besar atau gap baru → `warn`. Baseline di `config/quality_baselines.yaml`
+  (count, date, justification, expires wajib semua; kedaluwarsa diabaikan dengan peringatan). **File dikirim
+  kosong**: angka harus dikalibrasi di Silver live setelah XAE-R05. Tanpa baseline perilaku identik dengan
+  aturan lama (`> 50`).
+- **GHR-07** File karantina mencatat `_quarantined_at` dan `_quarantine_kind`; Gatekeeper menghitung dari
+  catatan itu (mtime hanya cadangan untuk file lama). Tiga test yang asersinya vacuous diperkuat.
+- **GHR-08** Manifest run + snapshot kunci Gold (`src/gold/gold_manifest.py`): dekomposisi delta baris =
+  bar baru simbol bertahan + baris pendatang − baris yang keluar − bar yang gugur dari simbol bertahan.
+- **GHR-09** Penanda jeda (`src/utils/pause_markers.py`, `runner.py --pause/--resume`): hari terjeda berstatus
+  `skipped`, transparan dalam kaskade dan streak, sehingga job gagal di hari pertama setelah jeda panjang
+  memberi `warn`, bukan `block` langsung.
+- **GHR-14 (sebagian)** Log keanggotaan append-only `data/silver/active_symbols/membership_log.parquet`
+  (enter/leave), diturunkan dari state log sendiri, bukan dari file terdahulu di disk.
+
+**Temuan yang mengoreksi guide.**
+- Hipotesis GHR-07 ("ingester menulis stub NoNewData") **tidak didukung sumber**: semua ingester makro sudah
+  menjaga `len(df) > 0` sebelum validasi. Stub berasal dari test, yaitu penyebab GHR-01. `NoNewData` tidak dibuat.
+- GHR-04 tidak bisa literal "prefix mingguan sebelum rantai harian": job Gold mingguan bergantung keras pada job
+  Silver harian hari yang sama tanpa `stale_tolerance`, sehingga runner akan berhenti di dependensi pertama.
+  Hanya job Bronze mingguan yang bebas dependensi yang dipindah ke depan.
+- Penanda jeda berbentuk daftar `periods` (bukan satu catatan datar) karena riwayat dihitung ulang dari
+  sentinel: menghapus penanda saat resume akan mengembalikan hari terjeda menjadi `block`.
+- Snapshot kunci menyimpan juga `close`; kunci saja tidak bisa membedakan bar yang direvisi (`n_changed`).
+- Pendekatan pertama GHR-01 (variabel lingkungan absolut untuk seluruh sesi) ditolak: 15 test gagal karena
+  mengalahkan isolasi relatif-cwd dan membocorkan state antar-test.
+
+**Test yang diubah (konsekuensi, bukan regresi).** `test_health_reporter.py::test_storage_alert_takes_priority_over_idx`
+menegaskan alert IDX *ditekan* (cacat HR2); kini menegaskan keduanya muncul, storage lebih dulu. Tiga test
+`TestSchemaValidatorGate` (FRED/IMF/EIA) kini mengarahkan karantina ke `tmp_path` dan menegaskan file benar-benar
+ada.
+
+**Verifikasi.** Sandbox clone dari GitHub `main` (7a28d2e): 3128 → 3333 test terkumpul, 3331
+lulus, 2 gagal lingkungan (`test_check_poetry_env`, poetry tidak terpasang) identik dengan clone pristine.
+Gerbang CI `check_glob_scope.py` dan `validate_instruments.py` lulus; tidak ada temuan pyflakes baru. Mutan
+diterapkan pada test baru dan diubah; semua terbunuh (mutan dijalankan pada *salinan* repo, lihat KNOWN_RISKS).
+Live mirror belum dilakukan.
+
+**Belum dikerjakan.**
+- **GHR-10** (flag `is_extreme_move` di 1W/1M): diblokir XAE-R06 yang belum mendarat.
+- **GHR-11** (stub akhir pekan FX): langkah 0 butuh membaca file Bronze FX live.
+- **GHR-12** (`vix_asof`, `computed_at`, `first_seen_run_date`): semantik VIX as-of untuk bar mingguan/bulanan
+  (distempel di awal periode, ADR-053 F4) belum diputuskan; menebaknya berisiko lookahead.
+- **GHR-13** (histeresis active set): guide sendiri melarangnya tanpa kalibrasi replay di Silver live.
+- **GHR-14 sisa**: keputusan D7 (nasib baris Gold simbol yang keluar) dan adopsi `members_as_of` oleh builder fitur.
+- **GHR-09 sisa**: langkah util "Bronze vs Silver/Gold" (HMM-R04) butuh job registry baru.
+- **GHR-03 sisa**: job selain tiga di atas masih melapor `NULL`.
+
+**Langkah operator setelah live mirror.**
+```
+python -m pytest tests/ -q                               # harapkan 3333 terkumpul; guard sesi harus lulus
+# hentikan pipeline, lalu:
+python scripts/maintenance/clean_pipeline_runs_fixtures.py          # dry-run, tinjau
+python scripts/maintenance/clean_pipeline_runs_fixtures.py --apply  # arsip dulu, lalu bersihkan
+# bila Silver/Gold masih dijeda, tandai SEBELUM resume (from_date = hari pertama dijeda):
+python src/runner.py --pause silver,gold --reason "chain alignment" --date 2026-10-19
+python src/runner.py --resume silver,gold --date <hari pertama kembali>
+```
+Run pertama menambah kolom `rows_known` ke `pipeline_runs.db` (ALTER TABLE, riwayat ditandai tidak diketahui)
+dan membuat `gate_log/`, `gold_manifest/`, `gold_keys/`, dan `membership_log.parquet`.
+
 ## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — pembaruan HMM Regime Engine: HMM-R01, R02, R03, R06, R11 (November 2026)
 
 **Latar.** `hmm_update_implementation_guide.md` (diusulkan sebagai ADR-058) mengukur input, provenance, dan

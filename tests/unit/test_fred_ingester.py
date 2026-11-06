@@ -172,6 +172,12 @@ class TestSchemaValidatorGate:
         # Patch _fetch_series to directly return a malformed df, bypassing
         # the real fredapi parsing (isolates the validator gate itself).
         malformed = pl.DataFrame({"series_id": ["CPIAUCSL"]})  # missing value/observation_date/release_date
+        # UPDATED GHR-07 (ADR-059): redirect the quarantine into tmp_path. This test used to write its
+        # one-row series_id-only stub into the LIVE data/quarantine (the stubs the Gatekeeper then read
+        # as "quarantined today"), and its "nothing written" assertion looked at a directory that could
+        # never hold anything — it passed whether or not the frame was quarantined.
+        from src.bronze.schema_validator import SchemaValidator
+        monkeypatch.setattr(SchemaValidator, "QUARANTINE_PATH", tmp_path / "quarantine")
         with patch.object(FREDIngester, "_fetch_series", return_value=malformed):
             ingester = FREDIngester()
             assert ingester._validator is not None
@@ -179,6 +185,7 @@ class TestSchemaValidatorGate:
         # Nothing written to the normal path — quarantined instead
         out_dir = tmp_path / "bronze" / "macro" / "fred" / "inflation"
         assert not out_dir.exists() or not list(out_dir.glob("*.parquet"))
+        assert len(list((tmp_path / "quarantine").glob("*.parquet"))) == 1     # and it really was quarantined
 
 
 class TestFredHelpers:

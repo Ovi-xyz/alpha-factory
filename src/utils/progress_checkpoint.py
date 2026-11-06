@@ -25,6 +25,7 @@ from datetime import date
 from pathlib import Path
 
 from loguru import logger
+from src.utils.data_paths import health_dir
 
 
 class ProgressCheckpoint:
@@ -35,7 +36,7 @@ class ProgressCheckpoint:
     Primary key: (job_name, run_date, symbol, timeframe)
     """
 
-    DB_PATH: Path = Path("data/health/progress.db")
+    DB_PATH: Path = health_dir() / "progress.db"   # GHR-01: $ALPHA_FACTORY_DATA_DIR-aware
 
     def __init__(self, job_name: str, run_date: date) -> None:
         self.job_name = job_name

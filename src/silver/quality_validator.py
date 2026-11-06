@@ -67,6 +67,7 @@ ADD GAP-PEER-01 (chat thread, 8 Sep 2026): _check_gap_detection() and
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from datetime import date, datetime, timedelta
@@ -76,11 +77,13 @@ from typing import Optional
 import duckdb
 import polars as pl
 from loguru import logger
+from src.utils.data_paths import health_dir
 
 from src.config.pipeline_config import duckdb_connection, get_config
 from src.utils.atomic_io import atomic_write_parquet  # FIX SIL-SQL-001 / SIL-AIO usage
 from src.utils.calendar_oracle import CalendarOracle  # ADD XAE-R05
 from src.utils.gap_analysis import GapEvent, classify_gaps, classify_gaps_by_peer_agreement  # ADD GAP-PEER-01 / XAE-R05
+from src.utils.quality_baselines import gap_severity, load_baseline  # ADD GHR-06
 from src.utils.silver_scope import (  # FIX QV-L2-01, ADD GAP-PEER-01
     context_glob,
     context_peer_groups,
@@ -93,7 +96,7 @@ SILVER_OHLCV_PATH  = Path("data/silver/market_ohlcv")
 SILVER_MACRO_PATH  = Path("data/silver/macro_enriched")
 # FIX GMI-GATE-001 (ADR-050): persisted per-check history — see
 # _persist_quality_gate_log() docstring below.
-QUALITY_GATE_LOG_PATH = Path("data/health/quality_gate_log.parquet")
+QUALITY_GATE_LOG_PATH = health_dir() / "quality_gate_log.parquet"   # GHR-01: $ALPHA_FACTORY_DATA_DIR-aware
 NULL_TOLERANCE     = 0.001   # 0.1% max null rate
 ZSCORE_THRESHOLD   = 4.0     # Outlier threshold — kept for backward compat;
                               # GAP-9 fix reads cfg.outlier_zscore_threshold instead
@@ -164,6 +167,7 @@ class QualityValidator:
     def __init__(self) -> None:
         self._issues: list[dict] = []
         self._last_gap_classification = None   # XAE-R05: GapClassification of the last gap check
+        self._gap_info: dict | None = None     # GHR-06: severity/baseline detail of the last context gap check
 
     def run(self, run_date: date) -> dict[str, bool]:
         """
@@ -1020,18 +1024,38 @@ class QualityValidator:
                     f"(FIX GAP-PEER-01) — by category: {closures_by_group}"
                 )
 
-            if isolated_count > 50:
-                self._issues.append({
-                    "check":  "context_gap_detection",
-                    "detail": f"{isolated_count} isolated Layer 2 gaps > 5 "
-                              f"calendar days ({closure_count} market closures excluded"
-                              + (f": {cls.closure_by_oracle} by exchange calendar, "
-                                 f"{closure_count - cls.closure_by_oracle} peer-confirmed; "
-                                 f"{cls.isolated_by_oracle} are session days with no bar"
-                                 if cls is not None else "")
-                              + ")"
-                })
+            # ADD GHR-06 (ADR-059): baseline-aware severity. With NO active baseline this is exactly the
+            # legacy rule (warn iff > 50 isolated gaps). With one, a stable known count is `info`
+            # (passes, recorded) and a larger count or any gap absent from the previous run is `warn`.
+            isolated_keys = (sorted({f"{e.symbol}@{str(e.ts)[:10]}" for e in cls.isolated})
+                             if cls is not None else None)
+            baseline = load_baseline("context_gap_detection", run_date)
+            prev_keys = self._previous_gap_keys(run_date)
+            severity, new_keys = gap_severity(isolated_count, isolated_keys, prev_keys, baseline)
+            self._gap_info = {
+                "isolated_count":     isolated_count,
+                "new_isolated_gaps":  len(new_keys),
+                "baseline_count":     baseline.count if baseline is not None else None,
+                "severity_effective": severity,
+                "gap_keys":           json.dumps(isolated_keys) if isolated_keys is not None else None,
+                "detail":             None,
+            }
+            base_detail = (f"{isolated_count} isolated Layer 2 gaps > 5 "
+                           f"calendar days ({closure_count} market closures excluded"
+                           + (f": {cls.closure_by_oracle} by exchange calendar, "
+                              f"{closure_count - cls.closure_by_oracle} peer-confirmed; "
+                              f"{cls.isolated_by_oracle} are session days with no bar"
+                              if cls is not None else "")
+                           + ")")
+            if baseline is not None:
+                base_detail += (f"; baseline {baseline.count} (set {baseline.date}, expires {baseline.expires}), "
+                                f"{len(new_keys)} new vs the previous run")
+            if severity == "warn":
+                self._issues.append({"check": "context_gap_detection", "detail": base_detail})
                 return False
+            if severity == "info":
+                self._gap_info["detail"] = "INFO (stable known count): " + base_detail
+                logger.info(f"[QV] context_gap_detection: {self._gap_info['detail']}")
             logger.debug(
                 f"[QV] context_gap_detection: {isolated_count} isolated gaps "
                 f"found (threshold=50; {closure_count} market-closure gaps excluded)"
@@ -1045,6 +1069,24 @@ class QualityValidator:
                 "detail": f"gap check could not run, nothing was evaluated: {e}",
             })
         return True
+
+    def _previous_gap_keys(self, run_date: date) -> list[str] | None:
+        """Isolated-gap identities recorded by the most recent EARLIER evaluated run (GHR-06), or None
+        when there is no such run — in which case nothing is reported as "new" (never guessed)."""
+        try:
+            if not QUALITY_GATE_LOG_PATH.exists():
+                return None
+            log = pl.read_parquet(QUALITY_GATE_LOG_PATH)
+            if "gap_keys" not in log.columns:
+                return None
+            prev = (log.filter((pl.col("check_name") == "context_gap_detection")
+                               & (pl.col("run_date") < run_date.isoformat())
+                               & pl.col("gap_keys").is_not_null())
+                       .sort("run_date"))
+            return json.loads(prev["gap_keys"][-1]) if prev.height else None
+        except Exception as e:                                   # noqa: BLE001 — a log problem must not fail the check
+            logger.warning(f"[QV] previous gap keys unreadable ({e}) — no 'new gap' comparison this run")
+            return None
 
     def _check_context_outliers(self, run_date: date) -> bool:
         """Layer 2 analogue of _check_outliers. Reuses
@@ -1168,6 +1210,7 @@ def _persist_quality_gate_log(
     run_date: date,
     results: dict[str, bool],
     issues: list[dict],
+    gap_info: dict | None = None,
 ) -> None:
     """
     FIX GMI-GATE-001 (ADR-050): persist QualityValidator's full per-check
@@ -1218,17 +1261,27 @@ def _persist_quality_gate_log(
             tier = "warning"
         else:
             tier = "other"
+        gap = gap_info if (check_name == "context_gap_detection" and gap_info) else {}
         rows.append({
             "run_date":   run_date.isoformat(),
             "check_name": check_name,
             "tier":       tier,
             "passed":     bool(passed),
-            "detail":     issue_detail.get(check_name),
+            "detail":     issue_detail.get(check_name) or gap.get("detail"),
             "logged_at":  logged_at,
+            # ADR-059 GHR-06 — populated for context_gap_detection only, null elsewhere
+            "isolated_count":     gap.get("isolated_count"),
+            "new_isolated_gaps":  gap.get("new_isolated_gaps"),
+            "baseline_count":     gap.get("baseline_count"),
+            "severity_effective": gap.get("severity_effective"),
+            "gap_keys":           gap.get("gap_keys"),
         })
 
     try:
-        new_rows = pl.DataFrame(rows)
+        new_rows = pl.DataFrame(rows, schema_overrides={
+            "isolated_count": pl.Int64, "new_isolated_gaps": pl.Int64, "baseline_count": pl.Int64,
+            "severity_effective": pl.Utf8, "gap_keys": pl.Utf8,
+        })
         if QUALITY_GATE_LOG_PATH.exists():
             existing = pl.read_parquet(QUALITY_GATE_LOG_PATH)
             existing = existing.filter(pl.col("run_date") != run_date.isoformat())
@@ -1268,7 +1321,7 @@ def run(run_date: date) -> None:
     # warning/critical branching below — a blocked run (about to raise
     # QualityGateError) is exactly the case Gatekeeper's history most
     # needs to see, not one to skip logging for.
-    _persist_quality_gate_log(run_date, results, validator._issues)
+    _persist_quality_gate_log(run_date, results, validator._issues, validator._gap_info)
 
     if warning_failed:
         logger.warning(

@@ -1,0 +1,19 @@
+# config/quality_baselines.yaml — ADR-059 GHR-06 (GMI-GHR-REC-001)
+#
+# Known, STABLE counts for WARNING-tier quality checks, so a chronic known red does not pin the gate at
+# `warn` and hide the day something NEW appears. Rule: a stable known count => `info` (passes, recorded);
+# a larger count, or any item not present in the previous run => `warn`. See src/utils/quality_baselines.py.
+#
+# A baseline is a DECISION and starts EMPTY. Calibrate it on live Silver AFTER the XAE-R05 calendar oracle
+# is in place (the 72 isolated gaps measured on 16 Oct are the PRE-oracle figure), then record the observed
+# count here. ALL four fields are required; an incomplete entry is ignored with a warning. An expired entry
+# is ignored with a warning (the legacy `> 50 isolated gaps` threshold applies again), so every baseline must
+# be re-justified and re-dated before `expires`.
+#
+# baselines:
+#   context_gap_detection:
+#     count: 0                       # observed isolated Layer 2 gaps on the calibration day
+#     date: 2026-11-05               # calibration day
+#     justification: "why this count is known and benign (which symbols, which calendars)"
+#     expires: 2027-02-05            # re-justify by then
+baselines: {}

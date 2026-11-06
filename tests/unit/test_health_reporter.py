@@ -165,7 +165,11 @@ class TestSendTelegramAlert:
         assert "IDX_PARTIAL_FAILURE" in captured["text"]
 
     def test_storage_alert_takes_priority_over_idx(self, monkeypatch):
-        """Storage alert must win even if IDX is also degraded — storage is checked first."""
+        """Storage alert is listed FIRST when IDX is also degraded.
+
+        UPDATED GHR-02 (ADR-059 HR2): this used to assert that the IDX alert was SUPPRESSED
+        (`not in`), which is exactly the defect — the old if/elif chain let one alert hide every
+        later one. Both alerts are now reported; priority is the ORDER, storage first."""
         import src.utils.health_reporter as hr
         captured = {}
         monkeypatch.setattr(
@@ -178,7 +182,8 @@ class TestSendTelegramAlert:
         )
         hr.send_telegram_alert(report, "tok", "chat")
         assert "Storage ALERT" in captured["text"]
-        assert "IDX_PARTIAL_FAILURE" not in captured["text"]
+        assert "IDX_PARTIAL_FAILURE" in captured["text"]
+        assert captured["text"].index("Storage ALERT") < captured["text"].index("IDX_PARTIAL_FAILURE")
 
 
 class _FakeResponse:

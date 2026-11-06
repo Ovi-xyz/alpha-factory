@@ -53,14 +53,14 @@ Cron schedule (WIB — Asia/Jakarta):
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 
 from loguru import logger
+from src.utils.data_paths import sentinels_dir
 
 from src.scheduler.dependency_guard import DependencyGuard
 from src.scheduler.job_registry import JOB_REGISTRY
 
-SENTINEL_DIR = Path("data/.sentinels")
+SENTINEL_DIR = sentinels_dir()   # GHR-01: $ALPHA_FACTORY_DATA_DIR-aware
 
 
 def _make_job(name: str, guard: DependencyGuard):

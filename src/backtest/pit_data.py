@@ -22,6 +22,7 @@ from typing import Optional
 import duckdb
 import polars as pl
 from loguru import logger
+from src.utils.data_paths import health_dir
 
 from src.utils.silver_scope import layer1_globs
 from src.utils.trade_date import with_trade_date  # FIX TS-DATE-01
@@ -79,7 +80,7 @@ GOLD_CONTEXT_REGIME_PATH   = "data/gold/hmm/context_regime.parquet"
 # ADR-050's own GMI-GATE-001 output (src/utils/gatekeeper.py). Unlike
 # context_regime above, this one DOES exist once this ADR ships — wired
 # into DAILY_SEQUENCE immediately before health_report.
-GATE_STATUS_PATH           = "data/health/gate_status.parquet"
+GATE_STATUS_PATH           = str(health_dir() / "gate_status.parquet")   # GHR-01: $ALPHA_FACTORY_DATA_DIR-aware
 
 
 class PITDataLoader:

@@ -166,10 +166,14 @@ class TestSchemaValidatorGate:
         monkeypatch.setattr(mod, "SCHEMA_PATH",
                              __import__("pathlib").Path("config/schemas/imf_weo.yaml"))
         malformed = pl.DataFrame({"series_id": ["NGDP_RPCH"]})
+        # UPDATED GHR-07 (ADR-059): quarantine into tmp_path (was the live data/quarantine) and assert it.
+        from src.bronze.schema_validator import SchemaValidator
+        monkeypatch.setattr(SchemaValidator, "QUARANTINE_PATH", tmp_path / "quarantine")
         with patch.object(IMFIngester, "_fetch_indicator", return_value=malformed):
             IMFIngester().run(date(2026, 6, 1))
         out_dir = tmp_path / "bronze" / "macro" / "imf" / "world_economic_outlook"
         assert not out_dir.exists() or not list(out_dir.glob("*.parquet"))
+        assert len(list((tmp_path / "quarantine").glob("*.parquet"))) >= 1
 
 
 class TestGetLatestValue:

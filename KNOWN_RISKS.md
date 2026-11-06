@@ -4582,3 +4582,69 @@ strengthened). **Nothing here has run on the M1 or on live data.**
 13. **Tooling lesson recorded, not a code risk:** a mutation harness that restores a same-length mutant within the
     same second leaves a stale `.pyc` that runs the mutant (pyc validity is mtime-in-seconds plus size). Mutants were
     re-run with `python -B` and the mutated module's cache deleted after each restore.
+
+---
+
+## RISK-43 (NEW): Gatekeeper / health report / Gold row-integrity update (guide GHR-01..09, GHR-14 partial) — built and unit-tested in sandbox only, never run against the live stores; the first live run migrates `pipeline_runs.db`; GHR-10..13 and the remainder of GHR-03/09/14 not done
+
+**Date:** 2026-11-05 · **Component tag:** GMI-GHR-REC-001 (proposed ADR-059) · **Status:** OPEN
+
+1. **Never run live.** Everything was verified on a sandbox clone of `main` (7a28d2e) with synthetic fixtures. The
+   first live run (a) adds a `rows_known` column to `data/health/pipeline_runs.db` with `ALTER TABLE` and flags every
+   existing row `rows_known = 0` (unknown), (b) creates `data/health/gate_log/`, `gold_manifest/`, `gold_keys/` and
+   `data/silver/active_symbols/membership_log.parquet`, and (c) seeds `gate_log/legacy_seed.parquet` from the existing
+   `gate_status.parquet`. None of this is reversible by a flag; rollback is restoring the archived DB.
+2. **Test isolation changed how the whole suite runs.** `tests/conftest.py` now `chdir`s the session into a sandbox
+   directory that mirrors every repo entry except `data/` through symlinks. Consequences: (a) any test, helper or
+   mutant that DELETES or REWRITES through those symlinks acts on the REAL repo; the sandbox teardown unlinks the
+   symlinks and never follows them, and `TestSandboxCleanup` pins that; (b) do not run the suite while the daily chain
+   runs on the same checkout — a concurrent pipeline write to `data/health|quarantine|.sentinels|.pause` is
+   indistinguishable from a leaking test and trips the session guard; (c) `ALPHA_FACTORY_DATA_DIR` is popped for the
+   session. An absolute process-wide override was tried first and rejected (15 failures: it defeats `chdir(tmp_path)`
+   isolation and leaks state across tests).
+3. **Data-loss incident during development (recorded, not a code defect).** A mutation run executed a MUTANT of that
+   teardown (one that followed symlinks) against the real working tree and deleted `src/`, `tests/`, `scripts/`,
+   `config/`, `.git` of the working clone, including all uncommitted work; it was rebuilt from the conversation. The
+   mutation harness now runs every mutant in a throwaway COPY of the repo, and work is committed locally and tarred
+   outside the repo after each package. Anyone mutation-testing code that deletes must do the same.
+4. **`skipped` is a new `gate_status` value.** A scope that is paused today emits `skipped`, and a domain scope whose
+   chain runs through a paused layer does too. The specialists copy `domain_gate_status` straight into their `quality`
+   column (ADR-053 D1) with no validation against `pass|warn|block`, so `skipped` will appear there. ADR-054's stacker
+   must treat it as "unknown", not as a pass.
+5. **`pending` is evaluation-day only.** A due weekly job with no sentinel is `pending` while no weekly job due that day
+   has started. If the weekly jobs then never run, that day reads non-block when evaluated and `block` on the next
+   evaluation (history is recomputed). The recovery/block windows were deliberately not changed.
+6. **`--job all` on a Sunday now runs `bronze_macro_weekly` and `bronze_bis_rates` first** (Wednesday: `bronze_eia`).
+   This is operator-visible and adds run time before Silver. The weekly Gold jobs (cross-asset, HMM fits) are NOT in
+   `--job all`: they hard-depend on same-day daily Silver jobs without `stale_tolerance`, so running them first would stop
+   the chain. Their Gatekeeper coverage is the `pending` status.
+7. **Row counts are partial.** Only Bronze OHLCV, Silver OHLCV and Gold signals report `JobResult`; every other job
+   still records `NULL` (unknown). Silver's count is rows WRITTEN (each symbol file is rewritten), not rows new, so it is
+   not comparable with Bronze's. The `ZERO_ROWS` rule is a first-pass expectation [U]: three jobs, weekdays only; it may
+   false-warn on a global-holiday weekday.
+8. **`LOCAL_UTC_OFFSET_HOURS = 7` is an assumption** about the machine that runs the chain (WIB, no DST); the IDX window
+   is wrong if `date.today()` in `runner.py` ever runs in another timezone.
+9. **GHR-06 ships inactive.** `config/quality_baselines.yaml` holds no baseline: the observed isolated-gap count must be
+   calibrated on live Silver AFTER the XAE-R05 calendar oracle (the 72 on 16 Oct is the pre-oracle figure). Until then
+   `context_gap_detection` follows the legacy `> 50` rule. An incomplete entry or one past `expires` is ignored with a
+   warning, so every baseline must be re-dated.
+10. **Quarantine stubs were test pollution, not an ingester behaviour.** The 18 stubs came from the FRED/IMF/EIA
+    `TestSchemaValidatorGate` tests; production ingesters guard `len(df) > 0`. The three tests' "nothing written" assertion
+    was vacuous (it inspected a directory that could never hold anything) and was strengthened. Existing live stubs and the
+    polluted `pipeline_runs.db` remain until `scripts/maintenance/clean_pipeline_runs_fixtures.py --apply` is run.
+11. **Membership log limits.** The FIRST logged resolution of a day is authoritative; a same-day re-resolution that comes
+    out different is not logged (correcting it has ambiguous replay order). It cannot reach before 16 Oct (earlier files
+    do not exist) and does not decide what Gold does with a departed symbol's rows (D7). Feature and label builders have
+    not yet adopted `members_as_of`.
+12. **Gold manifest.** Snapshots hold `symbol, timestamp, close` (the guide said keys only; `close` is what makes
+    `n_changed` knowable). Size for 1H is unmeasured; retention is the last 7 snapshots per timeframe. A manifest failure
+    never fails `gold_signals`.
+13. **Pause markers need the operator.** Nothing creates one automatically; a pause only counts if
+    `runner.py --pause` was run, with `from_date` taken from `--date`. A marker is closed by `--resume`, never deleted.
+14. **`quality_gate_log.parquet` gained five nullable columns** (`isolated_count`, `new_isolated_gaps`,
+    `baseline_count`, `severity_effective`, `gap_keys`); readers use `diagonal_relaxed` concatenation.
+15. **Not done.** GHR-10 (blocked on XAE-R06); GHR-11 (needs live Bronze FX files); GHR-12 (`vix_asof`: semantics for
+    weekly/monthly bars stamped at period start are undecided, guessing risks lookahead); GHR-13 (the guide forbids it
+    without replay calibration); GHR-14 D7 and builder adoption; the HMM-R04-style Bronze-vs-Silver freshness step.
+16. **Tooling lesson.** A mutant that survives is a missing scenario, not noise: five survivors across this work each
+    exposed a real gap, and one (membership log diffing against files instead of the log) was a genuine design bug.

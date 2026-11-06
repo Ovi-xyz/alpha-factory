@@ -20,11 +20,16 @@ import polars as pl
 from src.utils.atomic_io import atomic_write_parquet  # FIX BRZ-AIO-001
 import yaml
 from loguru import logger
+from src.utils.data_paths import quarantine_dir
 
 
 class SchemaValidationError(Exception):
     """Raised saat schema mismatch dengan on_mismatch='fail'."""
     pass
+
+
+# ADD GHR-07 (ADR-059): the kind written into every quarantine file this module produces.
+QUARANTINE_KIND_SCHEMA_MISMATCH = "schema_mismatch"
 
 
 class SchemaValidator:
@@ -39,7 +44,7 @@ class SchemaValidator:
             validator.handle_mismatch(df, errors, "AAPL", on_mismatch="quarantine")
     """
 
-    QUARANTINE_PATH: Path = Path("data/quarantine")
+    QUARANTINE_PATH: Path = quarantine_dir()   # GHR-01: $ALPHA_FACTORY_DATA_DIR-aware
 
     def __init__(self, schema_path: str | Path) -> None:
         with open(schema_path) as f:
@@ -118,8 +123,15 @@ class SchemaValidator:
             # Annotate quarantined file with error info
             error_str = " | ".join(errors)
             # FIX BRZ-AIO-001: atomic quarantine write (Bronze snappy, GD §7.1)
+            # ADD GHR-07 (ADR-059): an explicit, mtime-independent record of WHEN and WHY this file was
+            # quarantined. The Gatekeeper used to infer "quarantined today" from the file's mtime, which a
+            # copy / restore / touch changes without any new quarantine event.
             atomic_write_parquet(
-                df.with_columns(pl.lit(error_str).alias("_quarantine_reason")),
+                df.with_columns([
+                    pl.lit(error_str).alias("_quarantine_reason"),
+                    pl.lit(datetime.now().isoformat()).alias("_quarantined_at"),
+                    pl.lit(QUARANTINE_KIND_SCHEMA_MISMATCH).alias("_quarantine_kind"),
+                ]),
                 quarantine_file,
                 compression="snappy", compression_level=None,
                 row_group_size=100_000, statistics=False, use_pyarrow=False,

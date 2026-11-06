@@ -34,6 +34,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from loguru import logger
+from src.utils.data_paths import sentinels_dir
 
 
 class DependencyGuard:
@@ -44,7 +45,7 @@ class DependencyGuard:
     """
 
     def __init__(self, sentinel_dir: Path | None = None) -> None:
-        self.sentinel_dir = sentinel_dir or Path("data/.sentinels")
+        self.sentinel_dir = sentinel_dir or sentinels_dir()   # GHR-01: resolved at call time
         self.sentinel_dir.mkdir(parents=True, exist_ok=True)
 
     def _sentinel_path(self, job_name: str, run_date: date) -> Path:

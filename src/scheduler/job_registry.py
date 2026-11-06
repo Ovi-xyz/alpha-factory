@@ -15,6 +15,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Callable
 
+from src.utils.job_result import JobResult
+
 
 # ── Schedule Guard (G5) ───────────────────────────────────────────────────────
 
@@ -70,13 +72,13 @@ def _passes_schedule(job: dict, run_date: date) -> bool:
 
 # ── Lazy Job Function Loaders ─────────────────────────────────────────────────
 
-def _bronze_ohlcv(run_date: date) -> None:
+def _bronze_ohlcv(run_date: date) -> JobResult:
     # FIX ADR-046 Path C (GMI_Decision_Document_v11.docx §2): LAYER1_TIMEFRAMES
     # (DEFAULT_TIMEFRAMES + "1H") replaces the bare default — Layer 1 now
     # fetches 1D/1W/1M/1H. Layer 2 (_bronze_ohlcv_context below) is
     # deliberately untouched, still DEFAULT_TIMEFRAMES only.
     from src.bronze.market_ingester import LAYER1_TIMEFRAMES, MarketOHLCVIngester
-    MarketOHLCVIngester(timeframes=LAYER1_TIMEFRAMES).run(run_date)
+    return MarketOHLCVIngester(timeframes=LAYER1_TIMEFRAMES).run(run_date)   # GHR-03: JobResult
 
 
 def _bronze_ohlcv_context(run_date: date) -> None:
@@ -154,7 +156,7 @@ def _bronze_bea_gdp(run_date: date) -> None:
     BEAIngester().run(run_date)
 
 
-def _silver_ohlcv(run_date: date) -> None:
+def _silver_ohlcv(run_date: date) -> JobResult:
     """
     Process Bronze OHLCV → Silver (VWAP, adj_factor, is_clean).
 
@@ -175,7 +177,7 @@ def _silver_ohlcv(run_date: date) -> None:
               GD §4.1/§17.7 — 4H is not raw Bronze source data).
     """
     from src.silver.ohlcv_processor import run as ohlcv_run
-    ohlcv_run(run_date)
+    return ohlcv_run(run_date)   # GHR-03: JobResult
 
 
 def _silver_ohlcv_context(run_date: date) -> None:
@@ -251,9 +253,9 @@ def _silver_validate(run_date: date) -> None:
     validate_run(run_date)
 
 
-def _gold_signals(run_date: date) -> None:
+def _gold_signals(run_date: date) -> JobResult | None:
     from src.gold.technical_signals import run as gold_signals_run
-    gold_signals_run(run_date)
+    return gold_signals_run(run_date)   # GHR-03/08: JobResult from the run manifest
 
 
 def _gold_mtf(run_date: date) -> None:
@@ -437,6 +439,9 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         # FIX ADR-046 Path C: +1H fetch adds ~639 symbols x 0.6s throttle
         # ~= 6.4 min to the v1.5 estimate (35m -> ~42m).
         "est_minutes": 42,
+        # ADD GHR-03 (ADR-059) — a successful run that reports rows_written = 0 on a weekday is an
+        # anomaly (an empty run looked identical to a full one). First-pass expectation [U].
+        "must_write_rows": True,
     },
 
     "bronze_ohlcv_context_daily": {
@@ -576,6 +581,7 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "layer":       "silver",
         # v1.5: +15m vs v1.4 — Pass 2 sintesis Silver 4H untuk 643 symbols
         "est_minutes": 75,
+        "must_write_rows": True,   # ADD GHR-03 (ADR-059): see bronze_ohlcv_daily
     },
 
     "silver_ohlcv_context": {
@@ -697,6 +703,7 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "depends_on":  ["silver_ohlcv", "silver_validate", "silver_active_symbols"],
         "layer":       "gold",
         "est_minutes": 27,
+        "must_write_rows": True,   # ADD GHR-03 (ADR-059): see bronze_ohlcv_daily
     },
 
     "gold_mtf": {
@@ -1209,6 +1216,38 @@ WEEKLY_SEQUENCE: list[str] = [
 # PIPELINE_SEQUENCE dipertahankan sebagai alias DAILY_SEQUENCE untuk backward-compat
 # runner.py --job all menggunakan DAILY_SEQUENCE
 PIPELINE_SEQUENCE = DAILY_SEQUENCE
+
+# The weekly-only prefix of WEEKLY_SEQUENCE (everything before DAILY_SEQUENCE).
+WEEKLY_PREFIX: list[str] = WEEKLY_SEQUENCE[: len(WEEKLY_SEQUENCE) - len(DAILY_SEQUENCE)]
+
+
+def due_weekly_head_jobs(run_date: date) -> list[str]:
+    """Weekly-only jobs `runner.py --job all` runs BEFORE the daily chain on run_date (ADR-059 GHR-04).
+
+    Why: `--job all` runs DAILY_SEQUENCE only, so on a Sunday the Gatekeeper (a daily job) evaluated
+    BEFORE the weekly sentinels existed (18 Oct: gate 04:52, bronze_macro_weekly sentinel 05:28) and
+    read the due weekly jobs as missing -> raw block.
+
+    Deliberately NOT the whole weekly prefix. The weekly Gold jobs (gold_cross_asset_correlation,
+    the HMM fits ...) hard-depend on same-day DAILY Silver jobs (silver_active_symbols,
+    silver_context_anchors ...) without a stale_tolerance, so placing them ahead of the daily chain
+    would stop the Sunday run at the first dependency guard. Only jobs that are
+      (a) due today by a run_on_weekdays guard and nothing else,
+      (b) free of any depends_on,
+    can be run first without ever failing a dependency. Today that is the Bronze weekly set
+    (bronze_macro_weekly, bronze_bis_rates on Sunday; bronze_eia on Wednesday). The rest of the
+    weekly sequence stays on its layer-run path; the Gatekeeper's `pending` status covers it.
+    """
+    out: list[str] = []
+    for name in WEEKLY_PREFIX:
+        job = JOB_REGISTRY[name]
+        if name in DAILY_SEQUENCE or job.get("depends_on"):
+            continue
+        if {k for k in job if k.startswith("run_on_")} != {"run_on_weekdays"}:
+            continue
+        if _passes_schedule(job, run_date):
+            out.append(name)
+    return out
 
 
 # ── Layer-Scoped Job Names ────────────────────────────────────────────────────
