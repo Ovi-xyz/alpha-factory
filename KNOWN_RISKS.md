@@ -4648,3 +4648,91 @@ strengthened). **Nothing here has run on the M1 or on live data.**
     without replay calibration); GHR-14 D7 and builder adoption; the HMM-R04-style Bronze-vs-Silver freshness step.
 16. **Tooling lesson.** A mutant that survives is a missing scenario, not noise: five survivors across this work each
     exposed a real gap, and one (membership log diffing against files instead of the log) was a genuine design bug.
+
+## RISK-44 (NEW): Layer 1 universe update (GMI-UNI-001) — `index_futures` added, PARA removed — built and unit-tested in sandbox only; the four Yahoo futures series are unmeasured; the active set sits exactly at its 200 ceiling; the futures are information-redundant with Layer 2 indices
+
+Date: 7 Nov 2026. Component: GMI-UNI-001. Status: implemented in the sandbox, not yet mirrored to the live repo
+at the time of writing; no version bump (repo stays at v1.24.0 with the Unreleased entries).
+
+### What changed (facts)
+- Layer 1: 593 -> 596 (-1 `PARA`, +4 `index_futures`: `ES_F`, `NKD_F`, `NQ_F`, `YM_F`); `EXPECTED_TOTAL` 653 -> 656.
+- `ALWAYS_IN_MARKETS` = (forex, commodity, index_futures). Registered always-in members: 18 + 3 + 4 = 25.
+- `RESOLVER_VERSION` 1.1 -> 1.2. Ceiling `_MAX_ACTIVE_SYMBOLS = 200`; screened LIMIT applied =
+  `min(175, 200 - registered always-in)`; `resolve()` raises before persisting an over-ceiling set.
+
+### What is accepted, and why
+1. **Yahoo behaviour of the four futures is unmeasured.** The sandbox has no Yahoo egress. History depth, volume
+   (NKD=F in particular may carry little or none), bar stamp timezone/hour, continuous-contract roll jumps and
+   the `is_clean` flag rate are all unknown until the first live fetch. `scripts/preflight/check_index_futures.py`
+   was written to measure them and has **not been run**. Run it before the first Bronze run that includes the new
+   symbols.
+2. **Zero headroom.** 175 + 25 = 200. Any further always-in symbol (a 5th future, a new forex pair or commodity)
+   now shrinks the screened pool by one, with a WARNING, instead of breaching the ceiling; the always-in set is
+   never the part that is cut. A registry that leaves no room at all (>= 200 always-in) raises. The cold-start
+   fallback (Silver not ready -> full registry, AS-2) is **exempt** from the ceiling by design.
+3. **Symbol naming.** The registry symbol is `ES_F`, not `ES`: bare `ES` is the us_stocks ticker for Eversource.
+   `validate_instruments.py` now rejects a future whose symbol is not its raw ticker with `=` -> `_`, rejects `=`
+   in any symbol, and rejects any symbol registered twice across Layer 1 and Layer 2. Before this, only
+   within-market duplicates were caught (the CL / RISK-30 collision was found at runtime).
+4. **Bronze fetches through `yfinance_symbol`.** `DIRECT_YFINANCE_SYMBOL_MARKETS` = {commodity, index_futures}.
+   The tickers are never derived from the symbol: `ES` is a valid Yahoo ticker for a different instrument, so a
+   mis-derivation would not error, it would fetch the wrong series.
+5. **Information redundancy with Layer 2.** The futures track SPX / IXIC / DJI / N225. They are followers in the
+   CrossAssetEngine (follower set = the active Layer 1 symbols), enter the correlation matrices, the technical
+   chain and the triple-barrier label set. Expect near-identity pairs (a 4-member peer group, near-1.0
+   correlation to their cash index); the lead-lag BH family grows by four followers. No exclusion flag was
+   built; `is_tautology` (XAE-R08, proposed) is the natural place if this proves noisy.
+6. **Specialist feature builders.** `MARKETS` (features_gold, features_hmm) gained `index_futures` at the END so
+   existing `market_code` values do not move. Both specialists have never run on live data (RISK-40), so no
+   fitted model is invalidated by this; if one exists on disk its recorded `markets` list differs.
+7. **Triple-barrier calibration does not cover futures.** ADR-052's multipliers were calibrated on AAPL + BBCA
+   (RISK-39). Futures daily ranges differ; the labels will be produced but their base rate is unmeasured.
+8. **HMM domain unaffected, by config.** `hmm_market` pins `market: us_stocks`; no HMM job reads the new market.
+9. **PARA leftovers.** Existing PARA Bronze/Silver files stay on disk. Until archived, each active-symbols run
+   reports `unknown_market=1` with an AS-10 WARNING (PARA is neither Layer 1 nor Layer 2). I did not touch live
+   data. PARA's successor ticker is not added (not requested).
+10. **Cohort stamps.** `gold_manifest` classifies cohorts by bar stamp hour; New-York-stamped futures are expected
+    to fall in the US cohort (04:00/05:00 UTC). Unverified until real bars exist.
+
+### Verification
+- Pristine baseline 3333 collected / 3331 passed / 2 failed (`test_check_poetry_env`, sandbox has no Poetry).
+- After: 3381 collected (+48 new in `tests/unit/test_layer1_universe_gmi_uni_001.py`).
+- 26 mutants of the new behaviour (resolver ceiling, effective limit, bound SQL parameter, Bronze routing, validator
+  rules, loader, schemas, MARKETS, normalisation, aggregator, processor, YAML) ran on a throw-away copy: 26 killed,
+  0 survived. Two harness anchors were wrong at first (reported as ANCHOR-ERROR, not as kills) and were fixed.
+- End to end on the REAL registry with every symbol clean and liquid, the resolver returns exactly 200
+  (175 screened + 25 always-in); with a synthetic 26th always-in it still returns 200 (174 + 26).
+- Not verified: anything involving live Yahoo data or the live `data/` tree.
+
+### Update 2026-11-07 (same day) — RISK-44: preflight run on live Yahoo data
+Run by Ovi on his machine. ES_F, NQ_F, YM_F passed. NKD_F failed a same-date correlation floor (0.397 vs a floor of
+0.50 that had never been measured). Diagnosis below; the preflight was rewritten.
+
+**Measured** (Yahoo, 7 Nov 2026): history ES 26.1y (from 2000-09-18), NKD 22.7y (2004-02-17), NQ 26.1y, YM 24.6y
+(2002-04-05); last bar 2026-11-06 for all four; last close ES 7,402.00 / NKD 58,265.00 / NQ 27,085.25 /
+YM 51,385.00; same-date return correlation with the cash index ES 0.984, NQ 0.957, YM 0.993; volume==0 on
+0.2% / 2.2% / 0.2% / 0.1% of bars; bar stamps are America/New_York midnight (05:00 UTC in November), matching the
+loader timezone and the US-cohort assumption of `gold_manifest` (which itself has not been run on these bars).
+
+**NKD_F diagnosis** (`diagnose_nkd_alignment.py`; 5,372 common sessions with ^N225, windows = last 250):
+level ratio NKD/N225 median 1.0038, p05 0.9836, p95 1.0237, 96% within +-3%; return correlation k=-1 -0.056,
+k=0 +0.455, k=+1 +0.417, k=+2 -0.003; two-lag R^2 0.421; correlation with ES same date +0.762; one
+zero-volume-and-unchanged-close bar in the whole history (2004-06-25); 16 one-day moves > 8% (10 in Oct-Dec 2008,
+1 in 2016, 3 in Mar 2020, 1 on 2025-04-09, 1 on 2026-11-05).
+
+**Reading.** A timing artefact in the check, not a data defect. The CME bar for date D spans ET D-1 18:00 to D 17:00:
+it contains Tokyo session D plus the whole Europe/US session, and the Europe/US part reaches ^N225 on D+1. All five
+jumps inside the 10-year cold-start window have a same-sign N225 move of 6.0-9.1% within +-1 day. The 2026-11-05 one
+(NKD -9.1%; N225 -1.8% that day, -6.0% next) agrees with press reports of the Nikkei closing 1.79% lower on 5 Nov and
+falling more than 7% on the morning of 6 Nov. Three 2008 jumps (20 Oct, 13 Nov, 21 Nov) have a weaker N225
+counterpart (best same-sign 2.7-5.2%); they are outside the 10-year window and were not investigated.
+My pre-run point prediction was too high: the timing model gave k=+1 ~ 0.60 (k=0 plus k=+1 ~ 1); measured 0.417
+(sum 0.87). The range stated beforehand (0.3-0.6) held.
+
+**What changed.** The preflight now gates only on measured/structural facts (data present, depth >= 10y, last bar
+fresh, level > 1,000); level ratio, per-lag correlation and the jump audit are information. A second flaw in the old
+script is fixed: returns are computed on the COMMON calendar (the old script computed them on each series' own
+calendar, so a holiday in one market distorted the other's return; the 0.397 vs 0.455 gap is consistent with this but
+the windows differed, so the effect is not separable). Accepted-risk items 1 and 10 above are superseded for history,
+volume share, stamps and freshness; the 2.2% zero-volume share of NKD_F (with changed closes) is not located in time and
+only affects volume-based indicators on that symbol.

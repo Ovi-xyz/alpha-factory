@@ -77,4 +77,6 @@ class TestPipelineConfigIntegration:
         # CL (Colgate-Palmolive) removed to resolve a cross-market ticker
         # collision with commodity CL (WTI crude) — see KNOWN_RISKS.md
         # RISK-30 and scripts/validate_instruments.py module docstring.
-        assert loader.count() == 593
+        # UPD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026): 593 -> 596
+        # (-1 PARA, +4 index_futures).
+        assert loader.count() == 596

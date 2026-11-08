@@ -35,9 +35,11 @@ class TestValidateInstruments:
         import inspect
         from scripts import validate_instruments as vi
         assert "index" not in vi.REQUIRED_FIELDS
-        assert "index" not in inspect.getsource(vi._validate_layer1).split(
-            "layer1_markets = ", 1
-        )[1].split("\n", 1)[0]
+        line = inspect.getsource(vi._validate_layer1).split("layer1_markets = ", 1)[1].split("\n", 1)[0]
+        # UPD GMI-UNI-001: exact-token check. A substring test would now match "index_futures", the NEW
+        # (unrelated) category; what ADR-035 forbids is the legacy empty `index` category.
+        assert '"index"' not in line
+        assert '"index_futures"' in line
 
     def test_symbol_with_dot_fails(self, tmp_path):
         """IDD §10.2: symbol dengan titik → error + exit code 1."""
@@ -655,6 +657,7 @@ class TestJsonSchemaLayer:
         minimal = {
             "version": "1.0", "last_updated": "2026-01-01",
             "us_stocks": {}, "idx_stocks": {}, "commodity": {}, "forex": {},
+            "index_futures": {},   # UPD GMI-UNI-001: required Layer 1 category (NOT the legacy `index`)
             "context": {},
         }
         for name in ("identity.schema.yaml", "taxonomy.schema.yaml"):

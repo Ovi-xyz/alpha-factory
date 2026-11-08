@@ -4,7 +4,7 @@
 "$schema": "http://json-schema.org/draft-07/schema#"
 title: "Alpha Factory instruments_taxonomy.yaml"
 type: object
-required: ["version", "last_updated", "us_stocks", "idx_stocks", "commodity", "forex", "context"]
+required: ["version", "last_updated", "us_stocks", "idx_stocks", "commodity", "forex", "index_futures", "context"]
 properties:
   version:
     type: string
@@ -26,6 +26,14 @@ properties:
       type: array
       items: { "$ref": "#/$defs/instrument" }
   forex:
+    type: object
+    additionalProperties:
+      type: array
+      items: { "$ref": "#/$defs/instrument" }
+  # ADD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026): Layer 1 'index_futures' (CME equity-index futures).
+  # Required like every other Layer 1 market category, so a deleted/misspelled key fails validate_split()
+  # instead of silently shrinking the universe.
+  index_futures:
     type: object
     additionalProperties:
       type: array

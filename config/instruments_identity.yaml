@@ -11,8 +11,8 @@
 # taxonomy/routing fields here — see instruments_taxonomy.yaml instead.
 # Full field-classification table and rationale: CHANGELOG.md ADR-027.
 
-version: '1.7'
-last_updated: '2026-07-30'
+version: '1.8'
+last_updated: '2026-11-07'
 us_stocks:
   Technology:
   - symbol: AAPL
@@ -243,7 +243,6 @@ us_stocks:
   - symbol: NFLX
   - symbol: NWSA
   - symbol: NYT
-  - symbol: PARA
   - symbol: PINS
   - symbol: PUBM
   - symbol: RBLX
@@ -696,6 +695,25 @@ forex:
   - symbol: USD_JPY
     raw_symbol: USD/JPY
     yfinance_symbol: USDJPY=X
+# ADD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026): fifth Layer 1 market category 'index_futures'
+# (CME equity-index futures, always-in like forex/commodity). `symbol` is the path-safe, collision-free
+# key ('=' -> '_', the same normalization forex applies to '/'); `raw_symbol` and `yfinance_symbol` keep
+# the Yahoo ticker. Bare 'ES' is NOT usable as a symbol: it is already the us_stocks ticker for Eversource
+# (Utilities) - the same cross-market collision class as CL (RISK-30). Do not "simplify" ES_F to ES.
+index_futures:
+  Equity Index Futures:
+  - symbol: ES_F
+    raw_symbol: ES=F
+    yfinance_symbol: ES=F
+  - symbol: NKD_F
+    raw_symbol: NKD=F
+    yfinance_symbol: NKD=F
+  - symbol: NQ_F
+    raw_symbol: NQ=F
+    yfinance_symbol: NQ=F
+  - symbol: YM_F
+    raw_symbol: YM=F
+    yfinance_symbol: YM=F
 context:
   dollar:
     instruments:

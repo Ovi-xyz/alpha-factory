@@ -176,6 +176,9 @@ class OHLCVProcessor:
             "idx":       "Asia/Jakarta",
             "index":     "America/New_York",
             "commodity": "America/New_York",
+            # ADD GMI-UNI-001: CME equity-index futures — same convention as commodity futures. Only
+            # reached when the Bronze `_tz_hint` is missing; yfinance daily bars are tz-aware anyway.
+            "index_futures": "America/New_York",
             "forex":     "UTC",
         }.get(market, "UTC")
 

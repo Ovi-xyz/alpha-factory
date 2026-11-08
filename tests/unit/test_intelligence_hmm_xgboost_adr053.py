@@ -110,7 +110,8 @@ class TestFeatureBuilder:
         assert fr["weight"].unique().to_list() == [3.0]
         assert fr.group_by(["decision_date", "market", "direction"]).len()["len"].max() == 1
         assert ((fr["label"] >= 0) & (fr["label"] <= 1)).all()
-        assert set(fr["market_code"].unique().to_list()) == {0.0, 1.0, 2.0, 3.0}
+        # GMI-UNI-001: derived from fh.MARKETS (was a literal {0..3} for the old 4 markets)
+        assert set(fr["market_code"].unique().to_list()) == {float(i) for i in range(len(fh.MARKETS))}
         assert (fr["feature_date"] < fr["decision_date"]).all()
 
     def test_training_frame_drops_incomplete_rows_instead_of_imputing(self):
@@ -265,7 +266,7 @@ class TestFitAndPredict:
     def test_predict_schema_and_grid(self, world):
         hx.run_fit(world["run_date"], world["cfg"], world["labels_dir"])
         n = hx.run(world["run_date"], world["cfg"], quality="warn")
-        assert n == 8
+        assert n == len(fh.MARKETS) * len(fh.DIRECTIONS)    # GMI-UNI-001: was a literal 8 (4 markets x 2)
         out = pl.read_parquet(core.ModelStore(world["cfg"].output_root, hx.MODEL_NAME).predictions)
         for c in ("as_of_date", "market", "direction", "probability", "confidence", "quality", "regime_tag", "age_days",
                   "model_fit_date", "lineage"):
@@ -283,7 +284,8 @@ class TestFitAndPredict:
         hx.run(d, world["cfg"], quality="pass")
         hx.run(d + timedelta(days=1), world["cfg"], quality="pass")
         out = pl.read_parquet(core.ModelStore(world["cfg"].output_root, hx.MODEL_NAME).predictions)
-        assert out.height == 16 and out["as_of_date"].n_unique() == 2
+        # GMI-UNI-001: was a literal 16 (2 dates x 4 markets x 2 directions)
+        assert out.height == 2 * len(fh.MARKETS) * len(fh.DIRECTIONS) and out["as_of_date"].n_unique() == 2
 
     def test_a_model_fitted_after_the_scoring_date_is_refused(self, world):
         hx.run_fit(world["run_date"], world["cfg"], world["labels_dir"])

@@ -14,8 +14,8 @@
 # taxonomy-side fields — none were taxonomy-adjacent-only in identity).
 # Full field-classification table and rationale: CHANGELOG.md ADR-027.
 
-version: '1.7'
-last_updated: '2026-07-30'
+version: '1.8'
+last_updated: '2026-11-07'
 us_stocks:
   Technology:
   - symbol: AAPL
@@ -245,7 +245,6 @@ us_stocks:
   - symbol: NFLX
   - symbol: NWSA
   - symbol: NYT
-  - symbol: PARA
   - symbol: PINS
   - symbol: PUBM
   - symbol: RBLX
@@ -642,6 +641,15 @@ forex:
   - symbol: USD_CAD
   - symbol: USD_CHF
   - symbol: USD_JPY
+# ADD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026): Layer 1 'index_futures' - taxonomy side carries only
+# the positional-join anchors (no commodity_* fields: these are not commodities). Order MUST match
+# instruments_identity.yaml (yaml_split_merge.py).
+index_futures:
+  Equity Index Futures:
+  - symbol: ES_F
+  - symbol: NKD_F
+  - symbol: NQ_F
+  - symbol: YM_F
 context:
   dollar:
     _meta:

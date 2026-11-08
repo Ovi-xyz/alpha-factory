@@ -50,11 +50,17 @@ CONTEXT_MARKET: str = "context"
 def layer1_markets() -> list[str]:
     """
     Return the distinct Layer 1 market values currently in the instrument
-    universe (e.g. ['commodity', 'forex', 'idx', 'us_stocks']), derived
-    from InstrumentLoader rather than hardcoded — stays correct
-    automatically if a Layer 1 market is ever added or removed. 'index'
-    never appears here: it has been permanently empty since ADR-003
-    reclassified SPX/VIX to Layer 2 (Architecture Extension v1.0 §2.2).
+    universe (e.g. ['commodity', 'forex', 'idx', 'index_futures',
+    'us_stocks']), derived from InstrumentLoader rather than hardcoded —
+    stays correct automatically if a Layer 1 market is ever added or
+    removed (GMI-UNI-001 added 'index_futures' this way: no code change
+    here). The legacy 'index' never appears: it has been permanently
+    empty since ADR-003 reclassified SPX/VIX to Layer 2 (Architecture
+    Extension v1.0 §2.2).
+
+    Consumers that keep their OWN fixed market list (the intelligence
+    feature builders' MARKETS) must be kept in step with this function —
+    pinned by tests/unit/test_layer1_universe_gmi_uni_001.py.
     """
     from src.config.instrument_loader import get_loader
     return sorted({inst.market for inst in get_loader().all_symbols()})

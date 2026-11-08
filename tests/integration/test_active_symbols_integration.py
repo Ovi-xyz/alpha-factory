@@ -80,7 +80,7 @@ def full_silver(tmp_path) -> tuple[str, dict[str, str]]:
       LOWVOL ($5k/day)   → us_stocks → should FAIL threshold
       BBCA (IDR 1.7T/day) → idx      → should PASS threshold
       EUR_USD             → forex    → always_in (threshold=0)
-      SPX                 → index    → always_in
+      ES_F                 → index_futures → always_in
       AU                  → commodity → always_in
     """
     configs = [
@@ -89,12 +89,12 @@ def full_silver(tmp_path) -> tuple[str, dict[str, str]]:
         ("LOWVOL",    5.0,      1_000,    True),
         ("BBCA",  8_500.0, 200_000_000,   True),
         ("EUR_USD",   1.08,         0,    True),
-        ("SPX",   4_800.0,          0,    True),
+        ("ES_F",   4_800.0,          0,    True),
         ("AU",    2_000.0,          0,    True),
     ]
     market_map = {
         "AAPL": "us_stocks", "MSFT": "us_stocks", "LOWVOL": "us_stocks",
-        "BBCA": "idx", "EUR_USD": "forex", "SPX": "index", "AU": "commodity",
+        "BBCA": "idx", "EUR_USD": "forex", "ES_F": "index_futures", "AU": "commodity",
     }
     path = _make_parquet(tmp_path, configs)
     return path, market_map
@@ -116,8 +116,8 @@ class TestResolveCore:
 
         assert "EUR_USD" in symbols, "forex must always be in active symbols"
 
-    def test_index_always_included(self, full_silver, tmp_path, monkeypatch):
-        """Integration: SPX (index) always in active symbols."""
+    def test_index_futures_always_included(self, full_silver, tmp_path, monkeypatch):
+        """Integration: ES_F (index_futures) always in active symbols."""
         silver_path, market_map = full_silver
         monkeypatch.setenv("PIPELINE_DATA_ROOT", str(tmp_path))
         resolver = ActiveSymbolsResolver()
@@ -126,7 +126,7 @@ class TestResolveCore:
             ml.return_value = _make_market_mock(market_map)
             symbols = resolver.resolve(silver_path, date(2025, 2, 28))
 
-        assert "SPX" in symbols, "index must always be in active symbols"
+        assert "ES_F" in symbols, "index_futures must always be in active symbols"
 
     def test_commodity_always_included(self, full_silver, tmp_path, monkeypatch):
         """Integration: AU (commodity) always in active symbols."""
@@ -302,7 +302,7 @@ class TestAlwaysInUnderLimitPressure:
             market_map[sym] = "us_stocks"
 
         # Always-in symbols
-        for sym, mkt in [("EUR_USD", "forex"), ("SPX", "index"), ("AU", "commodity")]:
+        for sym, mkt in [("EUR_USD", "forex"), ("ES_F", "index_futures"), ("AU", "commodity")]:
             configs.append((sym, 1.0, 0, True))
             market_map[sym] = mkt
 
@@ -315,7 +315,7 @@ class TestAlwaysInUnderLimitPressure:
 
         sym_set = set(symbols)
         assert "EUR_USD" in sym_set, "AS-5: EUR_USD must not be truncated by LIMIT"
-        assert "SPX"     in sym_set, "AS-5: SPX must not be truncated by LIMIT"
+        assert "ES_F"     in sym_set, "AS-5: ES_F must not be truncated by LIMIT"
         assert "AU"      in sym_set, "AS-5: AU must not be truncated by LIMIT"
 
     def test_screened_limited_to_175(self, tmp_path, monkeypatch):
@@ -435,7 +435,7 @@ class TestOutputSchemaRoundtrip:
     def test_always_in_symbols_have_correct_reason(
         self, full_silver, tmp_path, monkeypatch
     ):
-        """AS-5 + AS-6: forex/index/commodity get eligibility_reason='always_in'."""
+        """AS-5 + AS-6: forex/index_futures/commodity get eligibility_reason='always_in'."""
         silver_path, market_map = full_silver
         monkeypatch.setenv("PIPELINE_DATA_ROOT", str(tmp_path))
         resolver = ActiveSymbolsResolver()
@@ -556,8 +556,8 @@ class TestThresholdSanity:
         assert idx["dollar_volume_20d"] >= 1_000_000_000, "At least IDR 1B/day"
 
     def test_always_in_thresholds_zero(self):
-        """forex/commodity/index thresholds must all be zero (always-in)."""
-        for mkt in ("forex", "commodity", "index"):
+        """forex/commodity/index_futures thresholds must all be zero (always-in)."""
+        for mkt in ("forex", "commodity", "index_futures"):
             assert THRESHOLDS[mkt]["dollar_volume_20d"] == 0, (
                 f"AS-5: {mkt} threshold must be 0 — enforced via UNION policy."
             )

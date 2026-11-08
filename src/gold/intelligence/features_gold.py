@@ -51,7 +51,12 @@ TIMEFRAMES = ("1D", "1W", "1M")
 # EMA-50 / MACD(26,9) chains.
 WARMUP_BARS = {"1D": 250, "1W": 60, "1M": 36}
 TOLERANCE = {"1D": timedelta(days=7), "1W": timedelta(days=14), "1M": timedelta(days=45)}
-MARKETS = ("commodity", "forex", "idx", "us_stocks")
+# ADD GMI-UNI-001: index_futures APPENDED, not inserted alphabetically — `market_code` is
+# enumerate(MARKETS), a numeric model feature, so an existing market must never be renumbered
+# (us_stocks stays 3). MARKETS must hold exactly the Layer 1 markets of src.utils.silver_scope.
+# layer1_markets(); a market missing here gets a null market_code SILENTLY — pinned by
+# tests/unit/test_layer1_universe_gmi_uni_001.py.
+MARKETS = ("commodity", "forex", "idx", "us_stocks", "index_futures")
 DIRECTIONS = ("long", "short")
 
 _RAW = ("symbol", "timestamp", "close", "ema_9", "ema_21", "ema_50", "ema_200", "rsi_14", "macd_hist", "adx",

@@ -53,10 +53,11 @@ class TestPackageExports:
         603 -> 594 (-9 more). See KNOWN_RISKS.md RISK-28.
         UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): 594 -> 593
         (-1, CL/Colgate-Palmolive removed to resolve a cross-market
-        ticker collision with commodity CL). See KNOWN_RISKS.md RISK-30."""
+        ticker collision with commodity CL). See KNOWN_RISKS.md RISK-30.
+        UPD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026): 593 -> 596 (-1 PARA, delisted after the Paramount/Skydance merger; +4 index_futures ES_F/NKD_F/NQ_F/YM_F)."""
         from src import get_loader
         loader = get_loader()
-        assert loader.count() == 593
+        assert loader.count() == 596
 
     def test_get_config_returns_config(self):
         from src import get_config, PipelineConfig

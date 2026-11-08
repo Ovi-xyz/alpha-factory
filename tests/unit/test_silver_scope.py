@@ -30,8 +30,10 @@ def _touch_parquet(path: Path) -> None:
 class TestLayer1Markets:
     def test_returns_real_layer1_markets(self):
         """Sanity against the actual instruments.yaml v1.4 universe —
-        empirically confirmed set (checkpoint + direct verification)."""
-        assert layer1_markets() == ["commodity", "forex", "idx", "us_stocks"]
+        empirically confirmed set (checkpoint + direct verification).
+        UPD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026): the NEW Layer 1 market
+        index_futures joins the set (sorted: it falls between idx and us_stocks)."""
+        assert layer1_markets() == ["commodity", "forex", "idx", "index_futures", "us_stocks"]
 
     def test_context_never_appears(self):
         assert CONTEXT_MARKET not in layer1_markets()

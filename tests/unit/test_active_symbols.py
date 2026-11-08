@@ -50,7 +50,7 @@ def _make_silver_parquet(
     """
     Build a minimal Silver 1D Parquet suitable for resolver tests.
     Symbols: AAPL (us_stocks, high-vol), LOWVOL (us_stocks, low-vol),
-             BBCA (idx), EUR_USD (forex), SPX (index), AU (commodity).
+             BBCA (idx), EUR_USD (forex), ES_F (index_futures), AU (commodity).
     Optionally injects dirty rows and unknown-market symbols.
     """
     base_date = date(2025, 1, 2)
@@ -60,7 +60,7 @@ def _make_silver_parquet(
         ("LOWVOL",    5.0,       1_000, True),   # $5k/day << threshold → excluded
         ("BBCA",   8_500.0, 200_000_000, True),  # IDR 1.7T/day >> IDR 5B threshold
         ("EUR_USD",   1.08,          0, True),   # forex → always_in
-        ("SPX",    4_800.0,          0, True),   # index → always_in
+        ("ES_F",    4_800.0,          0, True),   # index → always_in
         ("AU",     2_000.0,          0, True),   # commodity → always_in
     ]
     if include_dirty:
@@ -246,8 +246,8 @@ class TestAS4DirtyRowsExcluded:
 class TestAS5AlwaysInMarkets:
 
     def test_always_in_markets_constant(self):
-        """AS-5: _ALWAYS_IN_MARKETS must include forex, commodity, index."""
-        for mkt in ("forex", "commodity", "index"):
+        """AS-5: _ALWAYS_IN_MARKETS must include forex, commodity, index_futures."""
+        for mkt in ("forex", "commodity", "index_futures"):
             assert mkt in _ALWAYS_IN_MARKETS
 
     def test_screened_limit_is_175(self):
@@ -278,17 +278,17 @@ class TestAS5AlwaysInMarkets:
             mock_inst = MagicMock()
             mock_inst.market_map.return_value = {
                 "AAPL": "us_stocks", "LOWVOL": "us_stocks", "BBCA": "idx",
-                "EUR_USD": "forex", "SPX": "index", "AU": "commodity",
+                "EUR_USD": "forex", "ES_F": "index_futures", "AU": "commodity",
             }
             mock_inst.symbol_list.return_value = [
-                "AAPL", "LOWVOL", "BBCA", "EUR_USD", "SPX", "AU"
+                "AAPL", "LOWVOL", "BBCA", "EUR_USD", "ES_F", "AU"
             ]
             mock_loader.return_value = mock_inst
 
             symbols = resolver.resolve(silver_path, date(2025, 2, 28))
 
         assert "EUR_USD" in symbols, "AS-5: EUR_USD (forex) must always be in active symbols"
-        assert "SPX" in symbols,     "AS-5: SPX (index) must always be in active symbols"
+        assert "ES_F" in symbols,     "AS-5: ES_F (index_futures) must always be in active symbols"
         assert "AU" in symbols,      "AS-5: AU (commodity) must always be in active symbols"
 
     def test_low_volume_excluded(self, tmp_path, monkeypatch):
@@ -301,10 +301,10 @@ class TestAS5AlwaysInMarkets:
             mock_inst = MagicMock()
             mock_inst.market_map.return_value = {
                 "AAPL": "us_stocks", "LOWVOL": "us_stocks", "BBCA": "idx",
-                "EUR_USD": "forex", "SPX": "index", "AU": "commodity",
+                "EUR_USD": "forex", "ES_F": "index_futures", "AU": "commodity",
             }
             mock_inst.symbol_list.return_value = ["AAPL", "LOWVOL", "BBCA",
-                                                   "EUR_USD", "SPX", "AU"]
+                                                   "EUR_USD", "ES_F", "AU"]
             mock_loader.return_value = mock_inst
 
             symbols = resolver.resolve(silver_path, date(2025, 2, 28))
@@ -332,10 +332,10 @@ class TestAS6RichOutputSchema:
             mock_inst = MagicMock()
             mock_inst.market_map.return_value = {
                 "AAPL": "us_stocks", "LOWVOL": "us_stocks", "BBCA": "idx",
-                "EUR_USD": "forex", "SPX": "index", "AU": "commodity",
+                "EUR_USD": "forex", "ES_F": "index_futures", "AU": "commodity",
             }
             mock_inst.symbol_list.return_value = ["AAPL", "LOWVOL", "BBCA",
-                                                   "EUR_USD", "SPX", "AU"]
+                                                   "EUR_USD", "ES_F", "AU"]
             mock_loader.return_value = mock_inst
 
             resolver.resolve(silver_path, date(2025, 2, 28))
@@ -371,10 +371,10 @@ class TestAS6RichOutputSchema:
             mock_inst = MagicMock()
             mock_inst.market_map.return_value = {
                 "AAPL": "us_stocks", "LOWVOL": "us_stocks", "BBCA": "idx",
-                "EUR_USD": "forex", "SPX": "index", "AU": "commodity",
+                "EUR_USD": "forex", "ES_F": "index_futures", "AU": "commodity",
             }
             mock_inst.symbol_list.return_value = ["AAPL", "LOWVOL", "BBCA",
-                                                   "EUR_USD", "SPX", "AU"]
+                                                   "EUR_USD", "ES_F", "AU"]
             mock_loader.return_value = mock_inst
 
             resolver.resolve(silver_path, date(2025, 2, 28))
@@ -482,10 +482,10 @@ class TestAS10UnknownMarket:
             mock_inst = MagicMock()
             mock_inst.market_map.return_value = {
                 "AAPL": "us_stocks", "LOWVOL": "us_stocks", "BBCA": "idx",
-                "EUR_USD": "forex", "SPX": "index", "AU": "commodity",
+                "EUR_USD": "forex", "ES_F": "index_futures", "AU": "commodity",
             }
             mock_inst.symbol_list.return_value = ["AAPL", "LOWVOL", "BBCA",
-                                                   "EUR_USD", "SPX", "AU"]
+                                                   "EUR_USD", "ES_F", "AU"]
             mock_loader.return_value = mock_inst
 
             resolver.resolve(silver_path, date(2025, 2, 28))
@@ -599,15 +599,15 @@ class TestGeneralCorrectness:
 
     def test_thresholds_dict_present(self):
         """THRESHOLDS must cover all markets."""
-        for mkt in ("us_stocks", "idx", "forex", "commodity", "index"):
+        for mkt in ("us_stocks", "idx", "forex", "commodity", "index_futures"):
             assert mkt in THRESHOLDS
             assert "dollar_volume_20d" in THRESHOLDS[mkt]
             assert "price_floor" in THRESHOLDS[mkt]
             assert "min_days" in THRESHOLDS[mkt]
 
     def test_always_in_thresholds_zero(self):
-        """forex/commodity/index thresholds must be zero (always-in policy)."""
-        for mkt in ("forex", "commodity", "index"):
+        """forex/commodity/index_futures thresholds must be zero (always-in policy)."""
+        for mkt in ("forex", "commodity", "index_futures"):
             assert THRESHOLDS[mkt]["dollar_volume_20d"] == 0
 
     def test_load_raises_if_not_resolved(self, tmp_path, monkeypatch):

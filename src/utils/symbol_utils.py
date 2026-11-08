@@ -23,6 +23,10 @@ YFINANCE_SUFFIX: dict[str, str] = {
     "forex":     "=X",
     "commodity": "=F",
     "index":     "",
+    # ADD GMI-UNI-001: index futures carry the Yahoo suffix INSIDE raw_symbol (ES=F), so no suffix is
+    # appended. The Bronze ingester does not rely on this: like commodity (ADR-047) it fetches through
+    # Instrument.yfinance_symbol directly. This entry only keeps to_api_symbol() correct for any caller.
+    "index_futures": "",
 }
 
 # FIX v1.1: Index membutuhkan ^ prefix, bukan suffix
@@ -101,13 +105,17 @@ KNOWN_EDGE_CASES: dict[str, dict] = {
 def normalize_symbol(raw: str, market: str) -> str:
     """
     Return simbol aman untuk Hive path, file name, dan DuckDB.
-    Input: raw symbol dari instruments (e.g. 'BRK.B', 'EUR/USD').
-    Output: normalized (e.g. 'BRK-B', 'EUR_USD').
+    Input: raw symbol dari instruments (e.g. 'BRK.B', 'EUR/USD', 'ES=F').
+    Output: normalized (e.g. 'BRK-B', 'EUR_USD', 'ES_F').
+
+    UPD GMI-UNI-001: '=' -> '_' (index futures ES=F -> ES_F). A '=' in a Hive partition key
+    (`symbol=ES=F`) is ambiguous, and the bare root 'ES' is NOT an acceptable normalization: it is the
+    us_stocks ticker for Eversource (cross-market collision, RISK-30).
 
     JANGAN gunakan untuk API call — pakai to_api_symbol().
     """
     sym = SYMBOL_OVERRIDES.get(raw, raw)
-    return sym.replace(".", "-").replace("/", "_").upper()
+    return sym.replace(".", "-").replace("/", "_").replace("=", "_").upper()
 
 
 def to_api_symbol(raw: str, market: str, source: str) -> str:
@@ -120,7 +128,7 @@ def to_api_symbol(raw: str, market: str, source: str) -> str:
 
     Args:
         raw:    Raw symbol dari instruments (e.g. 'BRK.B', 'EUR/USD', 'SPX')
-        market: Market string ('us_stocks'|'idx'|'forex'|'commodity'|'index')
+        market: Market string ('us_stocks'|'idx'|'forex'|'commodity'|'index_futures'|'index')
         source: Data source ('yfinance'|'polygon'|'tvdatafeed'|'alphavantage')
 
     Returns:

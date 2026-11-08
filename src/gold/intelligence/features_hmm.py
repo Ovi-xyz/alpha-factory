@@ -47,7 +47,12 @@ MARKET_PATH = HMM_DIR / "market_regime.parquet"
 MARKET_TOLERANCE_DAYS = 5      # as context_regime: the longest routine market closure (holiday weekend)
 MAX_FEATURE_AGE_DAYS = 7       # predict: a feature row older than this is not scored
 
-MARKETS = ("commodity", "forex", "idx", "us_stocks")      # Layer 1 markets (src.utils.silver_scope.layer1_markets)
+# ADD GMI-UNI-001: index_futures APPENDED, not inserted alphabetically — `market_code` is
+# enumerate(MARKETS), a numeric model feature, so an existing market must never be renumbered
+# (us_stocks stays 3). MARKETS must hold exactly the Layer 1 markets of src.utils.silver_scope.
+# layer1_markets(); a market missing here gets a null market_code SILENTLY — pinned by
+# tests/unit/test_layer1_universe_gmi_uni_001.py.
+MARKETS = ("commodity", "forex", "idx", "us_stocks", "index_futures")      # Layer 1 markets (src.utils.silver_scope.layer1_markets)
 DIRECTIONS = ("long", "short")
 
 MACRO_DOMAINS = ("monetary", "growth", "inflation", "liquidity")   # stress excluded (short history)

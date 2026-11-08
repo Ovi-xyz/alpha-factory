@@ -108,6 +108,20 @@ terpisah (CI Gate G-3).
     general-purpose defense against any FUTURE collision, not code
     specific to CL, and removing it would be a regression in coverage
     for no benefit.
+
+# UPD GMI-VAL-007 — chat thread (Ovi, 7 Nov 2026), Layer 1 universe update (GMI-UNI-001):
+  - EXPECTED_TOTAL: 653 -> 656 (-1 Layer 1 us_stocks: PARA, delisted after the Paramount /
+    Skydance merger; +4 Layer 1 index_futures: ES_F, NKD_F, NQ_F, YM_F). Layer 1: 593 -> 596.
+  - `index_futures` is a NEW Layer 1 market category (CME equity-index futures, always-in in
+    the active-symbols resolver). It is unrelated to the legacy `index` category that ADR-035
+    removed; REQUIRED_FIELDS / layer1_markets below name it explicitly.
+  - Symbol hygiene: `symbol` must be path-safe ('=' is now an unsafe character, like '.' and
+    '/'), and for index_futures it must equal raw_symbol with '=' -> '_' (ES=F -> ES_F). Bare
+    'ES' is the us_stocks ticker for Eversource: using it would reproduce the CL / RISK-30
+    cross-market collision.
+  - NEW global check: a symbol may appear only ONCE across Layer 1 and Layer 2 combined. Before
+    this change only within-market duplicates were caught, so a cross-market collision (CL) was
+    found at runtime, by silver_scope.layer1_peer_groups(), instead of at config time.
 """
 
 import sys
@@ -150,7 +164,8 @@ from src.config.yaml_split_merge import merge_split_trees
 #   654 -> 653 (-1 Layer 1 us_stocks: CL / Colgate-Palmolive). Resolves
 #   the CL/WTI-crude cross-market ticker collision by removing the
 #   equity side — see module docstring for full rationale.
-EXPECTED_TOTAL = 653
+# UPD GMI-VAL-007 (chat thread, 7 Nov 2026, GMI-UNI-001): 653 -> 656 (-1 PARA, +4 index_futures).
+EXPECTED_TOTAL = 656
 
 REQUIRED_FIELDS: dict[str, list[str]] = {
     "us_stocks": ["symbol"],
@@ -159,6 +174,9 @@ REQUIRED_FIELDS: dict[str, list[str]] = {
     # (Architecture v2.1 Addendum §7.1 — "Required For: ALL commodity").
     "commodity":  ["symbol", "yfinance_symbol", "commodity_role", "commodity_subcategory"],
     "forex":      ["symbol", "raw_symbol", "yfinance_symbol"],
+    # ADD GMI-UNI-001: CME equity-index futures — raw_symbol (ES=F) AND symbol (ES_F) both required
+    # so the symbol/raw consistency rule in _validate_layer1 always has something to compare.
+    "index_futures": ["symbol", "raw_symbol", "yfinance_symbol"],
     # REMOVED ADR-035 (GMI_Decision_Document_v8.docx, 10 Aug 2026): 'index'
     # dropped -- permanently empty since ADR-003 (SPX/VIX reclassified to
     # Layer 2), confirmed via instrument_loader.py's own comment and
@@ -271,7 +289,7 @@ def _validate_commodity_taxonomy(
 
 def _validate_layer1(data: dict, errors: list[str]) -> list[str]:
     """
-    Validate Layer 1 markets (us_stocks/idx_stocks/commodity/forex/index).
+    Validate Layer 1 markets (us_stocks/idx_stocks/commodity/forex/index_futures).
     Logic identical to v1.1 — preserved verbatim except market loop now
     explicitly excludes 'context' (handled by _validate_layer2).
     Returns the flat list of all Layer 1 symbols collected.
@@ -280,7 +298,7 @@ def _validate_layer1(data: dict, errors: list[str]) -> list[str]:
     # UPD ADR-035 (GMI_Decision_Document_v8.docx, 10 Aug 2026): 'index'
     # removed -- permanently empty since ADR-003, see REQUIRED_FIELDS
     # comment above for the full rationale.
-    layer1_markets = ("us_stocks", "idx_stocks", "commodity", "forex")
+    layer1_markets = ("us_stocks", "idx_stocks", "commodity", "forex", "index_futures")
 
     for market in layer1_markets:
         content = data.get(market)
@@ -299,7 +317,8 @@ def _validate_layer1(data: dict, errors: list[str]) -> list[str]:
                         f"[{market}] {sym}: missing required field '{fld}'"
                     )
 
-            if "." in sym or "/" in sym:
+            # UPD GMI-UNI-001: '=' joins '.' and '/' — a Hive partition key `symbol=ES=F` is ambiguous.
+            if "." in sym or "/" in sym or "=" in sym:
                 errors.append(
                     f"[{market}] '{sym}': unsafe character in symbol"
                     " — use normalize_symbol()"
@@ -321,6 +340,25 @@ def _validate_layer1(data: dict, errors: list[str]) -> list[str]:
                     f"[{market}] {sym}: yfinance_symbol should end with =F,"
                     f" got '{yf}'"
                 )
+            # ADD GMI-UNI-001: index futures — Yahoo continuous-contract ticker (XX=F), and the
+            # path-safe symbol must be exactly that ticker with '=' -> '_' (never the bare root).
+            if market == "index_futures":
+                raw = item.get("raw_symbol", "")
+                if yf and not yf.endswith("=F"):
+                    errors.append(
+                        f"[{market}] {sym}: yfinance_symbol should end with =F,"
+                        f" got '{yf}'"
+                    )
+                if raw and yf and raw != yf:
+                    errors.append(
+                        f"[{market}] {sym}: raw_symbol '{raw}' must equal yfinance_symbol '{yf}'"
+                    )
+                if raw and sym != raw.replace("=", "_"):
+                    errors.append(
+                        f"[{market}] {sym}: symbol must be raw_symbol with '=' replaced by '_'"
+                        f" (expected '{raw.replace('=', '_')}') — a bare root such as 'ES' can"
+                        " collide with a us_stocks ticker (RISK-30)"
+                    )
             # ADD Decision B Step 1: commodity_role/commodity_subcategory
             # enum validation for Layer 1 commodity_trading instruments.
             if market == "commodity":
@@ -600,6 +638,15 @@ def validate_data(data: dict, extra_errors: list[str] | None = None) -> bool:
     layer2_symbols = _validate_layer2(data, errors)
     _validate_domain_score_weights(data, errors)
     all_symbols = layer1_symbols + layer2_symbols
+
+    # ADD GMI-VAL-007: one symbol, one instrument — across ALL markets and both layers. The
+    # per-market duplicate check in _validate_layer1 cannot see a cross-market collision (CL).
+    collisions = sorted(s for s, c in Counter(all_symbols).items() if c > 1 and s)
+    if collisions:
+        errors.append(
+            f"[collision] symbol(s) defined more than once across markets/layers: {collisions}"
+            " — Hive paths, market_map() and combined Layer 1 reads interleave them (RISK-30)"
+        )
 
     if len(all_symbols) != EXPECTED_TOTAL:
         errors.append(

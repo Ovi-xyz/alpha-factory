@@ -1,5 +1,72 @@
 # CHANGELOG — Data Platform
 
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — pembaruan universe Layer 1: kategori `index_futures`, PARA dikeluarkan, batas 200 simbol aktif (GMI-UNI-001) (November 2026)
+
+**Latar.** Permintaan Ovi (7 Nov 2026): Layer 1 mendapat kategori pasar baru `index_futures` (Yahoo `YM=F`,
+`ES=F`, `NQ=F`, `NKD=F`) di samping `us_stocks`, `idx_stocks`, `commodity`, dan `forex`; `PARA` dikeluarkan dari
+`us_stocks`; `ALWAYS_IN_MARKETS = (forex, commodity, index_futures)`; simbol aktif harus tetap <= 200. Layer 1
+593 -> 596 (-1 PARA, +4 futures), `EXPECTED_TOTAL` 653 -> 656. Perubahan skema aditif; tidak ada fit ulang model.
+
+**Keputusan desain.**
+- **Simbol registry `ES_F`, `NKD_F`, `NQ_F`, `YM_F`** (`=` -> `_`, sama seperti `/` -> `_` pada forex);
+  `raw_symbol` dan `yfinance_symbol` tetap `ES=F` dst. `ES` polos **tidak dipakai**: itu ticker `us_stocks`
+  Eversource (Utilities), dan satu simbol di dua pasar akan bercampur di satu partisi Hive dan di
+  `market_map()` — kelas bug yang sama dengan CL / RISK-30. Jangan "menyederhanakan" `ES_F` menjadi `ES`.
+- **Batas 200 sebelumnya tercapai karena kebetulan**: 175 screened + 18 forex + 3 commodity + 4 futures = 200
+  persis, tanpa ruang sisa. Sekarang menjadi jaminan struktural (lihat di bawah), bukan angka yang kebetulan pas.
+
+**Perubahan.**
+- **Registry.** `instruments_identity.yaml` / `instruments_taxonomy.yaml` (versi 1.8, lockstep): `PARA` dihapus,
+  seksi `index_futures` ditambahkan; kedua JSON schema mewajibkan `index_futures`.
+- **Loader.** Pasar `index_futures` (`_build_index_future`, `Instrument.is_index_futures`, zona waktu
+  `America/New_York`). Kategori `index` lama (kosong sejak ADR-035) tidak disentuh dan tidak sama dengan ini.
+- **Validator** (`GMI-VAL-007`): `EXPECTED_TOTAL` 656; `index_futures` pasar Layer 1 wajib; `=` karakter tak aman
+  pada simbol; simbol harus sama dengan `raw_symbol` dengan `=` -> `_`; **cek baru: satu simbol hanya boleh muncul
+  sekali di seluruh pasar Layer 1 dan Layer 2** (sebelumnya hanya duplikat dalam satu pasar yang tertangkap, jadi
+  tabrakan lintas pasar seperti CL baru ketahuan saat runtime).
+- **Bronze.** `DIRECT_YFINANCE_SYMBOL_MARKETS = {commodity, index_futures}` dan helper `_api_symbol_for`: futures
+  di-fetch lewat `yfinance_symbol` apa adanya, tidak pernah diturunkan dari simbol (`ES` polos adalah ticker
+  Yahoo yang valid untuk instrumen lain). `normalize_symbol` kini juga mengganti `=` dengan `_`.
+- **Silver.** `NEAR_24H_MARKETS` memuat `index_futures` (CME Globex ~23 jam/hari); fallback zona waktu prosesor.
+- **Active symbols** (`RESOLVER_VERSION` 1.1 -> 1.2): `_ALWAYS_IN_MARKETS` = (forex, commodity, index_futures);
+  `_MAX_ACTIVE_SYMBOLS = 200`; LIMIT screened yang dipakai = `min(175, 200 - jumlah always-in terdaftar)`
+  (`_effective_screened_limit`) sehingga futures kelima akan **memperkecil** pool screened menjadi 174, bukan
+  menembus 200 — anggota always-in tidak pernah yang terpotong; `resolve()` melempar `RuntimeError` **sebelum
+  menyimpan apa pun** bila hasil melebihi 200. Nama pasar always-in di SQL kini parameter `$always_in_markets`
+  dari konstanta (sebelumnya literal yang menyalin konstanta — salinan kedua yang bisa menyimpang).
+  `_SCREENED_LIMIT` tetap 175 (`test_screened_limit_is_175` tidak berubah). Fallback cold-start (Silver belum
+  siap -> seluruh registry, AS-2) **sengaja tidak berubah** dan tidak dikenai batas.
+- **Intelligence.** `MARKETS` di `features_gold.py` dan `features_hmm.py` ditambah `index_futures` di **akhir**
+  (bukan urut alfabet): `market_code = enumerate(MARKETS)` adalah fitur numerik model, jadi kode pasar yang ada
+  tidak boleh bergeser (`us_stocks` tetap 3). Tanpa ini futures mendapat `market_code` null secara diam-diam.
+- **Preflight** `scripts/preflight/check_index_futures.py`. Dijalankan Ovi di data Yahoo nyata (7 Nov 2026): ES_F, NQ_F,
+  YM_F lulus; NKD_F gagal pada ambang korelasi tanggal-sama 0,50 yang tidak pernah diukur (terukur 0,397). Diagnosis:
+  artefak waktu sesi, bukan cacat data — bar CME tanggal D memuat sesi Tokyo D **dan** seluruh sesi Eropa/AS, bagian
+  Eropa/AS baru sampai ke `^N225` pada D+1. Terukur (250 sesi terakhir): rasio level NKD/N225 median 1,0038 (96% dalam
+  +-3%); korelasi k=0 +0,455, k=+1 +0,417, R^2 dua-lag 0,42; korelasi dengan ES +0,76. Skrip ditulis ulang: hanya fakta
+  terukur/struktural yang menjadi gerbang (data ada, kedalaman >= 10 tahun, bar terakhir segar, level > 1.000); rasio level,
+  korelasi per lag, dan audit lonjakan hanya informasi. Return dihitung pada kalender bersama (skrip lama menghitung pada
+  kalender masing-masing sehingga hari libur satu pasar mendistorsi return).
+
+**Konsekuensi.**
+- Aktif 196 -> 200 saat semua futures punya bar bersih; tidak ada simbol screened yang tergeser (175 tetap 175).
+- Futures ikut jadi follower CrossAssetEngine (follower = himpunan aktif Layer 1), ikut matriks korelasi, ikut
+  label triple-barrier, dan ikut `gold_signals`. Futures hampir duplikat informasi indeks cash Layer 2
+  (SPX/IXIC/DJI/N225); tidak ada flag pengecualian yang dibangun (lihat KNOWN_RISKS RISK-44).
+- Domain HMM tidak terpengaruh: `raw_market` hanya membaca `us_stocks`.
+
+**Belum dikerjakan / langkah operator.** Run Bronze pertama melakukan backfill 10 tahun untuk 4 simbol baru; arsipkan
+file Bronze/Silver `PARA` yang masih ada (kalau tidak, `unknown_market` = 1 + WARNING AS-10 tiap run). Kalibrasi
+triple-barrier untuk futures belum dilakukan (RISK-39 hanya AAPL + BBCA). Tiga lonjakan NKD Oktober-November 2008
+(20 Okt, 13 Nov, 21 Nov) punya pasangan N225 yang lemah (2,7-5,2%); di luar jendela 10 tahun, tidak diselidiki.
+
+**Verifikasi.** Baseline pristine 3333 collected / 3331 passed / 2 gagal (`test_check_poetry_env`, lingkungan
+sandbox tanpa Poetry). Setelah perubahan: 3398 collected (+48 test di
+`tests/unit/test_layer1_universe_gmi_uni_001.py`, +17 di `tests/unit/test_preflight_index_futures_gmi_uni_001.py`).
+26 mutan universe + 13 mutan preflight dijalankan di salinan sekali-pakai: semua terbunuh, 0 selamat (satu mutan
+preflight sempat selamat — skenario frame kosong-berkolom dan `None` belum ada — lalu ditambahkan). Jalur
+ujung-ke-ujung pada registry nyata (semua simbol likuid) menghasilkan tepat 200.
+
 ## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — pembaruan Gatekeeper, Health Report, dan integritas baris Gold: GHR-01..09, GHR-14 (sebagian) (November 2026)
 
 **Latar.** `gate_health_gold_update_implementation_guide.md` (diusulkan sebagai ADR-059) menganalisis state

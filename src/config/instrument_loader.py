@@ -8,7 +8,9 @@ instrumen HANYA melalui get_loader() — tidak pernah langsung baca YAML.
 
 # ADD GMI-IL-001 — Dual-Layer Universe (Architecture Extension v1.0 §2-§3, §8):
 Mulai instruments.yaml v1.4, universe terbagi dua:
-  Layer 1 (trading candidates): us_stocks, idx_stocks, commodity, forex, index
+  Layer 1 (trading candidates): us_stocks, idx_stocks, commodity, forex, index_futures
+           (the legacy empty `index` category was removed by ADR-035; `index_futures` is a NEW,
+           unrelated category — see GMI-UNI-001 below)
            — diakses TIDAK BERUBAH via all_symbols()/get()/by_market()/count().
            SPX, VIX, DXY DIHAPUS dari Layer 1 (ADR-003 reklasifikasi) —
            640 instrumen (was 643).
@@ -41,6 +43,12 @@ Mulai instruments.yaml v1.4, universe terbagi dua:
   # EXPECTED_TOTAL unchanged at 699 throughout (reclassifications and
   # deferrals move/flag existing declared universe members, they don't
   # add or remove from the total).
+  # UPD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026): Layer 1 gains a fifth market category,
+  # `index_futures` (ES_F, NKD_F, NQ_F, YM_F — Yahoo ES=F/NKD=F/NQ=F/YM=F), always-in like
+  # forex/commodity; PARA (delisted, merged into Paramount Skydance) leaves us_stocks.
+  # Layer 1 593 -> 596 (-1 PARA, +4 futures), EXPECTED_TOTAL 653 -> 656. The `symbol` is the
+  # path-safe key ('=' -> '_'); bare `ES` would collide with the us_stocks ticker ES
+  # (Eversource) — the CL / RISK-30 class of bug.
 
 Layer 1 API (UNCHANGED — backward compatible 100%):
     from src.config.instrument_loader import get_loader
@@ -88,7 +96,7 @@ class Instrument:
 
     symbol:          str            # Normalized: no dots/slashes — safe for Hive path & DuckDB
     raw_symbol:      str            # Original dari sumber (e.g. 'BRK.B', 'EUR/USD')
-    market:          str            # 'us_stocks' | 'idx' | 'forex' | 'commodity' | 'index' | 'context'
+    market:          str            # 'us_stocks' | 'idx' | 'forex' | 'commodity' | 'index_futures' | 'context' (+ legacy 'index')
     sector:          Optional[str]  # Hanya us_stocks: 'Technology', 'Health Care', dst.
     yfinance_symbol: str            # Format siap pakai untuk yfinance API call ('' jika belum ada — deferred)
     polygon_symbol:  str            # Format siap pakai untuk Polygon.io API call
@@ -146,6 +154,11 @@ class Instrument:
     @property
     def is_index(self) -> bool:
         return self.market == "index"
+
+    @property
+    def is_index_futures(self) -> bool:
+        """ADD GMI-UNI-001: True for the Layer 1 `index_futures` market (ES_F/NKD_F/NQ_F/YM_F)."""
+        return self.market == "index_futures"
 
     @property
     def is_layer1(self) -> bool:
@@ -308,7 +321,7 @@ class InstrumentLoader:
     def by_market(self, market: str) -> list[Instrument]:
         """
         Filter by market (Layer 1 only).
-        Market values: 'us_stocks' | 'idx' | 'forex' | 'commodity' | 'index'
+        Market values: 'us_stocks' | 'idx' | 'forex' | 'commodity' | 'index_futures'
         """
         return [
             i for i in self._by_market.get(market, []) if i.is_active
@@ -475,6 +488,12 @@ class InstrumentLoader:
             for item in group_items:
                 instruments.append(self._build_forex(item))
 
+        # Index futures (ADD GMI-UNI-001) — CME equity-index futures, always-in.
+        # Distinct from the legacy `index` section above (cash indices, empty since ADR-003).
+        for group_items in (data.get("index_futures") or {}).values():
+            for item in group_items:
+                instruments.append(self._build_index_future(item))
+
         return instruments
 
     @staticmethod
@@ -563,6 +582,29 @@ class InstrumentLoader:
             tvfeed_symbol=None,
             eia_series=None,
             timezone="UTC",
+        )
+
+    @staticmethod
+    def _build_index_future(item: dict) -> Instrument:
+        """ADD GMI-UNI-001: one CME equity-index future (market='index_futures').
+
+        `symbol` is the normalized, path-safe key used in Hive paths / DuckDB / Silver (ES_F);
+        `raw_symbol` and `yfinance_symbol` carry the Yahoo ticker (ES=F). The Bronze ingester
+        fetches through `yfinance_symbol` directly (ADR-047 pattern), never by deriving a ticker
+        from `symbol` — 'ES' alone would be Eversource.
+        """
+        sym = item["symbol"]                 # normalized: ES_F
+        raw = item.get("raw_symbol", sym)    # Yahoo ticker as published: ES=F
+        return Instrument(
+            symbol=sym,
+            raw_symbol=raw,
+            market="index_futures",
+            sector=None,
+            yfinance_symbol=item.get("yfinance_symbol", raw),
+            polygon_symbol=raw,
+            tvfeed_symbol=None,
+            eia_series=None,
+            timezone="America/New_York",
         )
 
     # ════════════════════════════════════════════════════════════════════════

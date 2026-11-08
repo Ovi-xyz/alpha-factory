@@ -108,7 +108,10 @@ MARKET_SESSION_LOCAL: dict[str, tuple[str, int, int, int, int]] = {
 # complexity without meaningfully changing the result (audit §4: "Forex/commodity
 # yang trading mendekati 24 jam relatif tidak terdampak"). These keep the flat
 # EXPECTED_BARS['4H'] fallback, identical to pre-fix behavior.
-NEAR_24H_MARKETS: frozenset[str] = frozenset({"forex", "commodity"})
+# UPD GMI-UNI-001: index_futures (CME Globex equity-index futures, ~23h/day Sun-Fri) trades
+# near-continuously like forex/commodity. Functionally identical to leaving it out (an unknown market
+# already falls back to the flat expectation) — listed explicitly so the intent is a fact in code.
+NEAR_24H_MARKETS: frozenset[str] = frozenset({"forex", "commodity", "index_futures"})
 
 # Metadata columns that must survive group_by aggregation (FIX Bug 5).
 # These have uniform values within a single-symbol DataFrame — all sub-bars
@@ -139,7 +142,7 @@ def aggregate_ohlcv(
         to_tf:   Target timeframe — harus '4H'.
         symbol:  Symbol name — used for logging and error messages.
         market:  Instrument market ('us_stocks' | 'idx' | 'index' | 'forex' |
-                 'commodity'). FIX NEW-3: drives session-aware expected sub-bar
+                 'commodity' | 'index_futures'). FIX NEW-3: drives session-aware expected sub-bar
                  count for is_incomplete_bar. Default "" preserves the legacy
                  flat EXPECTED_BARS['4H']=4 behavior for callers that omit it
                  (e.g. existing unit tests that don't yet pass market) —

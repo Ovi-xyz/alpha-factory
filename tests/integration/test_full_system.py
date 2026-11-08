@@ -311,9 +311,11 @@ class TestFullSystemPipeline:
         cross-market ticker collision with commodity CL (WTI crude) —
         see KNOWN_RISKS.md RISK-30 and scripts/validate_instruments.py
         module docstring.
+
+        UPD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026): 593 -> 596 (-1 PARA, delisted after the Paramount/Skydance merger; +4 index_futures ES_F/NKD_F/NQ_F/YM_F).
         """
         from src.config.instrument_loader import get_loader
-        assert get_loader().count() == 593
+        assert get_loader().count() == 596
 
     def test_l7_layer2_context_universe_present(self):
         """ADD GMI-IL-001: Layer 2 context anchors — Extension v1.0 §3.1 total

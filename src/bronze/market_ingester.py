@@ -1,6 +1,6 @@
 """
 market_ingester.py — Bronze Market OHLCV Ingester
-Primary ingester untuk market OHLCV data: US Stocks, IDX, Forex, Commodity.
+Primary ingester untuk market OHLCV data: US Stocks, IDX, Forex, Commodity, Index Futures.
 
 Source chain per asset class:
     US Stocks:  yfinance → Polygon.io
@@ -78,6 +78,13 @@ LAYER1_TIMEFRAMES = DEFAULT_TIMEFRAMES + ["1H"]
 # risiko kedua lokasi diam-diam divergen di masa depan (mis. salah satu diubah
 # saat rate limit yfinance berubah, yang lain tidak).
 YFINANCE_THROTTLE_SECONDS = 0.6  # ~2000 req/hr yfinance = ~1.8 req/sec — shared budget Layer 1 & Layer 2
+
+# ADD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026): markets whose Yahoo ticker is NOT derivable from
+# Instrument.symbol and is therefore taken verbatim from Instrument.yfinance_symbol (ADR-047 pattern,
+# originally commodity-only). index_futures joins it: symbol 'ES_F' -> Yahoo 'ES=F'. Deriving the
+# ticker from the symbol would be wrong in the worst possible way — a bare 'ES' is a valid Yahoo ticker
+# (Eversource), so a mis-derivation fetches a DIFFERENT instrument without any error.
+DIRECT_YFINANCE_SYMBOL_MARKETS: frozenset[str] = frozenset({"commodity", "index_futures"})
 
 
 class MarketOHLCVIngester(BronzeIngester):
@@ -162,6 +169,17 @@ class MarketOHLCVIngester(BronzeIngester):
 
         return JobResult(rows_written=self.rows_written_total - rows_before)
 
+    @staticmethod
+    def _api_symbol_for(inst: Instrument, primary_src: str) -> str:
+        """Return the symbol to send to the source API for one Layer 1 instrument.
+
+        commodity / index_futures: Instrument.yfinance_symbol verbatim (AU -> GC=F, ES_F -> ES=F).
+        Every other Layer 1 market: to_api_symbol(raw_symbol, market, source), unchanged.
+        """
+        if inst.market in DIRECT_YFINANCE_SYMBOL_MARKETS:
+            return inst.yfinance_symbol
+        return to_api_symbol(inst.raw_symbol, inst.market, primary_src)
+
     def _run_symbol(
         self,
         inst: Instrument,
@@ -192,10 +210,9 @@ class MarketOHLCVIngester(BronzeIngester):
         # already correct by coincidence and is unaffected by this change.
         # to_api_symbol() itself is left unchanged (call-site fix only) and
         # remains the resolution path for every other Layer 1 market.
-        if inst.market == "commodity":
-            api_symbol = inst.yfinance_symbol
-        else:
-            api_symbol = to_api_symbol(inst.raw_symbol, inst.market, primary_src)
+        # UPD GMI-UNI-001: the same direct routing now also covers index_futures (see
+        # DIRECT_YFINANCE_SYMBOL_MARKETS) — one tested helper instead of a second inline branch.
+        api_symbol = self._api_symbol_for(inst, primary_src)
 
         # FIX ADR-045 (GMI_Decision_Document_v11.docx §2): timeframe folded
         # into the Bronze scan/write path. Previously bronze_path was
@@ -321,7 +338,7 @@ class MarketOHLCVIngester(BronzeIngester):
         elif inst.market == "us_stocks":
             chain = ChainedAdapter([YFinanceAdapter(), PolygonAdapter()])
         else:
-            # index, commodity — yfinance primary, no fallback needed
+            # commodity, index_futures (and legacy index) — yfinance primary, no fallback needed
             chain = ChainedAdapter([YFinanceAdapter()])
 
         return chain.fetch(api_symbol, tf, start, end)
@@ -355,7 +372,7 @@ class MarketOHLCVIngester(BronzeIngester):
             return "yfinance"
         if inst.market == "forex":
             return "yfinance"
-        return "yfinance"  # us_stocks, commodity, index, context
+        return "yfinance"  # us_stocks, commodity, index_futures, index, context
 
     # ════════════════════════════════════════════════════════════════════
     # ── Layer 2 Context OHLCV — ADD GMI-BRZ-001 ────────────────────────────

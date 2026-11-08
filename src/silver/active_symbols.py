@@ -52,6 +52,24 @@ Fixes applied (AS-1..AS-12, unchanged from v1.7.x — preserved verbatim):
   shows IDX/US cross-currency dollar_volume comparison inside one ORDER BY
   is material.
 
+  UPD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026) — Layer 1 gains the always-in market
+  `index_futures` (ES_F, NKD_F, NQ_F, YM_F) and drops the legacy, permanently-empty `index`
+  from the always-in set. Always-in registered members: 18 forex + 3 commodity + 4
+  index_futures = 25, so 175 screened + 25 = 200 — exactly the ceiling, with zero headroom.
+  That used to hold by coincidence; it is now a guarantee:
+    * _MAX_ACTIVE_SYMBOLS = 200 is the hard ceiling of a RESOLVED active set.
+    * the screened LIMIT actually applied is min(_SCREENED_LIMIT, 200 - registered always-in)
+      (_effective_screened_limit), so registering a 5th future SHRINKS the screened pool to
+      174 instead of breaching 200 — always-in members are never the ones dropped.
+    * resolve() raises (before anything is persisted) if the resolved set ever exceeds the
+      ceiling. The cold-start fallback (Silver not ready -> full registry, AS-2) is
+      deliberately unchanged and is NOT subject to the ceiling: it is a one-off pre-backfill
+      state whose purpose is to starve nothing.
+    * the always-in markets in the SQL are now a bound parameter ($always_in_markets) fed
+      from _ALWAYS_IN_MARKETS — the SQL used to repeat the market names as a literal, a
+      second copy that could silently drift from the constant.
+  _SCREENED_LIMIT stays 175 (the nominal ceiling), so test_screened_limit_is_175 is unchanged.
+
 Output:
   data/silver/active_symbols/active_{date}.parquet          (legacy, kept)
   data/silver/active_symbols/active_ohlcv_{date}.parquet     (Layer 1 canonical)
@@ -81,7 +99,9 @@ from src.utils.trade_date import with_trade_date  # FIX TS-DATE-01
 
 
 # ── Resolver version — bump when logic changes (AS-6) ────────────────────────
-RESOLVER_VERSION: str = "1.1"
+# UPD GMI-UNI-001: 1.1 -> 1.2 (always-in markets bound from the constant, effective screened
+# limit, hard ceiling, index -> index_futures).
+RESOLVER_VERSION: str = "1.2"
 
 
 # ── Screening Thresholds per Market ──────────────────────────────────────────
@@ -104,13 +124,35 @@ THRESHOLDS: dict[str, dict[str, float | int]] = {
     # enforced via UNION policy, not WHERE clause.
     "forex":     {"dollar_volume_20d": 0, "price_floor": 0.0, "min_days": 0},
     "commodity": {"dollar_volume_20d": 0, "price_floor": 0.0, "min_days": 0},
-    "index":     {"dollar_volume_20d": 0, "price_floor": 0.0, "min_days": 0},
+    # UPD GMI-UNI-001: was "index" (legacy, empty since ADR-003/ADR-035) — now index_futures.
+    "index_futures": {"dollar_volume_20d": 0, "price_floor": 0.0, "min_days": 0},
 }
 
 # ── Screened market LIMIT (headroom for 25 always-in instruments) ─────────────
 # 175 screened + ≤25 always-in ≈ 200 total (AS-5)
 _SCREENED_LIMIT: int = 175
-_ALWAYS_IN_MARKETS: tuple[str, ...] = ("forex", "commodity", "index")
+# UPD GMI-UNI-001: "index" -> "index_futures" (see module docstring).
+_ALWAYS_IN_MARKETS: tuple[str, ...] = ("forex", "commodity", "index_futures")
+# ADD GMI-UNI-001: hard ceiling of a resolved active set (screened + always-in).
+_MAX_ACTIVE_SYMBOLS: int = 200
+
+
+def _effective_screened_limit(n_always_in_registered: int) -> int:
+    """Screened LIMIT to apply so that screened + always-in can never exceed _MAX_ACTIVE_SYMBOLS.
+
+    `n_always_in_registered` is the number of REGISTERED instruments in _ALWAYS_IN_MARKETS (an upper
+    bound of the always-in rows: a symbol with no recent clean bar simply contributes nothing).
+    Returns min(_SCREENED_LIMIT, ceiling - n). Raises ValueError when the always-in set alone leaves no
+    room for a single screened symbol — that is a registry error to fix, not a state to run in.
+    """
+    budget = _MAX_ACTIVE_SYMBOLS - n_always_in_registered
+    if budget < 1:
+        raise ValueError(
+            f"[ActiveSymbols] {n_always_in_registered} always-in instruments registered leave no room "
+            f"under the {_MAX_ACTIVE_SYMBOLS}-symbol ceiling — reduce the always-in markets "
+            f"{_ALWAYS_IN_MARKETS} in the instrument registry."
+        )
+    return min(_SCREENED_LIMIT, budget)
 
 # ── Final SQL query — from audit Section 8 (Section 7 discarded as DRAFT) ────
 # AS-1: all params use $name format (DuckDB official)
@@ -161,7 +203,7 @@ always_in AS (
         symbol, market, dollar_volume_20d, clean_days, last_close,
         'always_in' AS eligibility_reason
     FROM agg
-    WHERE market IN ('forex', 'commodity', 'index')
+    WHERE list_contains($always_in_markets, market)
 ),
 
 -- AS-5: screened — threshold per market, ORDER BY, LIMIT only on this CTE
@@ -254,8 +296,26 @@ class ActiveSymbolsResolver:
             self._save_fallback(all_syms, run_date)
             return all_syms
 
+        # Step 3a (GMI-UNI-001): screened LIMIT that keeps screened + always-in <= the ceiling.
+        n_always_in = sum(1 for m in mkt_map.values() if m in _ALWAYS_IN_MARKETS)
+        screened_limit = _effective_screened_limit(n_always_in)
+        if screened_limit < _SCREENED_LIMIT:
+            logger.warning(
+                f"[ActiveSymbols] {n_always_in} always-in instruments registered: screened LIMIT "
+                f"reduced {_SCREENED_LIMIT} -> {screened_limit} to stay within "
+                f"{_MAX_ACTIVE_SYMBOLS} active symbols"
+            )
+
         # Step 3: run query — errors propagate (no except catch-all)
-        result_df = self._run_query(mkt_df, silver_1d_path, run_date)
+        result_df = self._run_query(mkt_df, silver_1d_path, run_date, screened_limit)
+
+        # Step 3b (GMI-UNI-001): post-condition — never persist an over-ceiling active set.
+        if result_df.height > _MAX_ACTIVE_SYMBOLS:
+            raise RuntimeError(
+                f"[ActiveSymbols] resolved {result_df.height} symbols for {run_date}, above the "
+                f"{_MAX_ACTIVE_SYMBOLS}-symbol ceiling (always_in registered={n_always_in}, "
+                f"screened_limit={screened_limit}) — nothing persisted."
+            )
 
         # Step 4: AS-10 — detect and log symbols with unknown market
         unknown_count = self._audit_unknown_markets(
@@ -294,6 +354,7 @@ class ActiveSymbolsResolver:
         mkt_df: pl.DataFrame,
         silver_1d_path: str,
         run_date: date,
+        screened_limit: int = _SCREENED_LIMIT,
     ) -> pl.DataFrame:
         """
         Execute the audit Section 8 query.
@@ -331,7 +392,8 @@ class ActiveSymbolsResolver:
                     "idx_dvol":      THRESHOLDS["idx"]["dollar_volume_20d"],
                     "idx_price":     THRESHOLDS["idx"]["price_floor"],
                     "idx_days":      THRESHOLDS["idx"]["min_days"],
-                    "screened_limit": _SCREENED_LIMIT,
+                    "screened_limit": screened_limit,
+                    "always_in_markets": list(_ALWAYS_IN_MARKETS),
                 },
             ).pl()
 

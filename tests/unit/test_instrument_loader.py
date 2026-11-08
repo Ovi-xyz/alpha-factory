@@ -42,8 +42,10 @@ class TestInstrumentLoader:
         CL (Colgate-Palmolive) removed to resolve a cross-market ticker
         collision with commodity CL (WTI crude). See KNOWN_RISKS.md
         RISK-30.
+
+        UPD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026): 593 -> 596 (-1 PARA, delisted after the Paramount/Skydance merger; +4 index_futures ES_F/NKD_F/NQ_F/YM_F).
         """
-        assert self.loader.count() == 593
+        assert self.loader.count() == 596
 
     def test_get_aapl(self):
         inst = self.loader.get("AAPL")
@@ -101,11 +103,16 @@ class TestInstrumentLoader:
         UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): us_stocks
         543->542 (-1, CL/Colgate-Palmolive — resolved a cross-market
         collision with commodity CL). idx/forex/commodity unaffected.
+        UPD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026): us_stocks 542->541
+        (-1 PARA) and the NEW market index_futures = 4 (ES_F, NKD_F, NQ_F,
+        YM_F). The legacy `index` market stays at 0 — it is a different,
+        long-removed category (ADR-035), not the new index_futures.
         """
-        assert len(self.loader.by_market("us_stocks")) == 542
+        assert len(self.loader.by_market("us_stocks")) == 541
         assert len(self.loader.by_market("idx"))       == 30
         assert len(self.loader.by_market("forex"))     == 18
         assert len(self.loader.by_market("commodity")) == 3
+        assert len(self.loader.by_market("index_futures")) == 4
         assert len(self.loader.by_market("index"))     == 0
 
     def test_sectors_not_empty(self):
@@ -255,8 +262,11 @@ class TestInstrumentLoaderLayer2:
 
         UPD GMI-VAL-006 (chat thread, 9 Sep 2026, RISK-30): Layer 1
         594 -> 593 (-1, CL/Colgate-Palmolive), so 652 -> 651.
+
+        UPD GMI-UNI-001 (chat thread, Ovi, 7 Nov 2026): Layer 1 593 -> 596
+        (-1 PARA, +4 index_futures), so 651 -> 654.
         """
-        assert self.loader.count_total() == 651
+        assert self.loader.count_total() == 654
 
     def test_deferred_count_is_2(self):
         """FIX ADR-034 (GMI_Decision_Document_v8.docx, 10 Aug 2026):
