@@ -1,5 +1,55 @@
 # CHANGELOG — Data Platform
 
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — satu artefak bertanggal untuk simbol aktif: `active_{date}.parquet` legacy dipensiunkan, `active_ohlcv_{date}.parquet` menggantikannya sepenuhnya (GMI-AS-002) (November 2026)
+
+**Latar.** Temuan Ovi (8 Nov 2026): `active{date}.parquet` dan `active_ohlcv{date}.parquet` di
+`data/silver/active_symbols/` berisi informasi yang sama; jika yang pertama legacy, perannya harus digantikan
+sepenuhnya oleh yang kedua. Temuan dievaluasi lebih dulu terhadap source dan data live, baru diterapkan.
+
+**Evaluasi (temuan benar, dan lebih buruk dari sekadar redundan).**
+- **Redundan oleh konstruksi, bukan dugaan.** `_save` menulis kedua nama file dari satu `out_df` dalam satu loop;
+  `_save_fallback` sama. Di live (16-18 Okt 2026) ukuran file identik berpasangan (6,58 / 6,56 / 6,53 KB).
+- **Legacy memang peninggalan.** Namanya dipertahankan sejak GMI-AS-001 demi kompatibilitas; docstring
+  `context_anchors.py` mencatat alasannya ("punya konsumen nyata"). Konsumen yang tersisa hanya empat (grep
+  `src/`, `scripts/`, `config/`, `tests/`, README): screener (`dollar_volume_20d`), view `v_active_symbols`, probe
+  kesegaran dashboard, dan `load()` / `load_full()` milik resolver sendiri. `membership_log` dan semua modul Gold
+  lain sudah membaca `active_ohlcv_*`.
+- **Redundansi itu sudah menimbulkan cacat.** Glob `v_active_symbols` adalah `active_*.parquet`, yang juga cocok
+  dengan `active_ohlcv_*.parquet`: setiap baris dihitung dua kali. Karena isinya identik, cacat ini tidak muncul
+  sebagai error, hanya sebagai jumlah baris yang menggandakan.
+- **Tidak terlihat dari repo:** konsumen di luar repo (notebook, skrip lokal, sesi DuckDB ad-hoc). Karena itu
+  `load()` dipertahankan sebagai alias terdeprekasi, dan resolver tidak pernah menghapus file.
+
+**Perubahan.**
+- `src/silver/active_symbols.py` (`RESOLVER_VERSION` 1.2 -> 1.3): `resolve()` dan fallback cold-start hanya menulis
+  `active_ohlcv_{date}.parquet`; nama file dibangun di satu tempat (`_canonical_path`); penulisan atomik (AS-9)
+  dipindahkan ke satu helper `_write_parquet_atomic` yang dipakai kedua jalur; `load_full()` membaca file
+  kanonis; `load()` menjadi alias terdeprekasi `load_ohlcv()`.
+- `src/gold/screener.py`: `dollar_volume_20d` dibaca dari `active_ohlcv_{date}.parquet`.
+- `src/gold/views.py`: `v_active_symbols` memakai `active_ohlcv_*.parquet` (menghilangkan penghitungan ganda).
+- `src/utils/pipeline_dashboard.py`: probe kesegaran memakai `active_ohlcv_*.parquet`.
+- **Skrip offline baru** `scripts/maintenance/archive_legacy_active_symbols.py` (dry-run default; `--apply`
+  memindahkan, tidak pernah menghapus; menolak menimpa tujuan). Hanya file legacy yang kembarannya ada **dan**
+  isinya identik (schema, baris, urutan) yang dipindahkan ke `data/archive/active_symbols_legacy_2026_11/`;
+  legacy-only, berbeda, atau tak terbaca dibiarkan dan dilaporkan (exit code 1). Bukan job pipeline, tidak
+  di-import dari `src/`.
+- Docstring `context_anchors.py` yang menyebut legacy "masih punya konsumen" diperbarui.
+
+**Tidak berubah.** Isi dan skema set simbol aktif (kolom sama), plafon 200, membership log (GHR-14), semua
+pembaca `active_ohlcv_*`. Tidak ada fit ulang model; tidak ada job pipeline yang perlu dijalankan ulang.
+
+**Verifikasi.** Baseline pristine (dependensi dipin dari `poetry.lock`) 3398 collected / 3396 lulus / 2 gagal
+(`test_check_poetry_env`, sandbox tanpa Poetry). Sesudah: 3428 collected (+30: 14 di
+`test_active_symbols_single_artifact_gmi_as_002.py`, 16 di `test_archive_legacy_active_symbols_gmi_as_002.py`),
+3426 lulus, 2 gagal yang sama. Empat file test lama yang mengunci file legacy diperbarui; pin sumber AS-9 kini
+menunjuk ke helper dan juga mengunci jalur fallback. 19 mutan pada salinan sekali-pakai (resolver menulis/membaca
+legacy, screener, view, dashboard, literal legacy di `src/`, versi, penulisan non-atomik, skrip arsip): 19 terbunuh,
+kontrol hijau. Tidak diverifikasi: run `silver_active_symbols` di tree live dan skrip arsip terhadap file live.
+
+**Operator (setelah mirror).** `python -m pytest tests/ -q` (harapan 3428 collected);
+`python scripts/maintenance/archive_legacy_active_symbols.py` (dry run; harapan 3 file identik, 0 tertinggal), lalu
+`--apply`. Rollback: `git revert`; file yang sudah dipindahkan dapat dikembalikan dari folder arsip.
+
 ## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — pembaruan universe Layer 1: kategori `index_futures`, PARA dikeluarkan, batas 200 simbol aktif (GMI-UNI-001) (November 2026)
 
 **Latar.** Permintaan Ovi (7 Nov 2026): Layer 1 mendapat kategori pasar baru `index_futures` (Yahoo `YM=F`,

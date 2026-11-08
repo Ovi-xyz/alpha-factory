@@ -474,8 +474,9 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     # FIX GLD-003: tidak ada f-string SQL.
 
     has_corr    = CROSS_ASSET_CORR_PATH.exists()
+    # GMI-AS-002: the resolver's only dated artifact (the legacy active_{date}.parquet is retired).
     active_sym_path = (
-        SILVER_ACTIVE_SYMBOLS_ROOT / f"active_{run_date.isoformat()}.parquet"
+        SILVER_ACTIVE_SYMBOLS_ROOT / f"active_ohlcv_{run_date.isoformat()}.parquet"
     )
     has_active_symbols = active_sym_path.exists()
 

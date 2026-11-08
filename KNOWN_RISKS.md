@@ -4736,3 +4736,43 @@ calendar, so a holiday in one market distorted the other's return; the 0.397 vs 
 the windows differed, so the effect is not separable). Accepted-risk items 1 and 10 above are superseded for history,
 volume share, stamps and freshness; the 2.2% zero-volume share of NKD_F (with changed closes) is not located in time and
 only affects volume-based indicators on that symbol.
+
+## RISK-45 (NEW): Legacy `active_{date}.parquet` retired (GMI-AS-002) — built and unit-tested in sandbox only; consumers outside the repo are invisible; the legacy files already on disk stay inert until archived; `load()` kept as a deprecated alias
+
+Date: 8 Nov 2026. Component: GMI-AS-002. Status: implemented in the sandbox, mirrored to the live repo in the same
+session; no version bump (repo stays at v1.24.0 with the Unreleased entries). Never exercised by a live
+`silver_active_symbols` run.
+
+### What changed (facts)
+- `ActiveSymbolsResolver` writes one dated file per day, `active_ohlcv_{date}.parquet`; the legacy twin is gone.
+  `RESOLVER_VERSION` 1.2 -> 1.3. The two files were written from the same frame in one loop, so the removal loses no
+  information (live 16-18 Oct 2026: identical sizes pairwise).
+- Consumers moved to the canonical file: screener (`dollar_volume_20d`), `v_active_symbols`, the dashboard
+  freshness probe, and the resolver's own `load_full()`. `load()` is now an alias of `load_ohlcv()`.
+- **Latent defect fixed:** `v_active_symbols` globbed `active_*.parquet`, which also matches `active_ohlcv_*.parquet`,
+  so every row was counted twice. On the live tree that applied to 16-18 Oct (the only dates on disk).
+
+### What is accepted, and why
+1. **Consumers outside the repo are invisible.** The search covered `src/`, `scripts/`, `config/`, `tests/` and the
+   README. A notebook, a saved DuckDB session or an ad-hoc glob over `active_*.parquet` will stop seeing new dates.
+   An external `active_*.parquet` glob also keeps double-counting for as long as legacy files remain in the
+   directory, because it matches both spellings. Mitigation: `load()` still works; the resolver deletes nothing.
+2. **Existing legacy files are inert, not removed.** The live directory held three pairs (16-18 Oct) when inspected.
+   `scripts/maintenance/archive_legacy_active_symbols.py` moves a legacy file only when its canonical twin exists and
+   is identical (schema, rows, order); legacy-only, differing and unreadable files are left in place and reported
+   (exit code 1). It has not been run against the live files.
+3. **`load()` is a small deliberate debt.** It has no caller in the repo; it stays because an external caller cannot be
+   ruled out from here. The AST pin (no legacy-name literal in `src/`) cannot see outside the repo. Remove it when
+   that is settled.
+4. **Version column.** Historical files carry `resolver_version` 1.2; nothing in `src/` compares it.
+5. **Untested and pre-existing, untouched:** `v_active_symbols` reads without `union_by_name`, and cold-start fallback
+   files hold NULL-typed columns that differ in type from regular files. Whether DuckDB reconciles them in one glob
+   was not tested.
+
+### Verification
+- Pristine baseline 3398 collected / 3396 passed / 2 failed (`test_check_poetry_env`, no Poetry in the sandbox).
+- After: 3428 collected (+30), 3426 passed, the same 2 failures.
+- 19 mutants (resolver writing or reading the legacy name on each path, screener, view glob, dashboard glob, a legacy
+  literal reintroduced in `src/`, version not bumped, non-atomic write, fallback bypassing the atomic writer, and six
+  archive-script guards) on a throw-away copy: 19 killed, 0 survived; the unmutated control was green.
+- Not verified: a live `silver_active_symbols` run, the archive script on live files, anything outside the repo.

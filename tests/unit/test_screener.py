@@ -95,7 +95,7 @@ def _mtf_path(mtf_dir, run_date: date):
 
 
 def _active_symbols_path(run_date: date):
-    path = scr_mod.SILVER_ACTIVE_SYMBOLS_ROOT / f"active_{run_date.isoformat()}.parquet"
+    path = scr_mod.SILVER_ACTIVE_SYMBOLS_ROOT / f"active_ohlcv_{run_date.isoformat()}.parquet"   # GMI-AS-002
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 

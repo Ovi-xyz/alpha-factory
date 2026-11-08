@@ -70,9 +70,26 @@ Fixes applied (AS-1..AS-12, unchanged from v1.7.x — preserved verbatim):
       second copy that could silently drift from the constant.
   _SCREENED_LIMIT stays 175 (the nominal ceiling), so test_screened_limit_is_175 is unchanged.
 
+  UPD GMI-AS-002 (chat thread, Ovi, 8 Nov 2026) — the legacy `active_{date}.parquet` is RETIRED;
+  `active_ohlcv_{date}.parquet` is the only dated artifact. Evidence behind the decision:
+    * the two files were written from the SAME frame in one loop, so they were byte-for-byte
+      the same content by construction (live 16-18 Oct 2026: identical sizes pairwise) —
+      pure redundancy, and a second copy is a drift risk (the same reason GAP-1 removed the
+      duplicated silver logic);
+    * the redundancy was already causing damage: `v_active_symbols` globbed `active_*.parquet`,
+      which also matches `active_ohlcv_*.parquet`, so every row was counted twice;
+    * the GMI-CTX-001 note ("legacy kept because it has real consumers") no longer holds —
+      the remaining consumers were the screener (dollar_volume_20d), that view, the dashboard
+      freshness probe and this module's own load()/load_full(); all now read the canonical file.
+  load() survives only as a deprecated alias of load_ohlcv() (same symbols, same file) so an
+  out-of-repo caller does not break; load_full() reads the canonical file (it is the only
+  loader that returns the audit columns). Existing legacy files on disk are inert; archive them
+  with scripts/maintenance/archive_legacy_active_symbols.py. Nothing here changes the content
+  or the schema of the resolved set.
+
 Output:
-  data/silver/active_symbols/active_{date}.parquet          (legacy, kept)
-  data/silver/active_symbols/active_ohlcv_{date}.parquet     (Layer 1 canonical)
+  data/silver/active_symbols/active_ohlcv_{date}.parquet     (Layer 1 — the only dated artifact)
+  data/silver/active_symbols/membership_log.parquet          (GHR-14 enter/leave log)
 
   Layer 2 output (data/silver/context_anchors/context_anchors_{date}.parquet)
   moved to src/silver/context_anchors.py — see that module, not this one.
@@ -101,7 +118,8 @@ from src.utils.trade_date import with_trade_date  # FIX TS-DATE-01
 # ── Resolver version — bump when logic changes (AS-6) ────────────────────────
 # UPD GMI-UNI-001: 1.1 -> 1.2 (always-in markets bound from the constant, effective screened
 # limit, hard ceiling, index -> index_futures).
-RESOLVER_VERSION: str = "1.2"
+# UPD GMI-AS-002: 1.2 -> 1.3 (legacy active_{date}.parquet no longer written; one dated artifact).
+RESOLVER_VERSION: str = "1.3"
 
 
 # ── Screening Thresholds per Market ──────────────────────────────────────────
@@ -233,6 +251,18 @@ FROM screened
 """)
 
 
+def _write_parquet_atomic(df: pl.DataFrame, final: Path) -> None:
+    """AS-9: atomic write — temp file in the target directory + os.replace (never a partial Parquet)."""
+    with tempfile.NamedTemporaryFile(dir=final.parent, suffix=".parquet.tmp", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        df.write_parquet(tmp_path, compression="zstd", compression_level=3)
+        os.replace(tmp_path, final)  # FIX SIL-AIO-003: os.replace is POSIX-atomic
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 class ActiveSymbolsResolver:
     """
     Resolve active trading symbols dari Silver OHLCV via dollar_volume_20d.
@@ -255,6 +285,10 @@ class ActiveSymbolsResolver:
         cfg = get_config()
         data_root = Path(os.getenv("PIPELINE_DATA_ROOT", str(cfg.silver_path.parent)))
         return data_root / "silver" / "active_symbols"
+
+    def _canonical_path(self, run_date: date) -> Path:
+        """ADD GMI-AS-002: the ONE place the dated artifact's filename is built."""
+        return self.OUTPUT_PATH / f"active_ohlcv_{run_date.isoformat()}.parquet"
 
     def resolve(
         self,
@@ -492,10 +526,9 @@ class ActiveSymbolsResolver:
         AS-6: persist rich output schema.
         AS-9: atomic write via temp file + rename (no partial Parquet risk).
 
-        # ADD GMI-AS-001: also persist to the Architecture v2.0 §4.2 canonical
-        # filename active_ohlcv_{date}.parquet (Layer 1). Legacy active_{date}.parquet
-        # is preserved byte-for-byte for backward compatibility with load()/load_full()
-        # and any external consumer still reading the pre-GMI path.
+        # GMI-AS-001 / GMI-AS-002: the single dated artifact is the Architecture v2.0 §4.2
+        # canonical filename active_ohlcv_{date}.parquet (Layer 1). The legacy
+        # active_{date}.parquet twin is no longer written (see the module docstring).
         """
         output_path = self.OUTPUT_PATH
         output_path.mkdir(parents=True, exist_ok=True)
@@ -507,23 +540,7 @@ class ActiveSymbolsResolver:
             pl.lit(False).alias("is_fallback"),
         ])
 
-        for fname in (
-            f"active_{run_date.isoformat()}.parquet",          # legacy
-            f"active_ohlcv_{run_date.isoformat()}.parquet",    # GMI-AS-001 canonical
-        ):
-            final = output_path / fname
-            with tempfile.NamedTemporaryFile(
-                dir=output_path, suffix=".parquet.tmp", delete=False
-            ) as tmp:
-                tmp_path = Path(tmp.name)
-            try:
-                out_df.write_parquet(
-                    tmp_path, compression="zstd", compression_level=3
-                )
-                os.replace(tmp_path, final)  # FIX SIL-AIO-003: os.replace is POSIX-atomic
-            except Exception:
-                tmp_path.unlink(missing_ok=True)
-                raise
+        _write_parquet_atomic(out_df, self._canonical_path(run_date))
 
         # ADD GHR-14 (ADR-059): log who entered / left the active set (append-only, never blocking).
         try:
@@ -539,7 +556,7 @@ class ActiveSymbolsResolver:
         """
         AS-2: fallback save — Silver not ready, full universe, flagged is_fallback=True.
         AS-9: also uses atomic write.
-        # ADD GMI-AS-001: mirrors to active_ohlcv_{date}.parquet (canonical path).
+        GMI-AS-002: writes only active_ohlcv_{date}.parquet (the legacy twin is retired).
         """
         output_path = self.OUTPUT_PATH
         output_path.mkdir(parents=True, exist_ok=True)
@@ -557,45 +574,26 @@ class ActiveSymbolsResolver:
             "is_fallback":          [True] * len(symbols),
         })
 
-        for fname in (
-            f"active_{run_date.isoformat()}.parquet",
-            f"active_ohlcv_{run_date.isoformat()}.parquet",
-        ):
-            final = output_path / fname
-            with tempfile.NamedTemporaryFile(
-                dir=output_path, suffix=".parquet.tmp", delete=False
-            ) as tmp:
-                tmp_path = Path(tmp.name)
-            try:
-                out_df.write_parquet(tmp_path, compression="zstd", compression_level=3)
-                os.replace(tmp_path, final)
-            except Exception:
-                tmp_path.unlink(missing_ok=True)
-                raise
+        _write_parquet_atomic(out_df, self._canonical_path(run_date))
 
     def load(self, run_date: date) -> list[str]:
         """
-        Load previously resolved symbols for run_date.
+        DEPRECATED alias of load_ohlcv() (GMI-AS-002) — same file, same symbols. Kept only so an
+        out-of-repo caller of the pre-GMI name does not break; use load_ohlcv() in new code.
         Raises FileNotFoundError if not yet resolved.
         """
-        path = self.OUTPUT_PATH / f"active_{run_date.isoformat()}.parquet"
-        if not path.exists():
-            raise FileNotFoundError(
-                f"Active symbols not resolved for {run_date}. "
-                "Run silver_active_symbols job first."
-            )
-        # FIX SIL-RPQ-001: scan_parquet for lazy API consistency (single small file)
-        return pl.scan_parquet(str(path)).collect()["symbol"].to_list()
+        return self.load_ohlcv(run_date)
 
     def load_full(self, run_date: date) -> pl.DataFrame:
         """
         Load full resolved DataFrame including all audit columns (AS-6).
         Useful for diagnostic queries and debugging universe changes.
+        GMI-AS-002: reads the canonical active_ohlcv_{date}.parquet.
         """
-        path = self.OUTPUT_PATH / f"active_{run_date.isoformat()}.parquet"
+        path = self._canonical_path(run_date)
         if not path.exists():
             raise FileNotFoundError(
-                f"Active symbols not resolved for {run_date}. "
+                f"active_ohlcv not resolved for {run_date}. "
                 "Run silver_active_symbols job first."
             )
         # FIX SIL-RPQ-001: scan_parquet for lazy API consistency
@@ -607,9 +605,9 @@ class ActiveSymbolsResolver:
         """
         Load Layer 1 active_ohlcv symbols — Architecture v2.0 §5.2 canonical API:
             active = resolver.load_ohlcv(run_date)
-        Reads active_ohlcv_{date}.parquet (identical content to load(), new name).
+        Reads active_ohlcv_{date}.parquet — the only dated artifact (GMI-AS-002).
         """
-        path = self.OUTPUT_PATH / f"active_ohlcv_{run_date.isoformat()}.parquet"
+        path = self._canonical_path(run_date)
         if not path.exists():
             raise FileNotFoundError(
                 f"active_ohlcv not resolved for {run_date}. "

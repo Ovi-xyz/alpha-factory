@@ -221,7 +221,7 @@ VIEW_DEFINITIONS = {
     "v_active_symbols": """
         CREATE OR REPLACE VIEW v_active_symbols AS
         SELECT * FROM read_parquet(
-            'data/silver/active_symbols/active_*.parquet',
+            'data/silver/active_symbols/active_ohlcv_*.parquet',
             hive_partitioning=false
         )
     """,

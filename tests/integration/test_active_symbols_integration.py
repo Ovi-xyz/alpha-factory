@@ -532,10 +532,10 @@ class TestReproducibility:
         assert isinstance(s2, list)
         # Verify two separate files exist
         assert resolver.OUTPUT_PATH.joinpath(
-            f"active_{d1.isoformat()}.parquet"
+            f"active_ohlcv_{d1.isoformat()}.parquet"
         ).exists()
         assert resolver.OUTPUT_PATH.joinpath(
-            f"active_{d2.isoformat()}.parquet"
+            f"active_ohlcv_{d2.isoformat()}.parquet"
         ).exists()
 
 

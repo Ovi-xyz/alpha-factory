@@ -270,4 +270,4 @@ class TestResolverHook:
         monkeypatch.setattr(ml, "record_membership", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
         resolver._save(self._result(_us("A")), D1, 0)
         assert (tmp_path / f"active_ohlcv_{D1.isoformat()}.parquet").exists()
-        assert (tmp_path / f"active_{D1.isoformat()}.parquet").exists()
+        assert not (tmp_path / f"active_{D1.isoformat()}.parquet").exists()      # GMI-AS-002: retired

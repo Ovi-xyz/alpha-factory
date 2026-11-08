@@ -35,7 +35,9 @@ Output:
     path was found (see blast-radius note above), so the path was corrected
     rather than kept as legacy alongside the new one — unlike Layer 1's
     active_{date}.parquet -> active_ohlcv_{date}.parquet rename, which DID
-    keep the legacy file because it has real consumers.)
+    keep the legacy file because it had real consumers — GMI-AS-002 (8 Nov 2026)
+    later moved those consumers to the canonical file and retired the legacy
+    twin, so Layer 1 now also has a single dated artifact.)
 
 Consumed by: CrossAssetEngine (Layer 2, Cycle 4 — not yet built).
 Job registry: 'silver_context_anchors', depends_on=[] (see docstring on

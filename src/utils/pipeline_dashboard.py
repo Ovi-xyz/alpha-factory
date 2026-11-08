@@ -251,7 +251,7 @@ def _section_data_freshness() -> None:
         ("Gold Watchlist",
          "data/gold/screener/watchlist_*.parquet"),
         ("Active Symbols",
-         "data/silver/active_symbols/active_*.parquet"),
+         "data/silver/active_symbols/active_ohlcv_*.parquet"),
     ]
 
     today = date.today()

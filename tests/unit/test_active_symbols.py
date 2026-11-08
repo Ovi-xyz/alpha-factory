@@ -431,13 +431,21 @@ class TestAS9AtomicWrite:
         Original used shutil.move which is NOT filesystem-atomic; fixed to os.replace.
         """
         import inspect
-        src = inspect.getsource(ActiveSymbolsResolver._save)
+        from src.silver import active_symbols as act_mod
+
+        # GMI-AS-002: the atomic write lives in ONE shared helper; both persisting paths must use it
+        # (the fallback path had no pin of its own before).
+        src = inspect.getsource(act_mod._write_parquet_atomic)
+        for path_fn in (ActiveSymbolsResolver._save, ActiveSymbolsResolver._save_fallback):
+            assert "_write_parquet_atomic(" in inspect.getsource(path_fn), (
+                f"AS-9: {path_fn.__name__} must persist through the atomic writer."
+            )
         assert "tempfile.NamedTemporaryFile" in src, (
-            "AS-9: _save must write to temp file first."
+            "AS-9: the writer must write to a temp file first."
         )
         # FIX SIL-AIO-003: shutil.move was replaced with os.replace (POSIX-atomic)
         assert "os.replace" in src, (
-            "FIX SIL-AIO-003: _save must use os.replace() for atomic rename "
+            "FIX SIL-AIO-003: the writer must use os.replace() for atomic rename "
             "(shutil.move is NOT filesystem-atomic — GD §17.7)."
         )
         assert "shutil.move" not in src, (
@@ -674,10 +682,11 @@ class TestGMIAS001DualLayerOutput:
 
     def test_resolve_writes_canonical_ohlcv_parquet(self, tmp_path, monkeypatch):
         """
-        GMI-AS-001: resolve() must write active_ohlcv_{date}.parquet in
-        addition to the legacy active_{date}.parquet.
+        GMI-AS-001: resolve() must write active_ohlcv_{date}.parquet.
         Architecture v2.0 §5.2 specifies this filename as the canonical
         Layer 1 artifact consumed by gold_signals.
+        GMI-AS-002: it is the ONLY dated artifact — the legacy active_{date}.parquet twin
+        is retired and must not be written (see test_active_symbols_single_artifact_gmi_as_002.py).
         """
         monkeypatch.setenv("PIPELINE_DATA_ROOT", str(tmp_path))
         silver_path = _make_silver_parquet(tmp_path)
@@ -697,12 +706,12 @@ class TestGMIAS001DualLayerOutput:
         canonical = output_path / f"active_ohlcv_{run_date.isoformat()}.parquet"
         legacy    = output_path / f"active_{run_date.isoformat()}.parquet"
         assert canonical.exists(), "active_ohlcv_{date}.parquet must exist (GMI-AS-001)"
-        assert legacy.exists(),    "legacy active_{date}.parquet must still exist (backward compat)"
+        assert not legacy.exists(), "legacy active_{date}.parquet is retired (GMI-AS-002)"
 
-    def test_canonical_and_legacy_have_identical_content(self, tmp_path, monkeypatch):
+    def test_every_loader_reads_the_canonical_file(self, tmp_path, monkeypatch):
         """
-        GMI-AS-001: active_ohlcv and active_legacy must have identical symbols.
-        Both are written atomically via os.replace; they should never diverge.
+        GMI-AS-002: load() (deprecated alias), load_ohlcv() and load_full() all read the one
+        canonical active_ohlcv_{date}.parquet, so they cannot diverge from it.
         """
         monkeypatch.setenv("PIPELINE_DATA_ROOT", str(tmp_path))
         silver_path = _make_silver_parquet(tmp_path)
@@ -718,15 +727,14 @@ class TestGMIAS001DualLayerOutput:
             mock_loader.return_value = mi
             resolver.resolve(silver_path, run_date)
 
-        canonical_syms = (
+        canonical_syms = sorted(
             pl.read_parquet(output_path / f"active_ohlcv_{run_date.isoformat()}.parquet")
             ["symbol"].to_list()
         )
-        legacy_syms = (
-            pl.read_parquet(output_path / f"active_{run_date.isoformat()}.parquet")
-            ["symbol"].to_list()
-        )
-        assert sorted(canonical_syms) == sorted(legacy_syms)
+        assert canonical_syms                                                   # non-vacuous
+        assert sorted(resolver.load(run_date)) == canonical_syms                # deprecated alias
+        assert sorted(resolver.load_ohlcv(run_date)) == canonical_syms
+        assert sorted(resolver.load_full(run_date)["symbol"].to_list()) == canonical_syms
 
     # test_resolve_context_writes_parquet_without_silver,
     # test_resolve_context_excludes_deferred, test_resolve_context_parquet_schema:
