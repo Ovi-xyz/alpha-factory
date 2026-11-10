@@ -1,13 +1,15 @@
 """
-gold_xgboost.py — ADR-053 (GMI-XGB-001) specialist #2: the technical (Gold signal chain) domain's win-probability model.
+technical_xgboost.py — ADR-053 (GMI-XGB-001) specialist #2: the technical (Gold signal chain) domain's win-probability model.
 
 TARGET (ADR-053 D1): P(a 2-7 day swing setup on THIS symbol in THIS direction reaches its profit
 barrier before its stop) given ONLY the technical chain's per-bar indicators (1D / 1W / 1M, last
-COMPLETE bars — see features_gold.py), the market-level breadth of the same indicator universe,
+COMPLETE bars — see features_technical.py), the market-level breadth of the same indicator universe,
 the direction, and the symbol's market. No regime state and no cross-asset series is read; no
 VIX value either (tech_signals' `vix_at_signal` is a run-day constant — excluded on purpose).
 
-TWO JOBS (job_registry: gold_gold_xgboost_fit / gold_gold_xgboost_predict — the ADR-053 names)
+TWO JOBS (job_registry: gold_technical_xgboost_fit / gold_technical_xgboost_predict — renamed from
+gold_gold_xgboost_* by ADR-053 Amendment 2 BEFORE any live run, so no OOF lineage, sentinel or
+pipeline_runs row moved)
     run_fit(run_date)  weekly. Walk-forward OOF + validation + final bagged model; skips (logged +
                        recorded) on a missing / stale / foreign label set.
     run(run_date)      daily. Scores every (symbol x direction) the model knows, from the latest
@@ -17,7 +19,7 @@ The symbol -> market map is persisted INSIDE the model bundle at fit time (from 
 inference needs neither the label file nor the instrument registry; a symbol the model has never
 seen is not scored until the next weekly fit.
 
-OUTPUT  data/gold/intelligence/gold_xgboost/predictions.parquet, one row per
+OUTPUT  data/gold/intelligence/technical_xgboost/predictions.parquet, one row per
         (as_of_date, symbol, direction): probability, confidence, quality, regime_tag, age_days,
         model_fit_date, lineage.   `quality` is the technical domain's Gatekeeper scope status.
 """
@@ -31,14 +33,23 @@ import polars as pl
 from loguru import logger
 
 from src.gold.intelligence import core
-from src.gold.intelligence import features_gold as fg
+from src.gold.intelligence import features_technical as fg
 from src.gold.intelligence import labels as lab
 from src.gold.intelligence.core import FrameSpec, IntelligenceConfig, ModelStore
 
-MODEL_NAME = "gold_xgboost"
+MODEL_NAME = "technical_xgboost"
 GATE_SCOPE = "technical"
 SPEC = FrameSpec(key_cols=("decision_date", "symbol", "direction"))
-FEATURES = list(fg.FEATURES)
+# Production feature blocks. `candle` is judged offline first (scripts/studies/technical_block_ablation.py) and
+# enabled here only after a CI-backed OOF lift. The fitted bundle records the blocks it was trained with and
+# predict() follows the BUNDLE, never this constant: a model is always scored on the features it learned.
+FEATURE_BLOCKS = (fg.BASE_BLOCK,)
+FEATURES = list(fg.feature_list(FEATURE_BLOCKS))
+
+
+def bundle_blocks(bundle: dict) -> tuple[str, ...]:
+    """The feature blocks a stored model was fitted with (a bundle without the key predates blocks: base)."""
+    return fg.normalize_blocks(bundle.get("blocks", (fg.BASE_BLOCK,)))
 
 
 def _store(cfg: IntelligenceConfig) -> ModelStore:
@@ -63,14 +74,15 @@ def run_fit(run_date: date, cfg: Optional[IntelligenceConfig] = None, labels_dir
     except lab.LabelInputError as e:
         return skip(f"{type(e).__name__}: {e}")
     try:
-        tables = fg.load_tables(signals_dir or fg.SIGNALS_DIR)
+        tables = fg.load_tables(signals_dir or fg.SIGNALS_DIR, FEATURE_BLOCKS)
     except core.IntelligenceError as e:
         return skip(f"technical store unavailable: {e}")
-    frame = fg.training_frame(labels, tables)
+    frame = fg.training_frame(labels, tables, FEATURE_BLOCKS)
     if frame.height == 0:
         return skip("no labelled row has complete technical features")
     meta = {"model": MODEL_NAME, "gate_scope": GATE_SCOPE, "label_file_newest_end": str(labels["label_end_date"].max()),
-            "symbol_market": fg.symbol_market_map(labels), "timeframes": list(fg.TIMEFRAMES)}
+            "symbol_market": fg.symbol_market_map(labels), "timeframes": list(fg.TIMEFRAMES),
+            "blocks": list(FEATURE_BLOCKS)}
     return core.run_fit_pipeline(store, frame, FEATURES, SPEC, cfg, run_date, meta)
 
 
@@ -82,7 +94,7 @@ def regime_tag(score: pl.Expr) -> pl.Expr:
 
 
 def predict(run_date: date, tables, bundle: dict, quality: str) -> Optional[pl.DataFrame]:
-    rows = fg.prediction_rows(run_date, tables, bundle["symbol_market"])
+    rows = fg.prediction_rows(run_date, tables, bundle["symbol_market"], bundle_blocks(bundle))
     if rows.height == 0:
         return None
     scored = core.predict_bundle(bundle, rows, run_date)
@@ -108,10 +120,10 @@ def run(run_date: date, cfg: Optional[IntelligenceConfig] = None, quality: Optio
     store = _store(cfg)
     bundle = core.load_bundle(store.model)
     if bundle is None:
-        logger.warning(f"[{MODEL_NAME}] no fitted model — nothing written (run gold_gold_xgboost_fit)")
+        logger.warning(f"[{MODEL_NAME}] no fitted model — nothing written (run gold_technical_xgboost_fit)")
         return 0
     try:
-        tables = fg.load_tables(signals_dir or fg.SIGNALS_DIR)
+        tables = fg.load_tables(signals_dir or fg.SIGNALS_DIR, bundle_blocks(bundle))
     except core.IntelligenceError as e:
         logger.warning(f"[{MODEL_NAME}] technical store unavailable ({e}) — nothing written")
         return 0

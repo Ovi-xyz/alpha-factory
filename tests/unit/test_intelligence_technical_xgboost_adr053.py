@@ -1,5 +1,5 @@
 """
-tests/unit/test_intelligence_gold_xgboost_adr053.py — ADR-053 specialist #2 (technical domain):
+tests/unit/test_intelligence_technical_xgboost_adr053.py — ADR-053 specialist #2 (technical domain):
 the as-of feature builder (availability rule, warm-up, breadth, no lookahead) and the fit/predict jobs.
 Synthetic tech_signals files mimic the real stamping: bars at the PERIOD START (Monday / month start).
 """
@@ -12,8 +12,8 @@ import pytest
 import yaml
 
 from src.gold.intelligence import core
-from src.gold.intelligence import features_gold as fg
-from src.gold.intelligence import gold_xgboost as gx
+from src.gold.intelligence import features_technical as fg
+from src.gold.intelligence import technical_xgboost as gx
 
 MARKET_OF = {"AAA": "us_stocks", "BBB": "us_stocks", "CCC": "us_stocks", "DDD": "us_stocks",
              "III": "idx", "JJJ": "idx", "KKK": "idx", "FFF": "forex", "GGG": "forex", "HHH": "forex"}
@@ -283,7 +283,7 @@ class TestFitAndPredict:
             assert c in out.columns, c
         assert set(out["regime_tag"].unique().to_list()) <= {"bull", "bear", "mixed"}
         assert ((out["probability"] >= 0) & (out["probability"] <= 1)).all()
-        assert out["lineage"][0].startswith("gold_xgboost|fit=")
+        assert out["lineage"][0].startswith("technical_xgboost|fit=")
 
     def test_predict_without_a_model_writes_nothing(self, jobs):
         assert gx.run(jobs["run"], jobs["cfg"], quality="pass", signals_dir=jobs["sig"]) == 0
@@ -315,3 +315,182 @@ class TestFitAndPredict:
     def test_regime_tag_buckets(self):
         s = pl.DataFrame({"x": [2.0, 1.0, 0.0, -1.0, -2.0]})
         assert s.select(gx.regime_tag(pl.col("x")).alias("t"))["t"].to_list() == ["bull", "mixed", "mixed", "mixed", "bear"]
+
+
+# ── rename guards (ADR-053 Amendment 2: gold_xgboost -> technical_xgboost) ───
+
+class TestRenameGuards:
+    """The model name is a KEY in config/intelligence.yaml (`models:` overrides) and a path segment of every
+    store. validate_config accepts any override name, so a name that drifts from its module is silently
+    ignored — the technical model would train with the bare defaults and nothing would say so."""
+    SPECIALISTS = ("hmm_xgboost", "technical_xgboost", "cross_asset_xgboost")
+
+    def test_model_name_follows_the_domain_pattern(self):
+        from src.gold.intelligence import hmm_xgboost as hx
+        for mod in (gx, hx):
+            assert mod.MODEL_NAME == f"{mod.GATE_SCOPE}_xgboost"
+            assert mod.__name__.rsplit(".", 1)[-1] == mod.MODEL_NAME
+
+    def test_every_shipped_override_key_names_a_specialist(self):
+        with open("config/intelligence.yaml") as fh:
+            raw = yaml.safe_load(fh)
+        assert set(raw["models"]) <= set(self.SPECIALISTS), set(raw["models"]) - set(self.SPECIALISTS)
+
+    def test_the_technical_override_actually_lands(self):
+        cfg = core.load_config()
+        base = cfg.xgb["min_child_weight"]
+        got = cfg.for_model(gx.MODEL_NAME).xgb["min_child_weight"]
+        assert got == 200 and got != base
+        assert cfg.for_model("gold_xgboost").xgb["min_child_weight"] == base   # the retired name is a no-op
+
+    def test_stores_live_under_the_new_name(self):
+        store = core.ModelStore(core.load_config().output_root, gx.MODEL_NAME)
+        assert store.dir.name == "technical_xgboost"
+
+    def test_registry_carries_the_new_job_names_only(self):
+        from src.scheduler.job_registry import DAILY_SEQUENCE, JOB_REGISTRY, WEEKLY_SEQUENCE
+        for j in ("gold_technical_xgboost_fit", "gold_technical_xgboost_predict"):
+            assert j in JOB_REGISTRY
+        assert "gold_technical_xgboost_predict" in DAILY_SEQUENCE
+        assert "gold_technical_xgboost_fit" in WEEKLY_SEQUENCE
+        assert [j for j in (*JOB_REGISTRY, *DAILY_SEQUENCE, *WEEKLY_SEQUENCE) if "gold_gold" in j] == []
+
+
+# ── optional feature blocks (ADR-053 Amendment 2) ────────────────────────────
+
+def _with_ohlc(src, dst, seed=5):
+    """Copy a synthetic signals dir and give the daily file open / high / low / atr_14 (as the real file has)."""
+    rng = np.random.default_rng(seed)
+    dst.mkdir(parents=True, exist_ok=True)
+    daily = pl.read_parquet(src / "tech_signals_1D.parquet").sort(["symbol", "timestamp"])
+    n = daily.height
+    o = daily.with_columns((pl.col("close").shift(1).over("symbol") * (1 + pl.Series(rng.normal(0, 0.003, n))))
+                           .fill_null(pl.col("close")).alias("open"))
+    o = o.with_columns((pl.max_horizontal("open", "close") * (1 + pl.Series(rng.uniform(0.0, 0.01, n)))).alias("high"),
+                       (pl.min_horizontal("open", "close") * (1 - pl.Series(rng.uniform(0.0, 0.01, n)))).alias("low"))
+    o = o.with_columns((pl.col("atr_pct") * pl.col("close")).alias("atr_14"))
+    o.write_parquet(dst / "tech_signals_1D.parquet")
+    for tf in ("1W", "1M"):
+        (dst / f"tech_signals_{tf}.parquet").write_bytes((src / f"tech_signals_{tf}.parquet").read_bytes())
+    return dst
+
+
+@pytest.fixture(scope="module")
+def tech_ohlc(tech, tmp_path_factory):
+    dst = _with_ohlc(tech["dir"], tmp_path_factory.mktemp("tech_ohlc") / "signals")
+    blocks = (fg.BASE_BLOCK, fg.CANDLE_BLOCK)
+    return {"dir": dst, "days": tech["days"], "blocks": blocks, "tables": fg.load_tables(dst, blocks)}
+
+
+class TestFeatureBlocks:
+    PROD_HASH = "2c0691b7333f"      # feature_spec_hash of the 33 production features BEFORE blocks existed
+
+    def test_the_production_feature_spec_is_unchanged(self):
+        assert fg.feature_list() == fg.FEATURES and len(fg.FEATURES) == 33
+        assert core.feature_spec_hash(list(fg.FEATURES)) == self.PROD_HASH
+        assert gx.FEATURE_BLOCKS == ("base",) and gx.FEATURES == list(fg.FEATURES)
+
+    def test_normalize_blocks(self):
+        assert fg.normalize_blocks(()) == ("base",)
+        assert fg.normalize_blocks(("candle",)) == ("base", "candle")
+        assert fg.normalize_blocks(["candle", "base", "candle"]) == ("base", "candle")
+        with pytest.raises(core.IntelligenceError):
+            fg.normalize_blocks(("base", "intraday"))
+
+    def test_candle_block_adds_six_features_just_before_the_tail(self):
+        f = fg.feature_list(("base", "candle"))
+        assert len(f) == 39 and len(set(f)) == 39 and f[-2:] == ("direction_sign", "market_code")
+        assert f[-8:-2] == fg.CANDLE_FEATURES == ("d_gap", "d_clv", "d_body", "d_upper_wick", "d_lower_wick", "d_range_atr")
+        assert f[:-8] == fg.FEATURES[:-2]
+        assert core.feature_spec_hash(list(f)) != self.PROD_HASH
+
+    def test_base_tables_do_not_need_ohlc_but_the_candle_block_names_what_is_missing(self, tech):
+        assert set(fg.load_tables(tech["dir"])) == {"1D", "1W", "1M"}                   # synthetic dir has no OHLC
+        with pytest.raises(core.IntelligenceError, match="open"):
+            fg.load_tables(tech["dir"], ("base", "candle"))
+
+    def test_hand_computed_candle_values_and_the_symbol_boundary(self, monkeypatch):
+        monkeypatch.setitem(fg.WARMUP_BARS, "1D", 0)                    # look at the raw values, not the masked ones
+        ts = [datetime(2024, 1, 2), datetime(2024, 1, 3), datetime(2024, 1, 4)]
+        bars = {"AAA": [(10.0, 12.0, 9.0, 11.0), (11.5, 13.0, 11.0, 12.5), (12.0, 12.0, 12.0, 12.0)],
+                "BBB": [(50.0, 51.0, 49.0, 50.5), (50.5, 52.0, 50.0, 51.0), (51.0, 53.0, 50.5, 52.0)],
+                "CCC": [(20.0, 21.0, 19.0, 20.5), (20.5, 22.0, 20.0, 21.0), (21.0, 23.0, 20.5, 22.0)],
+                "DDD": [(30.0, 32.0, 30.0, 31.0), (31.0, 33.0, 31.0, 32.0), (32.0, 34.0, 32.0, 33.0)]}
+        rows = [(s, t, o, h, l, c) for s, v in bars.items() for t, (o, h, l, c) in zip(ts, v)]
+        df = pl.DataFrame(rows, schema=["symbol", "timestamp", "open", "high", "low", "close"], orient="row")
+        df = _indicators(df, 1).with_columns(pl.when(pl.col("symbol") == "CCC").then(0.0)
+                                         .when(pl.col("symbol") == "DDD").then(1e-13).otherwise(4.0).alias("atr_14"))
+        out = fg._bar_features(df, "1D", ("base", "candle")).sort(["symbol", "bar_date"])
+        a = out.filter(pl.col("symbol") == "AAA")
+        assert a["d_gap"][0] is None                                    # first bar: no previous close
+        assert a["d_gap"][1] == pytest.approx(11.5 / 11.0 - 1.0, rel=1e-5)
+        assert a["d_clv"][1] == pytest.approx(0.5, rel=1e-5)            # ((12.5-11) - (13-12.5)) / 2
+        assert a["d_body"][1] == pytest.approx(0.5, rel=1e-5)
+        assert a["d_upper_wick"][1] == pytest.approx(0.25, rel=1e-5)
+        assert a["d_lower_wick"][1] == pytest.approx(0.25, rel=1e-5)
+        assert a["d_range_atr"][1] == pytest.approx(0.5, rel=1e-5)      # range 2 / atr 4
+        assert a["d_clv"][2] is None and a["d_body"][2] is None         # zero-range bar: null, never 0 or inf
+        assert a["d_upper_wick"][2] is None and a["d_lower_wick"][2] is None
+        assert a["d_range_atr"][2] == 0.0                               # a flat bar over a live ATR IS zero, not missing
+        c = out.filter(pl.col("symbol") == "CCC")
+        assert c["d_range_atr"].null_count() == 3                       # atr_14 == 0 -> undefined, null (no inf)
+        assert c["d_clv"][1] == pytest.approx(0.0, abs=1e-6)            # ((21-20) - (22-21)) / 2
+        d = out.filter(pl.col("symbol") == "DDD")
+        assert d["d_range_atr"].null_count() == 3                       # a ~0 ATR would give 2e13: finite, so only the guard saves it
+        b = out.filter(pl.col("symbol") == "BBB")
+        assert b["d_gap"][0] is None                                    # NOT AAA's last close (shift is per symbol)
+        assert b["d_gap"][1] == pytest.approx(50.5 / 50.5 - 1.0, abs=1e-6)
+
+    def test_wick_body_identity_holds_on_every_row(self, tech_ohlc):
+        d = tech_ohlc["tables"]["1D"].drop_nulls(["d_body", "d_upper_wick", "d_lower_wick"])
+        assert d.height > 1000
+        resid = (d["d_body"].abs() + d["d_upper_wick"] + d["d_lower_wick"] - 1.0).abs().max()
+        assert resid < 1e-4
+
+    def test_candle_columns_share_the_base_warm_up_mask(self, tech_ohlc):
+        d = tech_ohlc["tables"]["1D"].sort(["symbol", "bar_date"]).with_columns(
+            pl.int_range(pl.len()).over("symbol").alias("k"))
+        warm = d.filter(pl.col("k") < fg.WARMUP_BARS["1D"])
+        assert warm.select(pl.all_horizontal(pl.col(c).is_null() for c in fg.CANDLE_FEATURES).all()).item()
+        assert d.filter(pl.col("k") >= fg.WARMUP_BARS["1D"])["d_clv"].null_count() == 0
+
+    def test_a_block_never_changes_the_row_set_or_the_base_values(self, tech_ohlc):
+        labels = _labels(tech_ohlc["days"])
+        a = fg.training_frame(labels, tech_ohlc["tables"], ("base",))
+        b = fg.training_frame(labels, tech_ohlc["tables"], ("base", "candle"))
+        key = ["symbol", "decision_date", "direction"]
+        assert a.height == b.height > 0
+        assert a.select(key).equals(b.select(key)) and a["label"].to_list() == b["label"].to_list()
+        assert a.select(fg.feature_list()).equals(b.select(fg.feature_list()))      # base columns bit-identical
+        assert b.select(pl.all_horizontal(pl.col(c).is_not_null() for c in fg.feature_list(("candle",))).all()).item()
+
+    def test_candle_features_use_no_future_bar(self, tech_ohlc):
+        path = tech_ohlc["dir"] / "tech_signals_1D.parquet"
+        raw = pl.read_parquet(path)
+        cut = tech_ohlc["days"][700]
+        full = fg._bar_features(raw, "1D", ("base", "candle")).filter(pl.col("bar_date") <= cut)
+        part = fg._bar_features(raw.filter(pl.col("timestamp") <= datetime(cut.year, cut.month, cut.day)), "1D",
+                                ("base", "candle"))
+        cols = ["symbol", "bar_date", *fg.CANDLE_FEATURES]
+        assert full.select(cols).sort(["symbol", "bar_date"]).equals(part.select(cols).sort(["symbol", "bar_date"]))
+
+    def test_a_bundle_records_its_blocks_and_predict_follows_the_bundle(self, tech_ohlc, tmp_path, monkeypatch):
+        labels_dir = tmp_path / "labels"
+        labels_dir.mkdir()
+        lab = _labels(tech_ohlc["days"])
+        lab.write_parquet(labels_dir / "labels_x.parquet")
+        cfg, run = _cfg(tmp_path), lab["decision_date"].max() + timedelta(days=3)
+        blocks = tech_ohlc["blocks"]
+        monkeypatch.setattr(gx, "FEATURE_BLOCKS", blocks)
+        monkeypatch.setattr(gx, "FEATURES", list(fg.feature_list(blocks)))
+        st = gx.run_fit(run, cfg, labels_dir, tech_ohlc["dir"])
+        assert st["status"] == "fitted", st
+        bundle = core.load_bundle(core.ModelStore(cfg.output_root, gx.MODEL_NAME).model)
+        assert bundle["blocks"] == ["base", "candle"] and bundle["features"] == list(fg.feature_list(blocks))
+        monkeypatch.undo()                                             # module constants are base-only again
+        assert gx.FEATURE_BLOCKS == ("base",)
+        assert gx.run(run, cfg, quality="pass", signals_dir=tech_ohlc["dir"]) == 2 * len(MARKET_OF)
+
+    def test_a_bundle_from_before_blocks_existed_is_a_base_model(self):
+        assert gx.bundle_blocks({}) == ("base",)
+        assert gx.bundle_blocks({"blocks": ["base", "candle"]}) == ("base", "candle")

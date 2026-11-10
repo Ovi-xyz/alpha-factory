@@ -33,7 +33,7 @@ import yaml
 from scripts import validate_instruments as vi
 from src.bronze.market_ingester import DIRECT_YFINANCE_SYMBOL_MARKETS, MarketOHLCVIngester
 from src.config.instrument_loader import get_loader
-from src.gold.intelligence import features_gold as fg
+from src.gold.intelligence import features_technical as fg
 from src.gold.intelligence import features_hmm as fh
 from src.silver import active_symbols as act
 from src.silver.ohlcv_aggregator import NEAR_24H_MARKETS
@@ -220,11 +220,11 @@ class TestMarketLists:
     def test_layer1_markets_includes_index_futures(self):
         assert layer1_markets() == ["commodity", "forex", "idx", "index_futures", "us_stocks"]
 
-    @pytest.mark.parametrize("mod", [fg, fh], ids=["features_gold", "features_hmm"])
+    @pytest.mark.parametrize("mod", [fg, fh], ids=["features_technical", "features_hmm"])
     def test_feature_builder_markets_mirror_layer1(self, mod):
         assert set(mod.MARKETS) == set(layer1_markets())
 
-    @pytest.mark.parametrize("mod", [fg, fh], ids=["features_gold", "features_hmm"])
+    @pytest.mark.parametrize("mod", [fg, fh], ids=["features_technical", "features_hmm"])
     def test_existing_market_codes_never_shift(self, mod):
         """market_code = enumerate(MARKETS) is a numeric model feature: new markets are APPENDED."""
         assert mod.MARKETS[:4] == ("commodity", "forex", "idx", "us_stocks")

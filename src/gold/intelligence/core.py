@@ -4,7 +4,7 @@ core.py — ADR-053 (GMI-XGB-001): the shared engine behind the three specialist
 DOMAIN-AGNOSTIC BY CONSTRUCTION. This module knows nothing about HMM states, indicators or
 cross-asset series. It receives a frame of (key columns, feature columns, label, weight,
 label_end_date) and returns out-of-fold predictions, a validation report and a persisted model
-bundle. Each specialist (hmm_xgboost / gold_xgboost / cross_asset_xgboost) owns its own feature
+bundle. Each specialist (hmm_xgboost / technical_xgboost / cross_asset_xgboost) owns its own feature
 builder and its own stores; nothing in here may import or read another domain's code or data
 (pinned by tests/integration/test_intelligence_domain_independence_adr053.py).
 

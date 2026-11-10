@@ -1,5 +1,5 @@
 """
-features_gold.py — ADR-053 D2: the as-of feature builder of `gold_xgboost` (technical domain).
+features_technical.py — ADR-053 D2: the as-of feature builder of `technical_xgboost` (technical domain).
 
 ONE BUILDER FOR BOTH PATHS. The fit path joins every labelled (symbol, decision_date) to the
 per-bar indicator history; the predict path joins (symbol, run_date). Same functions, same
@@ -31,13 +31,18 @@ INDEPENDENCE: reads only the technical store (data/gold/signals); the symbol -> 
 the labels at fit time and is persisted inside the model bundle, so inference needs no registry.
 
 FIRST-PASS feature choices (KNOWN_RISKS RISK-40).
+
+OPTIONAL BLOCKS (ADR-053 Amendment 2): the production set is the `base` block. A second block, `candle`, is built
+and tested but OFF until an offline ablation (scripts/studies/technical_block_ablation.py) shows it adds OOF value.
+The row set a block is judged on never changes: a block's features carry the SAME warm-up mask as the base ones,
+so every arm of an ablation trains and scores on identical rows.
 """
 
 from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Sequence
 
 import polars as pl
 
@@ -75,8 +80,43 @@ DERIVED = ("mtf_score_dw",)
 FEATURES = (*TF_FEATURES["1D"], *TF_FEATURES["1W"], *TF_FEATURES["1M"], *BREADTH_FEATURES, *DERIVED,
             "direction_sign", "market_code")
 
+# ── optional feature blocks (ADR-053 Amendment 2) ────────────────────────────
+# `base` is the production feature set above and is ALWAYS present: 33 features, the same order and the
+# same feature_spec_hash as before blocks existed (pinned by a test). `candle` adds six daily candle-structure
+# features built from columns tech_signals_1D already carries (open / high / low / atr_14) — the cheap,
+# 15-year-deep proxy for what an hourly feed would add. It is OFF in production
+# (technical_xgboost.FEATURE_BLOCKS) until scripts/studies/technical_block_ablation.py shows an OOF lift with a
+# confidence interval; enabling it is a deliberate code change (new feature hash, therefore a new model).
+BASE_BLOCK, CANDLE_BLOCK = "base", "candle"
+BLOCKS = (BASE_BLOCK, CANDLE_BLOCK)
+_CANDLE_1D = ("gap", "clv", "body", "upper_wick", "lower_wick", "range_atr")
+CANDLE_FEATURES = tuple(f"d_{f}" for f in _CANDLE_1D)
+BLOCK_RAW = {CANDLE_BLOCK: ("open", "high", "low", "atr_14")}
+_TAIL = ("direction_sign", "market_code")
 
-def _bar_features(df: pl.DataFrame, tf: str) -> pl.DataFrame:
+
+def normalize_blocks(blocks: Sequence[str]) -> tuple[str, ...]:
+    """Canonical block tuple: validated, de-duplicated, in BLOCKS order, `base` always first."""
+    asked = set(blocks) | {BASE_BLOCK}
+    unknown = asked - set(BLOCKS)
+    if unknown:
+        raise IntelligenceError(f"unknown feature block(s) {sorted(unknown)}; known: {list(BLOCKS)}")
+    return tuple(b for b in BLOCKS if b in asked)
+
+
+def feature_list(blocks: Sequence[str] = (BASE_BLOCK,)) -> tuple[str, ...]:
+    """Ordered model features for a block set: base only == FEATURES; `candle` sits just before the tail."""
+    b = normalize_blocks(blocks)
+    return (*FEATURES[:-len(_TAIL)], *(CANDLE_FEATURES if CANDLE_BLOCK in b else ()), *_TAIL)
+
+
+def tf_columns(tf: str, blocks: Sequence[str] = (BASE_BLOCK,)) -> tuple[str, ...]:
+    """Per-bar feature columns of one timeframe table for a block set."""
+    extra = CANDLE_FEATURES if tf == "1D" and CANDLE_BLOCK in normalize_blocks(blocks) else ()
+    return (*TF_FEATURES[tf], *extra)
+
+
+def _bar_features(df: pl.DataFrame, tf: str, blocks: Sequence[str] = (BASE_BLOCK,)) -> pl.DataFrame:
     """Per-bar derived features + `avail_date` for one timeframe (all causal: one bar's own
     indicator columns, plus close-to-close returns on 1D)."""
     pre = {"1D": "d_", "1W": "w_", "1M": "m_"}[tf]
@@ -102,6 +142,20 @@ def _bar_features(df: pl.DataFrame, tf: str) -> pl.DataFrame:
     wanted = {"1D": _FEATS_1D, "1W": _FEATS_1W, "1M": _FEATS_1M}[tf]
     exprs = [ex[f] for f in wanted if f in ex]
     d = d.with_columns(exprs)
+    if tf == "1D" and CANDLE_BLOCK in normalize_blocks(blocks):
+        # `candle` block: scale-free structure of the bar itself plus the gap to the previous bar's close. All causal
+        # (one bar + the previous close of the SAME symbol). A zero-range bar gives null, not 0 — nothing is imputed.
+        rng = pl.col("high") - pl.col("low")
+        prev_close = pl.col("close").shift(1).over("symbol")
+        top, bot = pl.max_horizontal("open", "close"), pl.min_horizontal("open", "close")
+        d = d.with_columns(
+            (pl.col("open") / prev_close - 1.0).alias("gap"),
+            safe((pl.col("close") - pl.col("low")) - (pl.col("high") - pl.col("close")), rng).alias("clv"),
+            safe(pl.col("close") - pl.col("open"), rng).alias("body"),
+            safe(pl.col("high") - top, rng).alias("upper_wick"),
+            safe(bot - pl.col("low"), rng).alias("lower_wick"),
+            safe(rng, pl.col("atr_14")).alias("range_atr"))
+        wanted = (*wanted, *_CANDLE_1D)
     if tf == "1D":
         d = d.with_columns((pl.col("close") / pl.col("close").shift(5).over("symbol") - 1.0).alias("ret_5"),
                            (pl.col("close") / pl.col("close").shift(20).over("symbol") - 1.0).alias("ret_20"))
@@ -127,19 +181,21 @@ def _bar_features(df: pl.DataFrame, tf: str) -> pl.DataFrame:
          for c in out.columns if c not in ("symbol", "bar_date", "avail_date")])
 
 
-def load_tables(signals_dir: Path | str = SIGNALS_DIR) -> dict[str, pl.DataFrame]:
+def load_tables(signals_dir: Path | str = SIGNALS_DIR, blocks: Sequence[str] = (BASE_BLOCK,)) -> dict[str, pl.DataFrame]:
     """Per-TF per-bar feature tables from data/gold/signals/tech_signals_{TF}.parquet."""
     out = {}
     for tf in TIMEFRAMES:
         path = Path(signals_dir) / f"tech_signals_{tf}.parquet"
         if not path.exists():
             raise IntelligenceError(f"{path} missing — run gold_signals")
-        cols = list(_RAW)
+        blocks_n = normalize_blocks(blocks)
+        cols = list(_RAW) + ([c for c in BLOCK_RAW[CANDLE_BLOCK] if c not in _RAW]
+                             if tf == "1D" and CANDLE_BLOCK in blocks_n else [])
         have = pl.read_parquet_schema(path)
         missing = [c for c in cols if c not in have]
         if missing:
             raise IntelligenceError(f"{path.name} lacks columns {missing}")
-        out[tf] = _bar_features(pl.read_parquet(path, columns=cols), tf)
+        out[tf] = _bar_features(pl.read_parquet(path, columns=cols), tf, blocks_n)
     return out
 
 
@@ -168,12 +224,13 @@ def _asof(left: pl.DataFrame, right: pl.DataFrame, by: str, cols: list[str], tol
                                                 tolerance=tolerance)
 
 
-def asof_features(decisions: pl.DataFrame, tables: Mapping[str, pl.DataFrame], symbol_market: pl.DataFrame) -> pl.DataFrame:
+def asof_features(decisions: pl.DataFrame, tables: Mapping[str, pl.DataFrame], symbol_market: pl.DataFrame,
+                  blocks: Sequence[str] = (BASE_BLOCK,)) -> pl.DataFrame:
     """Features for each distinct (symbol, decision_date) of `decisions`; `market` attached from the map."""
     base = decisions.select("symbol", "decision_date").unique().join(symbol_market, on="symbol", how="left")
     out = base
     for tf in TIMEFRAMES:
-        cols = list(TF_FEATURES[tf])
+        cols = list(tf_columns(tf, blocks))
         out = _asof(out, tables[tf], "symbol", cols, TOLERANCE[tf]).drop("avail_date")
     br = breadth_table(tables["1D"], symbol_market)
     out = _asof(out, br, "market", list(BREADTH_FEATURES), TOLERANCE["1D"]).drop("avail_date")
@@ -187,15 +244,17 @@ def _finish(df: pl.DataFrame) -> pl.DataFrame:
                                         return_dtype=pl.Float32).alias("market_code"))
 
 
-def training_frame(labels: pl.DataFrame, tables: Mapping[str, pl.DataFrame]) -> pl.DataFrame:
+def training_frame(labels: pl.DataFrame, tables: Mapping[str, pl.DataFrame],
+                   blocks: Sequence[str] = (BASE_BLOCK,)) -> pl.DataFrame:
     """One row per labelled (symbol, decision_date, direction); label in {0,1}, weight 1. Complete cases only."""
+    feature_cols = feature_list(blocks)
     sm = labels.select("symbol", "market").unique(subset=["symbol"], keep="first")
-    feats = asof_features(labels, tables, sm)
+    feats = asof_features(labels, tables, sm, blocks)
     j = labels.join(feats.drop("market"), on=["symbol", "decision_date"], how="inner").rename({"label_binary": "label"})
     j = _finish(j).with_columns(pl.col("label").cast(pl.Float32), pl.lit(1.0).cast(pl.Float32).alias("weight"))
-    ok = pl.all_horizontal([pl.col(c).is_not_null() for c in FEATURES])
+    ok = pl.all_horizontal([pl.col(c).is_not_null() for c in feature_cols])
     return j.filter(ok).select("symbol", "market", "decision_date", "direction", "label", "weight", "label_end_date",
-                               *FEATURES).sort(["decision_date", "symbol", "direction"])
+                               *feature_cols).sort(["decision_date", "symbol", "direction"])
 
 
 def symbol_market_map(labels: pl.DataFrame) -> dict[str, str]:
@@ -203,12 +262,13 @@ def symbol_market_map(labels: pl.DataFrame) -> dict[str, str]:
     return dict(zip(sm["symbol"].to_list(), sm["market"].to_list()))
 
 
-def prediction_rows(run_date: date, tables: Mapping[str, pl.DataFrame], symbol_market: Mapping[str, str]) -> pl.DataFrame:
+def prediction_rows(run_date: date, tables: Mapping[str, pl.DataFrame], symbol_market: Mapping[str, str],
+                    blocks: Sequence[str] = (BASE_BLOCK,)) -> pl.DataFrame:
     """(symbol x direction) rows for `run_date`; only symbols of the persisted map with complete features."""
     sm = pl.DataFrame({"symbol": list(symbol_market), "market": list(symbol_market.values())})
     dec = pl.DataFrame({"symbol": sm["symbol"], "decision_date": [run_date] * sm.height})
-    feats = asof_features(dec, tables, sm)
-    feats = feats.filter(pl.all_horizontal([pl.col(c).is_not_null() for c in (*TF_FEATURES["1D"], *TF_FEATURES["1W"],
+    feats = asof_features(dec, tables, sm, blocks)
+    feats = feats.filter(pl.all_horizontal([pl.col(c).is_not_null() for c in (*tf_columns("1D", blocks), *TF_FEATURES["1W"],
                                                                                *TF_FEATURES["1M"], *BREADTH_FEATURES)]))
     grid = pl.DataFrame({"direction": list(DIRECTIONS)})
     out = feats.join(grid, how="cross").with_columns(pl.lit(run_date).alias("as_of_date"))

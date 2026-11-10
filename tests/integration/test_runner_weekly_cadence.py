@@ -294,7 +294,7 @@ class TestLayerCommands:
             # scores with whatever model exists).
             "gold_hmm_walk_forward",
             "gold_hmm_xgboost_fit",
-            "gold_gold_xgboost_fit",    # technical-domain specialist: same shape
+            "gold_technical_xgboost_fit",    # technical-domain specialist: same shape
         }
         for layer in ("bronze", "silver", "gold"):
             for job_name in LAYER_JOB_NAMES[layer]:

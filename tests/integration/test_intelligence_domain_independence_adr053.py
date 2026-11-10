@@ -18,7 +18,7 @@ PKG = pathlib.Path("src/gold/intelligence")
 # module -> domain it belongs to ("shared" = no domain)
 OWNERS = {"core.py": "shared", "labels.py": "shared", "__init__.py": "shared",
           "features_hmm.py": "hmm", "hmm_xgboost.py": "hmm",
-          "features_gold.py": "technical", "gold_xgboost.py": "technical"}
+          "features_technical.py": "technical", "technical_xgboost.py": "technical"}
 # any file added under the package must be classified here — the guard below fails otherwise
 ALLOWED_INTERNAL = {
     "shared": ("src.gold.intelligence",),

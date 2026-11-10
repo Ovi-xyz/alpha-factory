@@ -4776,3 +4776,56 @@ session; no version bump (repo stays at v1.24.0 with the Unreleased entries). Ne
   literal reintroduced in `src/`, version not bumped, non-atomic write, fallback bypassing the atomic writer, and six
   archive-script guards) on a throw-away copy: 19 killed, 0 survived; the unmutated control was green.
 - Not verified: a live `silver_active_symbols` run, the archive script on live files, anything outside the repo.
+
+
+## RISK-46 (NEW): `technical_xgboost` rename, optional feature blocks and the intraday evaluation gate (ADR-053 Amendment 2) — built and unit-tested in sandbox only; the ablation has never run on live data; no intraday builder exists; `candle` is OFF
+
+**Status:** 🟡 **OPEN (accepted, 9 Nov 2026).** v1.24.0 + Unreleased. Cross-reference: RISK-40 (the specialists never ran live).
+
+**Reference:** ADR-053 (+ Amendments 1 and 2), ADR-051 A2 §A, ADR-055, ADR-054, RISK-39, RISK-40, GHR-11, XAE-R06,
+`src/gold/intelligence/technical_xgboost.py`, `features_technical.py`, `scripts/studies/technical_block_ablation.py`,
+`scripts/studies/probe_intraday_bars.py`.
+
+### What changed (facts)
+- `gold_xgboost` -> `technical_xgboost` and `features_gold` -> `features_technical` (job names `gold_technical_xgboost_*`,
+  config key, store directory, lineage prefix). No alias for the old names.
+- Optional feature blocks: `base` (33 features, hash `2c0691b7333f`, pinned) is unchanged; `candle` (6 daily
+  candle-structure features) exists but `FEATURE_BLOCKS = ("base",)`.
+- Two offline study scripts (not jobs, not imported from `src/`, pinned by AST): the same-window block ablation and a
+  read-only probe of 1H/4H bar conventions.
+
+### What is accepted, and why
+1. **Never run on live data.** Labels are not materialised, so neither the specialist nor the ablation has run on the
+   live stores. The `candle` block was validated on synthetic OHLC plus the schema of the live `tech_signals_1M`; the
+   live `tech_signals_1D` (about 100 MB, not copyable through the connector) was not opened. Verify the columns
+   `open, high, low, atr_14` there before the first ablation (the daily file is written by the same pipeline as 1M).
+2. **No intraday builder.** Deliberately. Measured on three symbols the conventions differ per market (US 1H
+   America/New_York at bar start, 7 bars; IDX Asia/Jakarta, 6-7 bars; FX Europe/London, 24 bars, newest bar flat; US
+   4H naive at 08:00/12:00), and the Gold copy of `tech_signals_1M` is stored in Asia/Jakarta, which can move a US
+   session across a calendar date. The probe's Gold-vs-Silver date comparison was smoke-tested on an EMULATED Gold
+   file (AAPL 47%, EUR_USD 26% of bars on a different date; BBCA 0%): it describes the hazard, not the live file. Run
+   the probe on the live `tech_signals_{1H,4H}` before writing any intraday as-of rule.
+3. **An intraday history cannot yield an out-of-fold set under the shipped config.** `initial_train_months` is 36; a
+   history of about two years gives zero blocks. At 12 months it gives 4-5 blocks (10.5-12.5 months). Any intraday
+   block therefore needs a deliberate walk-forward override, and it shortens ADR-054's common OOF window if it enters
+   the stack. At that length the effective sample is the number of DATES (about 500), so intervals will be wide.
+4. **The verdict rule is first-pass [U].** `contributes` needs the 95% date-block bootstrap interval of delta AUC above 0
+   AND of delta logloss below 0. Windows overlap and label horizons overlap, so the intervals are optimistic; AUC is rank
+   quality, not P&L. The verdict gates nothing.
+5. **Intraday data carries open defects.** FX weekend stubs and partial candles (GHR-11) and extreme-move flagging on
+   hourly returns (XAE-R06; hourly rates unmeasured) apply to 1H/4H directly. An intraday block should wait for both.
+6. **Names outside the repo.** Notebooks, saved DuckDB sessions or runbooks that mention `gold_xgboost`,
+   `gold_gold_xgboost_fit` or `features_gold` are invisible from the repo. Historical CHANGELOG, KNOWN_RISKS and
+   dev-log entries keep the old names on purpose (accretive documentation). The ADR texts live outside the repo;
+   ADR-051 A2 §A and ADR-055's Gold table still say `gold_xgboost` until Amendment 2 is merged there.
+7. **`candle` is a proxy, not the intraday signal.** If it fails the ablation, that says nothing about 1H/4H.
+8. **One accepted equivalent guard.** The zero-range guard on `d_clv` is redundant with the final finite-mask (0/0 is
+   NaN, and |clv| <= 1 by construction); it stays as defence in depth. The guard on `d_range_atr` is NOT redundant (a
+   near-zero ATR gives a finite 2e13) and is pinned.
+
+### Verification
+- Pristine baseline 3428 collected / 3426 passed / 2 failed (`test_check_poetry_env`, no Poetry in the sandbox).
+- After: 3498 collected (+70), 3496 passed, the same 2 failures.
+- Mutants on a throw-away copy (rename, feature blocks, ablation logic, CLI paths, isolation pins): all killed; one
+  equivalent mutant removed as redundant code; the unmutated control was green.
+- Not verified: anything on live data, the live 1D schema, the probe on live Gold, an intraday builder.

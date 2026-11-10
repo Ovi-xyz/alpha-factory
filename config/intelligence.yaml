@@ -58,7 +58,7 @@ models:
     walk_forward:
       min_train_rows: 2000
 
-  gold_xgboost:
+  technical_xgboost:
     # One row per (symbol, date, direction) — up to ~1M rows with 7-bar overlapping labels, so
     # leaves must carry real weight; otherwise defaults.
     xgb:

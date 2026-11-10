@@ -1,5 +1,56 @@
 # CHANGELOG — Data Platform
 
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — spesialis teknikal diberi nama sesuai domainnya: `gold_xgboost` -> `technical_xgboost`; blok fitur opsional (`candle`, default MATI); skrip ablasi dan probe intraday (ADR-053 Amendment 2)
+
+**Latar.** Usulan Ovi (9 Nov 2026): spesialis `gold_xgboost` tidak pernah melihat `tech_signals_{1H,4H}`, sehingga
+dipecah menjadi `intraday_xgboost` (1H/4H) dan model 1D/1W/1M diganti nama `interday_xgboost`. Usulan dievaluasi
+terhadap source dan data live lebih dulu; hasilnya sebagian diterima (ganti nama, dengan nama lain) dan sebagian
+ditunda (pemecahan model) sampai ada bukti.
+
+**Evaluasi (temuan dari source dan file live, bukan dugaan).**
+- **Belum pernah dijalankan.** Tidak ada `data/gold/intelligence/` di disk; ganti nama paling murah sekarang karena
+  belum ada lineage OOF, sentinel, atau baris `pipeline_runs` yang harus dipindahkan.
+- **Nama lama menyimpang dari pola.** Hanya `gold_xgboost` yang tidak mengikuti `<domain>_xgboost`
+  (`hmm_xgboost` -> scope `hmm`, `cross_asset_xgboost` -> `cross_asset`; yang ini scope `technical`), dan nama job di
+  registry menjadi `gold_gold_xgboost_*`. `interday_xgboost` menyandikan himpunan timeframe, yang merupakan pilihan
+  konfigurasi dan akan keliru begitu blok intraday diterima.
+- **Kunci config diam-diam bisa hilang.** `validate_config` menerima kunci apa pun di bawah `models:`; nama model yang
+  menyimpang dari kunci config membuat override `min_child_weight: 200` terbuang tanpa pesan.
+- **`initial_train_months` = 36.** Riwayat intraday sekitar dua tahun menghasilkan NOL blok out-of-fold; pada 12 bulan
+  menghasilkan 4-5 blok (10,5-12,5 bulan). Pemecahan menjadi dua spesialis juga akan mempersempit jendela OOF bersama
+  untuk ADR-054.
+- **Builder tidak membaca open/high/low.** Skema `tech_signals_1M` di disk memuat `open, high, low, tr, atr_14,
+  volume`, jadi proksi struktur candle harian (riwayat 15 tahun) bisa dibangun dari store teknikal tanpa menyentuh Silver.
+- **Konvensi intraday tidak seragam** (diukur pada AAPL, BBCA, EUR_USD): US 1H berstempel America/New_York di awal bar
+  (09:30-15:30, 7 bar/hari); IDX Asia/Jakarta (09:00-16:00); FX Europe/London per jam (24/hari) dengan bar terbaru
+  datar (candle parsial); 4H US berstempel NAIF pada 08:00/12:00. Karena itu builder intraday TIDAK ditulis di sini.
+
+**Perubahan.**
+- `src/gold/intelligence/gold_xgboost.py` -> `technical_xgboost.py` (`MODEL_NAME` = `technical_xgboost`), dan
+  `features_gold.py` -> `features_technical.py` (`git mv`); job registry: `gold_technical_xgboost_fit` /
+  `gold_technical_xgboost_predict`; kunci `config/intelligence.yaml`; direktori store, awalan lineage, pin independensi
+  domain dan pin kadensi runner mengikuti. Tanpa alias nama lama (tidak ada lineage yang perlu dijaga).
+- Blok fitur opsional di `features_technical.py` (`normalize_blocks`, `feature_list`, `tf_columns`): `base` = 33 fitur
+  produksi dengan hash `2c0691b7333f` (dipin, tidak berubah); `candle` = 6 fitur (`d_gap`, `d_clv`, `d_body`,
+  `d_upper_wick`, `d_lower_wick`, `d_range_atr`), memakai masker warm-up yang sama sehingga himpunan baris setiap arm
+  identik. `technical_xgboost.FEATURE_BLOCKS = ("base",)`: blok `candle` MATI di produksi; bundle model mencatat
+  blok-nya dan `predict` mengikuti bundle.
+- `scripts/studies/technical_block_ablation.py`: ablasi blok pada jendela yang sama (baris, fold, dan config sama; kedua
+  arm lewat mesin produksi); delta AUC dan logloss dengan bootstrap blok bergerak per tanggal; vonis `contributes` hanya
+  bila KEDUA interval (95%) searah; `--span-check` menunjukkan berapa blok OOF yang dihasilkan suatu riwayat.
+- `scripts/studies/probe_intraday_bars.py`: langkah 0 baca-saja untuk mengukur konvensi bar 1H/4H (zona waktu, awal
+  atau akhir bar, bar per sesi, bar terbaru datar, dan apakah salinan Gold mempertahankan instan serta tanggal Silver).
+
+**Verifikasi.**
+- Baseline klon pristine 3428 dikumpulkan / 3426 lulus / 2 gagal (`test_check_poetry_env`, tanpa Poetry di sandbox).
+- Sesudah: 3498 dikumpulkan (+70), 3496 lulus, 2 kegagalan yang sama.
+- 49 mutan pada salinan sekali-pakai (rename 3, blok fitur 12, logika ablasi 16, jalur CLI 7, pin isolasi 11): semua
+  terbunuh. Dua mutan ekuivalen ditangani: filter jendela arm B yang redundan dengan irisan baris dihapus, dan guard
+  `d_clv` (redundan dengan masker finite akhir) dicatat sebagai pertahanan berlapis. Mutan yang selamat pada percobaan
+  pertama (aturan vonis satu arah, tanda delta, level interval, ATR mendekati nol) ditutup dengan skenario baru.
+- Belum diverifikasi: ablasi pada data live (label belum dimaterialisasi), kolom `tech_signals_1D` live (hanya 1M
+  yang dibaca), probe pada file Gold live (diuji pada file Gold yang DIEMULASI), builder intraday (belum ada).
+
 ## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — satu artefak bertanggal untuk simbol aktif: `active_{date}.parquet` legacy dipensiunkan, `active_ohlcv_{date}.parquet` menggantikannya sepenuhnya (GMI-AS-002) (November 2026)
 
 **Latar.** Temuan Ovi (8 Nov 2026): `active{date}.parquet` dan `active_ohlcv{date}.parquet` di

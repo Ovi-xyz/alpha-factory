@@ -400,18 +400,18 @@ def _gold_hmm_xgboost_predict(run_date: date) -> None:
     hmm_xgboost_run(run_date)
 
 
-def _gold_gold_xgboost_fit(run_date: date) -> None:
+def _gold_technical_xgboost_fit(run_date: date) -> None:
     """ADD GMI-XGB-001 (ADR-053) — weekly fit of the technical-domain specialist (job name per the ADR).
     Reads only the technical store + the published label file; skips (recorded) on missing/stale labels.
     The FIRST run builds the whole out-of-fold history (long); later runs add only new blocks."""
-    from src.gold.intelligence.gold_xgboost import run_fit as gold_xgboost_fit
-    gold_xgboost_fit(run_date)
+    from src.gold.intelligence.technical_xgboost import run_fit as technical_xgboost_fit
+    technical_xgboost_fit(run_date)
 
 
-def _gold_gold_xgboost_predict(run_date: date) -> None:
+def _gold_technical_xgboost_predict(run_date: date) -> None:
     """ADD GMI-XGB-001 (ADR-053) — daily score of the technical-domain specialist. Soft: no model -> nothing written."""
-    from src.gold.intelligence.gold_xgboost import run as gold_xgboost_run
-    gold_xgboost_run(run_date)
+    from src.gold.intelligence.technical_xgboost import run as technical_xgboost_run
+    technical_xgboost_run(run_date)
 
 
 def _health_report(run_date: date) -> None:
@@ -1025,9 +1025,9 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
 
     # ── ADR-053 (GMI-XGB-001): technical-domain specialist ────────────────────
     # Same shape as the regime-domain pair, rooted in the technical chain (gold_signals) only.
-    "gold_gold_xgboost_fit": {
-        "description":     "gold_xgboost fit — walk-forward OOF + final bagged XGBoost on triple-barrier labels (ADR-053)",
-        "fn":              _gold_gold_xgboost_fit,
+    "gold_technical_xgboost_fit": {
+        "description":     "technical_xgboost fit — walk-forward OOF + final bagged XGBoost on triple-barrier labels (ADR-053)",
+        "fn":              _gold_technical_xgboost_fit,
         "depends_on":      ["gold_signals"],
         "stale_tolerance": {"gold_signals": 3},
         "run_on_weekdays": [6],
@@ -1035,9 +1035,9 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "est_minutes":     30,
     },
 
-    "gold_gold_xgboost_predict": {
-        "description":     "gold_xgboost predict — P(win) per symbol x direction from the latest completed bars (ADR-053)",
-        "fn":              _gold_gold_xgboost_predict,
+    "gold_technical_xgboost_predict": {
+        "description":     "technical_xgboost predict — P(win) per symbol x direction from the latest completed bars (ADR-053)",
+        "fn":              _gold_technical_xgboost_predict,
         "depends_on":      ["gold_signals"],
         "layer":           "gold",
         "est_minutes":     2,
@@ -1142,7 +1142,7 @@ DAILY_SEQUENCE: list[str] = [
     # breadth_divergence) is normally satisfied in the scheduled path — not a hard ordering
     # requirement (see that job's own entry).
     "signal_aggregation",
-    "gold_gold_xgboost_predict",  # ADR-053: technical-domain specialist, scored from the bars just built
+    "gold_technical_xgboost_predict",  # ADR-053: technical-domain specialist, scored from the bars just built
 
     # Gold dual-HMM regime engine (ADR-051; the platform's regime since ADR-055 v2).
     # silver_fred_daily (ADR-058 HMM-R03) sits HERE, not in the Silver block: a failure of this slice
@@ -1208,7 +1208,7 @@ WEEKLY_SEQUENCE: list[str] = [
     "gold_hmm_market_fit",      # same: needs a raw_market sentinel within 3 days, nothing depends on it
     "gold_hmm_walk_forward",    # ADR-053 D2: honest as-of regime history (needs both raw sentinels within 3 days)
     "gold_hmm_xgboost_fit",     # ADR-053: needs that day's walk-forward sentinel; nothing depends on it
-    "gold_gold_xgboost_fit",    # ADR-053: technical specialist fit; needs a gold_signals sentinel within 3 days
+    "gold_technical_xgboost_fit",    # ADR-053: technical specialist fit; needs a gold_signals sentinel within 3 days
 
     # Lanjutkan dengan DAILY_SEQUENCE setelah ini (per SOP §14.4.2)
 ] + DAILY_SEQUENCE
