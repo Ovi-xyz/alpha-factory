@@ -58,11 +58,13 @@ class TestJobRegistryWiring:
     def test_present_exactly_once_in_weekly_sequence(self):
         assert WEEKLY_SEQUENCE.count("gatekeeper") == 1
 
-    def test_health_report_dependency_unchanged(self):
+    def test_health_report_has_no_hard_dependency_on_the_gatekeeper_or_anything_else(self):
         """health_report reads gate status softly — it must not hard-depend
         on the Gatekeeper (a reporting/alerting job shouldn't be blocked by
-        a companion job's failure)."""
-        assert JOB_REGISTRY["health_report"]["depends_on"] == ["gold_screener"]
+        a companion job's failure). ADR-060: nor on gold_screener — that sentinel is missing on exactly
+        the failed days the FAILED-jobs alert exists for; ordering comes from position (last)."""
+        assert JOB_REGISTRY["health_report"]["depends_on"] == []
+        assert "gatekeeper" not in JOB_REGISTRY["health_report"]["depends_on"]
 
 
 @pytest.fixture

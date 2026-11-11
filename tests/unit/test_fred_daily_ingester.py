@@ -134,12 +134,12 @@ class TestJobRegistryWiring:
         assert "bronze_fred_daily" in DAILY_SEQUENCE
 
     def test_not_in_weekly_only_portion(self):
-        """Must not be double-scheduled: WEEKLY_SEQUENCE = weekly-only jobs
-        + DAILY_SEQUENCE, so appearing once (via DAILY_SEQUENCE) is correct;
-        it must not also appear in the weekly-only prefix."""
-        from src.scheduler.job_registry import WEEKLY_SEQUENCE, DAILY_SEQUENCE
-        weekly_only_prefix = WEEKLY_SEQUENCE[: len(WEEKLY_SEQUENCE) - len(DAILY_SEQUENCE)]
-        assert "bronze_fred_daily" not in weekly_only_prefix
+        """Must not be double-scheduled: WEEKLY_SEQUENCE lists every sequenced job once
+        (weekly head + DAILY_SEQUENCE + weekly tail), so appearing once (via DAILY_SEQUENCE) is
+        correct; it must not also be one of the weekly-only jobs (ADR-060)."""
+        from src.scheduler.job_registry import WEEKLY_ONLY_JOBS, WEEKLY_SEQUENCE
+        assert "bronze_fred_daily" not in WEEKLY_ONLY_JOBS
+        assert WEEKLY_SEQUENCE.count("bronze_fred_daily") == 1
 
     def test_included_in_bronze_layer_scope(self):
         """`--job bronze` (GMI-JR-003) must pick this job up."""

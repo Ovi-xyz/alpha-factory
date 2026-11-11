@@ -42,11 +42,10 @@ load_dotenv()
 from src.scheduler.dependency_guard import DependencyGuard
 from src.scheduler.job_registry import (
     JOB_REGISTRY,
-    PIPELINE_SEQUENCE,
-    due_weekly_head_jobs,
-    DAILY_SEQUENCE,
-    WEEKLY_SEQUENCE,
     LAYER_JOB_NAMES,
+    WEEKLY_TAIL,
+    jobs_for,
+    layer_jobs_for,
     _passes_schedule,
 )
 from src.utils.pipeline_logger import PipelineLogger
@@ -141,46 +140,51 @@ def run_job(
         raise
 
 
-def run_all(force: bool = False, run_date: date | None = None) -> None:
-    """
-    Jalankan seluruh PIPELINE_SEQUENCE secara sequential.
-    Jobs dengan schedule constraint yang tidak terpenuhi di-skip otomatis.
+def _run_chain(job_names: list[str], *, force: bool, run_date: date) -> None:
+    """Run `job_names` in order with the failure semantics shared by `--job all` and the layer runs
+    (ADR-060: one implementation, so the commands cannot drift apart); raise the FIRST failure at the end.
 
-    FIX R-F02: parameter force diteruskan ke setiap run_job() dalam loop.
-    Sebelumnya, run_all(force=True) tidak berpengaruh karena loop memanggil
-    run_job dengan force=False hardcoded — membuat --force all tidak berfungsi.
-    """
-    run_date = run_date or date.today()
-    pipeline_logger.banner(f"FULL PIPELINE RUN — {run_date}")
+    ADD GMI-GATE-001 (ADR-050) — run_on_failure. Sebelumnya run_all() berhenti di job gagal pertama
+    (SystemExit dari dependency guard, atau exception dari job itu sendiri), sehingga job yang
+    tugasnya MENGAMATI pipeline yang gagal (gatekeeper) justru tidak pernah jalan di hari yang paling
+    membutuhkannya. Sekarang: setelah kegagalan pertama, job lain di-skip KECUALI yang ber-flag
+    "run_on_failure" di JOB_REGISTRY; kegagalan pertama tetap di-raise di akhir (exit code / tipe
+    exception tidak berubah), dan kegagalan job run_on_failure setelahnya TIDAK menimpanya.
+    KeyboardInterrupt (BaseException) sengaja tidak ditangkap — operator yang membatalkan tidak
+    boleh memicu job apa pun.
 
-    # ADD GMI-GATE-001 (ADR-050) — run_on_failure. Sebelumnya run_all() berhenti
-    # di job gagal pertama (SystemExit dari dependency guard, atau exception
-    # dari job itu sendiri), sehingga job yang tugasnya MENGAMATI pipeline
-    # yang gagal (gatekeeper) justru tidak pernah jalan di hari yang paling
-    # membutuhkannya. Sekarang: setelah kegagalan pertama, job lain di-skip
-    # KECUALI yang ber-flag "run_on_failure" di JOB_REGISTRY; kegagalan
-    # pertama tetap di-raise di akhir (exit code / tipe exception tidak
-    # berubah), dan kegagalan job run_on_failure setelahnya TIDAK menimpanya.
-    # KeyboardInterrupt (BaseException) sengaja tidak ditangkap — operator
-    # yang membatalkan tidak boleh memicu job apa pun.
+    ADD ADR-060 — weekly tail isolation. The weekly tail (cross-asset weeklies, HMM fits, specialist
+    fits) runs AFTER the daily chain, so its jobs cannot block daily output; they are also independent
+    of each other. A first failure INSIDE the tail therefore does not skip the other tail jobs (one
+    failed fit must not hide the rest — a job whose own dependency failed is still refused by the
+    dependency guard). A first failure OUTSIDE the tail skips the tail like every other job.
+    """
+    tail = frozenset(WEEKLY_TAIL)
     first_failure: BaseException | None = None
-    # ADD GHR-04 (ADR-059): weekly jobs that are due today and need no upstream (the Bronze weekly
-    # set) run FIRST, so the Gatekeeper at the end of this chain sees their sentinels (GK3).
-    for job_name in [*due_weekly_head_jobs(run_date), *PIPELINE_SEQUENCE]:
+    first_failure_in_tail = False
+    for job_name in job_names:
         if first_failure is not None and not JOB_REGISTRY[job_name].get("run_on_failure", False):
-            continue
+            if not (first_failure_in_tail and job_name in tail):
+                continue
         try:
             run_job(job_name, force=force, run_date=run_date)  # FIX R-F02
         except (SystemExit, Exception) as exc:
             if first_failure is None:
                 first_failure = exc
-                pipeline_logger.warn(
-                    f"'{job_name}' gagal — sisa job di-skip kecuali yang ber-flag "
-                    f"run_on_failure (gatekeeper). Kegagalan ini tetap di-raise di akhir."
-                )
+                first_failure_in_tail = job_name in tail
+                if first_failure_in_tail:
+                    pipeline_logger.warn(
+                        f"'{job_name}' (weekly tail) gagal — job tail lain tetap dijalankan; "
+                        f"kegagalan ini tetap di-raise di akhir."
+                    )
+                else:
+                    pipeline_logger.warn(
+                        f"'{job_name}' gagal — sisa job di-skip kecuali yang ber-flag "
+                        f"run_on_failure (gatekeeper, health_report). Kegagalan ini tetap di-raise di akhir."
+                    )
             else:
                 logger.error(
-                    f"[Runner] run_on_failure job '{job_name}' juga gagal ({exc!r}) — "
+                    f"[Runner] job '{job_name}' juga gagal ({exc!r}) — "
                     f"kegagalan pertama dipertahankan, tidak ditimpa."
                 )
 
@@ -188,15 +192,36 @@ def run_all(force: bool = False, run_date: date | None = None) -> None:
         raise first_failure
 
 
+def run_all(force: bool = False, run_date: date | None = None) -> None:
+    """
+    Jalankan rantai kanonik hari itu — job_registry.jobs_for(run_date): weekly head (due) ->
+    DAILY_SEQUENCE -> weekly tail (due) -> util (gatekeeper, health_report). Jobs dengan schedule
+    constraint yang tidak terpenuhi tidak masuk daftar.
+
+    ADR-060 (GMI-JOB-ALIGN-001): `--job all` kini menjalankan HIMPUNAN YANG SAMA dengan
+    `--job bronze` + `--job silver` + `--job gold` (+ util), dalam urutan yang sama. Sebelumnya
+    silver_macro / silver_global_rates dan seluruh job weekly Gold tidak pernah jalan di bawah `all`
+    (tebing 7 hari di silver_validate) dan Gatekeeper menilai job weekly yang belum jadwalnya.
+
+    FIX R-F02: parameter force diteruskan ke setiap run_job() dalam loop.
+    Sebelumnya, run_all(force=True) tidak berpengaruh karena loop memanggil
+    run_job dengan force=False hardcoded — membuat --force all tidak berfungsi.
+    `force` tidak menambah job weekly yang tidak jatuh tempo ke daftar `all`.
+    """
+    run_date = run_date or date.today()
+    pipeline_logger.banner(f"FULL PIPELINE RUN — {run_date}")
+    _run_chain(jobs_for(run_date), force=force, run_date=run_date)
+
+
 def run_layer(layer: str, force: bool = False, run_date: date | None = None) -> None:
     """
     ADD GMI-JR-003: jalankan seluruh job pada satu layer (bronze/silver/gold)
     secara sequential — untuk live testing per-layer tanpa `--job all`.
 
-    Job list diambil dari job_registry.LAYER_JOB_NAMES (derived dari
-    WEEKLY_SEQUENCE, lihat komentar di sana) — urutan sudah menghormati
-    dependency chain karena WEEKLY_SEQUENCE/DAILY_SEQUENCE sendiri disusun
-    dependency-aware.
+    ADR-060: tanpa --force, daftar job = job_registry.layer_jobs_for(layer, run_date) — rantai kanonik
+    yang SAMA dengan `--job all`, dibatasi ke satu layer (urutan sama, hanya job yang jatuh tempo hari
+    itu). Dengan --force, daftar = LAYER_JOB_NAMES[layer] (seluruh anggota layer, perilaku lama:
+    --force melewati schedule guard). Aturan kegagalan = `_run_chain` (satu implementasi dengan `all`).
 
     Dependency check antar-layer TETAP berlaku tanpa --force: `--job silver`
     akan sys.exit(1) jika bronze belum jalan hari ini, `--job gold` akan
@@ -205,8 +230,8 @@ def run_layer(layer: str, force: bool = False, run_date: date | None = None) -> 
     Independence Guarantee), persis seperti perilaku menjalankan job
     individual apapun tanpa --force hari ini.
     """
-    job_names = LAYER_JOB_NAMES.get(layer)
-    if not job_names:
+    members = LAYER_JOB_NAMES.get(layer)
+    if not members:
         pipeline_logger.error(
             f"Layer '{layer}' tidak dikenali atau tidak punya job terdaftar."
         )
@@ -215,8 +240,56 @@ def run_layer(layer: str, force: bool = False, run_date: date | None = None) -> 
     run_date = run_date or date.today()
     pipeline_logger.banner(f"{layer.upper()} LAYER RUN — {run_date}")
 
-    for job_name in job_names:
-        run_job(job_name, force=force, run_date=run_date)
+    if force:
+        job_names = list(members)
+    else:
+        job_names = layer_jobs_for(layer, run_date)
+        not_due = [j for j in members if j not in job_names]
+        if not_due:
+            pipeline_logger.info(
+                f"{len(not_due)} job layer '{layer}' tidak jatuh tempo pada {run_date} "
+                f"(schedule guard): {', '.join(not_due)}"
+            )
+    _run_chain(job_names, force=force, run_date=run_date)
+
+
+def _register_views(run_date: date) -> None:
+    """Register the DuckDB views; a failure is a warning, never a failed run (as `--job all` always did)."""
+    try:
+        from src.gold.views import register_views
+        register_views(run_date)
+    except Exception as e:
+        pipeline_logger.warn(f"Views registration skipped: {e}")
+
+
+def _after_layer_run(layer: str, run_date: date, *, failed: bool, gate: bool) -> None:
+    """ADR-060: the post-steps `--job all` has always run implicitly, for `--job <layer>`.
+
+      - Gatekeeper after a FAILED layer run (record the bad day — until now an operator had to remember
+        `--job gatekeeper`) and after a completed `gold` layer run (the chain is whole). NEVER after a
+        successful bronze/silver run: that would record the layers not yet run as missing/block for a
+        day that is simply not finished. A Gatekeeper failure is logged, never raised (it must not mask
+        the layer run's own outcome); `gate=False` (--no-gate) skips it.
+      - DuckDB views after a completed `gold` layer run (`all` registers them after a full run).
+    """
+    if gate and (failed or layer == "gold"):
+        try:
+            run_job("gatekeeper", force=False, run_date=run_date)
+        except (SystemExit, Exception) as exc:
+            logger.error(f"[Runner] gatekeeper after '{layer}' layer run failed ({exc!r}) — ignored")
+    if layer == "gold" and not failed:
+        _register_views(run_date)
+
+
+def run_layer_command(layer: str, *, force: bool, run_date: date, gate: bool = True) -> None:
+    """`--job <layer>`: run_layer + _after_layer_run. The layer run's own exception/SystemExit is
+    re-raised unchanged after the post-steps; KeyboardInterrupt triggers nothing."""
+    try:
+        run_layer(layer, force=force, run_date=run_date)
+    except (SystemExit, Exception):
+        _after_layer_run(layer, run_date, failed=True, gate=gate)
+        raise
+    _after_layer_run(layer, run_date, failed=False, gate=gate)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -231,6 +304,7 @@ Examples:
   python runner.py --job bronze
   python runner.py --job silver
   python runner.py --job gold
+  python runner.py --job gold --no-gate
   python runner.py --job all
   python runner.py --job silver_ohlcv --force
   python runner.py --job all --date 2026-05-13
@@ -250,6 +324,8 @@ Examples:
     p.add_argument("--reset-all", action="store_true",    help="Reset all sentinels for today")
     p.add_argument("--dashboard", action="store_true",    help="Show pipeline health dashboard")
     p.add_argument("--views",     action="store_true",    help="Register DuckDB views")
+    p.add_argument("--no-gate",   action="store_true",
+                   help="Layer runs: do not auto-run the Gatekeeper after a failed layer run / a completed gold run")
     p.add_argument(
         "--date",
         type=str,
@@ -312,16 +388,12 @@ def main() -> None:
         guard.reset_job(args.reset, run_date)
 
     elif args.job in LAYER_JOB_NAMES:
-        run_layer(args.job, force=args.force, run_date=run_date)
+        run_layer_command(args.job, force=args.force, run_date=run_date, gate=not args.no_gate)
 
     elif args.job == "all":
         run_all(force=args.force, run_date=run_date)
         # Auto-register DuckDB views after full pipeline run
-        try:
-            from src.gold.views import register_views
-            register_views(run_date)
-        except Exception as e:
-            pipeline_logger.warn(f"Views registration skipped: {e}")
+        _register_views(run_date)
 
     elif args.job:
         run_job(

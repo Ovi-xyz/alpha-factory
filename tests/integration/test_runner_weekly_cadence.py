@@ -262,6 +262,11 @@ class TestLayerCommands:
         # only place these two sentinels get written all week.
         run_job("bronze_macro_weekly", force=False, run_date=sunday)
         run_job("bronze_bis_rates",    force=False, run_date=sunday)
+        # ADR-060: silver_macro / silver_global_rates declare their Sunday cadence too — the Sunday
+        # run is the only place their sentinels get written all week (silver_validate / gold_raw_*
+        # rest on silver_macro through a 7-day stale_tolerance), exactly like the Bronze pair.
+        run_job("silver_macro",        force=False, run_date=sunday)
+        run_job("silver_global_rates", force=False, run_date=sunday)
 
         run_layer("bronze", force=False, run_date=run_date)
         run_layer("silver", force=False, run_date=run_date)
@@ -281,6 +286,8 @@ class TestLayerCommands:
         weekly_only = {
             "bronze_macro_weekly",
             "bronze_bis_rates",
+            "silver_macro",           # ADR-060: Sunday-gated (run_on_weekdays [6])
+            "silver_global_rates",    # ADR-060: Sunday-gated (run_on_weekdays [6])
             "gold_cross_asset_correlation",
             "gold_lead_lag",
             "gold_forecast",

@@ -614,6 +614,13 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         # gap visible. 7 days = one full weekly cycle + 1-day buffer, same
         # rationale as the existing precedent.
         "stale_tolerance": {"bronze_macro_weekly": 7},
+        # ADD GMI-JOB-ALIGN-001 (ADR-060): the weekly cadence is now DECLARED, like its Bronze
+        # parent's. It was SOP-only (the RISK-23/34 gap class): `--job silver` ran it every day,
+        # `--job all` never ran it, so an `all`-only operator hit the 7-day cliff below at
+        # silver_validate / gold_raw_macro / gold_raw_market. The daily-FRED reason to run it
+        # every day ended with silver_fred_daily (HMM-R03). Sunday, in the weekly head of `all`,
+        # right after its Bronze parent; refresh off-day with `--job silver_macro --force`.
+        "run_on_weekdays": [6],   # 0=Mon .. 6=Sunday
         "layer":       "silver",
         "est_minutes": 10,
     },
@@ -649,6 +656,8 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         # Sunday-gated (run_on_weekdays: [6]), so this dependency needs the
         # same staleness window to remain runnable on non-Sunday days.
         "stale_tolerance": {"bronze_bis_rates": 7},
+        # ADD GMI-JOB-ALIGN-001 (ADR-060): Sunday cadence declared — same rationale as silver_macro.
+        "run_on_weekdays": [6],   # 0=Mon .. 6=Sunday
         "layer":       "silver",
         "est_minutes": 3,
     },
@@ -937,9 +946,10 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
     },
 
     # Weekly fit (Sunday only — run_on_weekdays [6]; --force to bypass, e.g. the first live run).
-    # Sits in the WEEKLY_SEQUENCE prefix, i.e. BEFORE that day's gold_raw_macro, so it depends on
-    # the most recent raw_macro sentinel within 3 days (Fri/Sat) — the cross-cadence
-    # stale_tolerance pattern of FIX NEW-1.
+    # ADR-060: sits in the Sunday weekly TAIL, i.e. AFTER that day's classify jobs — so it never sees
+    # an unscored gap (HMM-R01 guard) — and `depends_on` the same-day raw_macro sentinel is met by
+    # position; the 3-day stale_tolerance (the cross-cadence pattern of FIX NEW-1) is kept for the
+    # operator who runs the fit alone, off the chain (`--job gold_hmm_macro_fit --force`).
     "gold_hmm_macro_fit": {
         "description":     "Dual-HMM macro fit — per-domain GaussianHMM (weekly, Sunday), persist models, append history (ADR-051)",
         "fn":              _gold_hmm_macro_fit,
@@ -1058,10 +1068,11 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
     # run_on_failure=True: run_all() stops at the first failed job, but
     # still runs jobs carrying this flag before re-raising the original
     # failure — so `--job all` records a gate_status row on a bad day too.
-    # Only this job carries it (pinned by a test); adding it elsewhere
-    # should be a deliberate decision. Layer runs (`--job bronze|silver|gold`)
-    # do not include util jobs — after a failed layer run, invoke
-    # `--job gatekeeper` explicitly (works standalone, no dependencies).
+    # Only the two util jobs carry it (gatekeeper, health_report — pinned by a test); adding
+    # it elsewhere should be a deliberate decision. Layer runs (`--job bronze|silver|gold`) do
+    # not include util jobs; since ADR-060 `runner.main` runs the gatekeeper itself after a FAILED
+    # layer run and after a completed `gold` layer run (opt out: --no-gate). Standalone
+    # `--job gatekeeper` still works with no dependencies.
     "gatekeeper": {
         "description": "Gatekeeper — cascading Bronze/Silver/Gold gate status (pass/warn/block) + hysteresis",
         "fn":          _gatekeeper,
@@ -1071,12 +1082,19 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         "run_on_failure": True,
     },
 
+    # ADD GMI-JOB-ALIGN-001 (ADR-060): same contract as gatekeeper. The FAILED-jobs alert
+    # (ADR-059 GHR-02) reads TODAY's pipeline_runs rows, but the old `depends_on: [gold_screener]`
+    # + no run_on_failure meant `run_all` skipped this job after any failure and a standalone
+    # `--job health_report` exited on the dependency check — the alert could not fire on the one
+    # kind of day it exists for. Ordering now comes from position (last, after the gatekeeper), as
+    # for the gatekeeper itself; the report only reads logs and stores, so it needs no upstream.
     "health_report": {
         "description": "Daily summary — run stats, storage check, optional Telegram alert",
         "fn":          _health_report,
-        "depends_on":  ["gold_screener"],
+        "depends_on":  [],
         "layer":       "util",
         "est_minutes": 2,
+        "run_on_failure": True,
     },
 }
 
@@ -1170,14 +1188,17 @@ DAILY_SEQUENCE: list[str] = [
     # gold_cross_asset_correlation ada di WEEKLY_SEQUENCE, tidak di sini
 ]
 
-WEEKLY_SEQUENCE: list[str] = [
+# ── Weekly-only jobs and the canonical chain (ADR-060, GMI-JOB-ALIGN-001) ─────────────────
+# Every weekly-cadence job, in dependency-aware order. This is the ONE list the head / tail split
+# below derives from; it is not a run order by itself.
+WEEKLY_ONLY_JOBS: list[str] = [
     # Bronze macro — Minggu
     "bronze_macro_weekly",
     "bronze_bis_rates",     # ADD GMI-JR-001: independent of bronze_macro_weekly, same SOP slot
     "bronze_eia",           # Rabu via schedule guard; tetap masuk weekly SOP
 
     # Silver macro
-    "silver_macro",         # FIX R-F03: hanya di weekly, bukan daily
+    "silver_macro",         # FIX R-F03: hanya di weekly, bukan daily (ADR-060: guard Minggu dideklarasikan)
     "silver_global_rates",  # ADD GMI-JR-001: dep bronze_bis_rates, dedicated PIT table (§9.1)
 
     # silver_fundamental line DIHAPUS — ADR-043 (Finnhub full retirement);
@@ -1202,60 +1223,101 @@ WEEKLY_SEQUENCE: list[str] = [
     "gold_forecast",
 
     # ADD GMI-HMM2-001 (ADR-051) — dual-HMM macro fit, Sunday only (run_on_weekdays [6]).
-    # Last in the weekly prefix: it needs a recent raw_macro sentinel (stale_tolerance 3) and
-    # nothing downstream depends on it — the daily classify job scores with whatever model exists.
+    # Needs a recent raw_macro sentinel (stale_tolerance 3) and nothing downstream depends on it —
+    # the daily classify job scores with whatever model exists. ADR-060: it now runs in the Sunday
+    # TAIL, after that day's classify jobs, so it never sees an unscored gap (HMM-R01 gap guard).
     "gold_hmm_macro_fit",
     "gold_hmm_market_fit",      # same: needs a raw_market sentinel within 3 days, nothing depends on it
     "gold_hmm_walk_forward",    # ADR-053 D2: honest as-of regime history (needs both raw sentinels within 3 days)
     "gold_hmm_xgboost_fit",     # ADR-053: needs that day's walk-forward sentinel; nothing depends on it
     "gold_technical_xgboost_fit",    # ADR-053: technical specialist fit; needs a gold_signals sentinel within 3 days
+]
 
-    # Lanjutkan dengan DAILY_SEQUENCE setelah ini (per SOP §14.4.2)
-] + DAILY_SEQUENCE
+
+def _guard_is_weekday_only(job: dict) -> bool:
+    """True if run_on_weekdays is the job's ONLY schedule constraint (due on exactly those days)."""
+    return {k for k in job if k.startswith("run_on_")} == {"run_on_weekdays"}
+
+
+def _split_weekly(weekly_only: list[str], registry: dict) -> tuple[list[str], list[str]]:
+    """(head, tail) of the weekly-only jobs, derived from registry structure, not hand-listed.
+
+    HEAD  = jobs that can run BEFORE the daily chain without ever failing a dependency: due by a
+            run_on_weekdays guard and nothing else, and every depends_on is itself in the head
+            (built in `weekly_only` order). Today: the Bronze weekly set plus silver_macro and
+            silver_global_rates, whose only parents are Bronze weekly jobs the head has just run.
+    TAIL  = everything else (the weekly Gold jobs). They hard-depend on same-day DAILY jobs
+            (silver_active_symbols, gold_signals, gold_raw_*, ...), so they run AFTER the daily
+            chain, where those dependencies hold by construction instead of via a staleness
+            window, and the HMM fits see a classify-complete store.
+    """
+    head: list[str] = []
+    for name in weekly_only:
+        job = registry[name]
+        if _guard_is_weekday_only(job) and all(dep in head for dep in job.get("depends_on", [])):
+            head.append(name)
+    return head, [n for n in weekly_only if n not in head]
+
+
+WEEKLY_HEAD, WEEKLY_TAIL = _split_weekly(WEEKLY_ONLY_JOBS, JOB_REGISTRY)
+
+# DAILY_SEQUENCE ends with the util jobs (gatekeeper, health_report); a test pins that they are
+# contiguous at the end, so the split below loses nothing.
+_DAILY_CORE: list[str] = [j for j in DAILY_SEQUENCE if JOB_REGISTRY[j]["layer"] != "util"]
+_DAILY_UTIL: list[str] = [j for j in DAILY_SEQUENCE if JOB_REGISTRY[j]["layer"] == "util"]
+
+# THE canonical chain — every sequenced job exactly once, in run order:
+#     weekly head  ->  daily jobs  ->  weekly tail  ->  util (gatekeeper, health_report)
+# `runner.py --job all` runs jobs_for(run_date) of it; `--job bronze|silver|gold` run the same list
+# filtered by layer. One list, so the commands cannot drift apart (before ADR-060 the layer lists
+# came from "weekly prefix + DAILY_SEQUENCE" while `all` ran DAILY_SEQUENCE: on a Sunday 34 vs 26
+# jobs, and silver_macro / the weekly Gold jobs never ran under `all` at all).
+WEEKLY_SEQUENCE: list[str] = WEEKLY_HEAD + _DAILY_CORE + WEEKLY_TAIL + _DAILY_UTIL
 
 # PIPELINE_SEQUENCE dipertahankan sebagai alias DAILY_SEQUENCE untuk backward-compat
-# runner.py --job all menggunakan DAILY_SEQUENCE
 PIPELINE_SEQUENCE = DAILY_SEQUENCE
 
-# The weekly-only prefix of WEEKLY_SEQUENCE (everything before DAILY_SEQUENCE).
-WEEKLY_PREFIX: list[str] = WEEKLY_SEQUENCE[: len(WEEKLY_SEQUENCE) - len(DAILY_SEQUENCE)]
+
+def jobs_for(run_date: date) -> list[str]:
+    """The canonical chain for run_date: every job of WEEKLY_SEQUENCE whose schedule guard passes,
+    in run order (weekly head, daily jobs, weekly tail, util). What `runner.py --job all` runs."""
+    return [
+        name for name in dict.fromkeys(WEEKLY_SEQUENCE)
+        if _passes_schedule(JOB_REGISTRY[name], run_date)
+    ]
+
+
+def layer_jobs_for(layer: str, run_date: date) -> list[str]:
+    """jobs_for(run_date) restricted to one layer (bronze|silver|gold; util has no layer run).
+    What `runner.py --job <layer>` runs without --force: the same jobs, in the same order, as `all`."""
+    return [name for name in jobs_for(run_date) if JOB_REGISTRY[name]["layer"] == layer]
 
 
 def due_weekly_head_jobs(run_date: date) -> list[str]:
-    """Weekly-only jobs `runner.py --job all` runs BEFORE the daily chain on run_date (ADR-059 GHR-04).
+    """Weekly head jobs due on run_date: they run BEFORE the daily chain (ADR-059 GHR-04, widened by
+    ADR-060). Sunday: bronze_macro_weekly, bronze_bis_rates, silver_macro, silver_global_rates;
+    Wednesday: bronze_eia.
 
-    Why: `--job all` runs DAILY_SEQUENCE only, so on a Sunday the Gatekeeper (a daily job) evaluated
-    BEFORE the weekly sentinels existed (18 Oct: gate 04:52, bronze_macro_weekly sentinel 05:28) and
-    read the due weekly jobs as missing -> raw block.
+    Why a head exists: the Gatekeeper (a daily job) once evaluated BEFORE the weekly sentinels
+    existed (18 Oct: gate 04:52, bronze_macro_weekly sentinel 05:28) and read the due weekly jobs
+    as missing -> raw block. ADR-060 added the two Silver jobs: their only parents are the Bronze
+    weekly jobs just run, and leaving them out made `--job all` unable to refresh silver_macro at
+    all, so silver_validate / gold_raw_* died on the 8th day (stale_tolerance 7)."""
+    return [name for name in WEEKLY_HEAD if _passes_schedule(JOB_REGISTRY[name], run_date)]
 
-    Deliberately NOT the whole weekly prefix. The weekly Gold jobs (gold_cross_asset_correlation,
-    the HMM fits ...) hard-depend on same-day DAILY Silver jobs (silver_active_symbols,
-    silver_context_anchors ...) without a stale_tolerance, so placing them ahead of the daily chain
-    would stop the Sunday run at the first dependency guard. Only jobs that are
-      (a) due today by a run_on_weekdays guard and nothing else,
-      (b) free of any depends_on,
-    can be run first without ever failing a dependency. Today that is the Bronze weekly set
-    (bronze_macro_weekly, bronze_bis_rates on Sunday; bronze_eia on Wednesday). The rest of the
-    weekly sequence stays on its layer-run path; the Gatekeeper's `pending` status covers it.
-    """
-    out: list[str] = []
-    for name in WEEKLY_PREFIX:
-        job = JOB_REGISTRY[name]
-        if name in DAILY_SEQUENCE or job.get("depends_on"):
-            continue
-        if {k for k in job if k.startswith("run_on_")} != {"run_on_weekdays"}:
-            continue
-        if _passes_schedule(job, run_date):
-            out.append(name)
-    return out
+
+def due_weekly_tail_jobs(run_date: date) -> list[str]:
+    """Weekly tail jobs due on run_date (Sunday: the cross-asset weeklies, the HMM fits and
+    walk-forward, the two specialist fits). They run after the daily chain and before the util jobs."""
+    return [name for name in WEEKLY_TAIL if _passes_schedule(JOB_REGISTRY[name], run_date)]
 
 
 # ── Layer-Scoped Job Names ────────────────────────────────────────────────────
 # ADD GMI-JR-003 — Ovi, this thread: `python src/runner.py --job bronze|silver|gold`
 # for live testing one layer at a time without a full `--job all` run.
 #
-# Derived from WEEKLY_SEQUENCE (the superset — weekly-only jobs + all of
-# DAILY_SEQUENCE, see above) rather than a separately hand-maintained list,
+# Derived from WEEKLY_SEQUENCE (the canonical chain — weekly head, DAILY_SEQUENCE,
+# weekly tail, util; see above) rather than a separately hand-maintained list,
 # so these three names can never drift from DAILY_SEQUENCE/WEEKLY_SEQUENCE
 # the way a hand-copied list would (the same staleness class this project's
 # own preflight/coverage work exists to catch).
@@ -1280,8 +1342,11 @@ def due_weekly_head_jobs(run_date: date) -> list[str]:
 def layer_sequence(layer: str) -> list[str]:
     """
     Return job names tagged `layer` in JOB_REGISTRY, ordered per their first
-    position in WEEKLY_SEQUENCE (the ordered superset of every sequenced job
-    — weekly-only jobs followed by DAILY_SEQUENCE), deduplicated. Jobs that
+    position in WEEKLY_SEQUENCE (the canonical chain of every sequenced job
+    — weekly head, DAILY_SEQUENCE, weekly tail, util), deduplicated. This is
+    the MEMBERSHIP and the order used under --force; a run without --force uses
+    layer_jobs_for(layer, run_date), the same list restricted to the jobs due that
+    day, so it can never differ from `--job all`. Jobs that
     exist in JOB_REGISTRY but are absent from both DAILY_SEQUENCE and
     WEEKLY_SEQUENCE (deliberately unsequenced — see module comment above)
     are excluded, matching `--job all`'s own scope.

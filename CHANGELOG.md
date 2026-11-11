@@ -1,5 +1,76 @@
 # CHANGELOG — Data Platform
 
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — penyelarasan job: `--job all` dan `--job bronze|silver|gold` kini satu rantai kanonik; weekly head/tail; `health_report` jalan di hari gagal (ADR-060, GMI-JOB-ALIGN-001)
+
+**Latar.** Permintaan Ovi (10 Nov 2026): evaluasi misalignment empat perintah `runner.py --job all|bronze|silver|gold`,
+lalu implementasi arah yang direkomendasikan. Nomor ADR-060 dan tag `GMI-JOB-ALIGN-001` adalah usulan.
+
+**Temuan (diukur dengan mengimpor `job_registry` yang nyata; minggu 9-15 Nov 2026).**
+- Keempat perintah adalah empat himpunan job berbeda. Senin-Sabtu: `all` = 24 dan `bronze+silver+gold` = 24, tetapi anggotanya
+  tidak sama (`silver_macro` dan `silver_global_rates` hanya di run layer; `gatekeeper` dan `health_report` hanya di `all`).
+  Minggu: `all` = 26 dan run layer = 34; 10 job (dua job Silver macro dan delapan job weekly Gold) TIDAK PERNAH dijalankan `all`.
+- Operator yang hanya memakai `all` menabrak tebing 7 hari: `silver_macro` tidak pernah di-refresh, dan `silver_validate`,
+  `gold_raw_macro`, `gold_raw_market` menolak di hari ke-8 (`stale_tolerance` 7). Head GHR-04 tidak memuatnya hanya karena
+  keduanya punya `depends_on`, padahal induknya hanya job Bronze weekly yang baru saja dijalankan head.
+- Gatekeeper mengharapkan delapan job weekly Gold (exact-date) setiap Minggu; sentinel Bronze dari head membuat `pending` tidak
+  berlaku, sehingga di operasi `all`-saja Gold selalu `block` mentah tiap Minggu (pola GK3 lagi) dan scope domain `hmm` / `cross_asset`
+  ikut terdampak.
+- `health_report` bergantung pada `gold_screener` dan tidak ber-flag `run_on_failure`: setelah kegagalan apa pun `run_all`
+  melewatinya, dan `--job health_report` sendirian keluar di dependency check. Alert "jobs FAILED" (GHR-02) tidak bisa terkirim
+  di hari gagal.
+- `--job gold` di hari Minggu menaruh sekitar 100 menit pekerjaan weekly (estimasi registry) DI DEPAN rantai harian, tanpa isolasi
+  kegagalan: satu exception di job weekly membatalkan `gold_signals` s/d `gold_screener` hari itu.
+- Run layer tidak menjalankan Gatekeeper, `health_report`, maupun `register_views` (hanya `all` yang melakukannya).
+
+**Keputusan.** (Rekomendasi evaluasi diterima; satu pilihan yang bisa dibalik ditandai.)
+1. Satu rantai kanonik: `WEEKLY_SEQUENCE` = weekly head -> `DAILY_SEQUENCE` (core) -> weekly tail -> util. `all` menjalankan
+   `jobs_for(run_date)`; `bronze|silver|gold` menjalankan daftar yang sama dibatasi per layer (tanpa `--force`) atau seluruh anggota layer
+   (dengan `--force`, perilaku lama).
+2. Weekly Gold dipindah dari prefix ke TAIL (setelah `gold_screener`, sebelum util): dependensi harian terpenuhi menurut posisi,
+   fit HMM tidak pernah melihat celah yang belum di-skor, dan satu kegagalan weekly tidak bisa memblokir keluaran harian.
+3. Head diturunkan dari struktur registry (bukan daftar manual): hanya `run_on_weekdays` dan semua `depends_on` ada di head.
+   Kini mencakup `silver_macro` dan `silver_global_rates`.
+4. **[Pilihan yang bisa dibalik]** `silver_macro` dan `silver_global_rates` mendeklarasikan jadwal Minggu (`run_on_weekdays: [6]`),
+   seperti induk Bronze mereka dan job weekly lain (kelas celah RISK-23/34). Alasan menjalankannya tiap hari (FRED harian) berakhir
+   dengan `silver_fred_daily` (HMM-R03). Konsekuensi: `--job silver` Senin-Sabtu tidak lagi menjalankannya; refresh di luar hari
+   Minggu: `--job silver_macro --force`.
+5. `health_report`: `depends_on: []` dan `run_on_failure: True` (sama seperti `gatekeeper`); urutan dari posisi (terakhir).
+6. `_run_chain` bersama untuk `all` dan run layer: setelah kegagalan pertama, job lain di-skip kecuali `run_on_failure`; kegagalan di
+   DALAM tail tidak men-skip job tail lain (job yang dependensinya gagal tetap ditolak guard); kegagalan di luar tail men-skip tail.
+7. Run layer: Gatekeeper otomatis setelah run layer yang GAGAL dan setelah run `gold` yang selesai (tidak pernah setelah bronze/silver
+   yang sukses, agar hari yang belum selesai tidak tercatat sebagai block); `register_views` setelah `gold` yang selesai; opt-out `--no-gate`.
+8. Gatekeeper: `domain_gate_status` (dibaca job predict spesialis dari DALAM rantai harian, sebelum tail) memperlakukan anggota tail yang
+   jatuh tempo hari itu sebagai `pending`, bukan `missing`; hanya hari evaluasi, hanya anggota tail.
+
+**Perubahan.**
+- `src/scheduler/job_registry.py`: `WEEKLY_ONLY_JOBS`, `_split_weekly`, `WEEKLY_HEAD`, `WEEKLY_TAIL`, `WEEKLY_SEQUENCE` (urutan baru),
+  `jobs_for`, `layer_jobs_for`, `due_weekly_head_jobs` (diperluas), `due_weekly_tail_jobs`; guard Minggu untuk `silver_macro` dan
+  `silver_global_rates`; `health_report` tanpa upstream dan ber-flag `run_on_failure`. `WEEKLY_PREFIX` dihapus (namanya tidak lagi benar;
+  hanya `job_registry` yang memakainya). `DAILY_SEQUENCE` dan `PIPELINE_SEQUENCE` tidak berubah.
+- `src/runner.py`: `_run_chain`, `run_all` dan `run_layer` memakai rantai kanonik, `run_layer_command`, `_after_layer_run`,
+  `_register_views`, flag `--no-gate`.
+- `src/utils/gatekeeper.py`: `pending_jobs` di `_classify_jobs`, `before_weekly_tail` di `_domain_raw_status` / `domain_status`,
+  `domain_gate_status` memakainya; dokumentasi kelas kadens 3 diperbarui (tidak ada anggota di registry).
+- `README.md`: bagian perintah dan daftar job disesuaikan (jumlah lama sudah usang).
+- Tes: modul baru `tests/integration/test_job_alignment_adr060.py` (79 tes); tes yang mengunci fakta lama diperbarui (urutan prefix fit HMM,
+  flag `run_on_failure`, `depends_on` health_report, kelas jendela silver_macro, isi head, irisan `WEEKLY_SEQUENCE`).
+
+**Langkah operator setelah mirror ke live.**
+- Jika sentinel `silver_macro` terakhir lebih tua dari 7 hari pada hari deploy: `python src/runner.py --job silver_macro --force`.
+- Run `all` hari Minggu kini memuat ~13 menit (silver) + tail weekly (~100 menit estimasi; run pertama `technical_xgboost_fit` membangun
+  seluruh OOF). Jadwalkan sesuai.
+- Riwayat Gatekeeper sebelum deploy dibaca apa adanya (Minggu lampau tanpa tail tercatat `missing`); pause marker GHR-09 bisa menandainya `skipped`.
+
+**Belum dikerjakan.** `pipeline_scheduler.py` (APScheduler, opsional) masih membawa daftar job manual yang usang (himpunan kelima; tidak
+memanggil guard jadwal); blast radius posisi `gold_global_regime` (kegagalannya men-skip rantai teknikal, HMM, dan screener di `all`)
+tidak diubah; teks ADR hidup di luar repo (ADR-051 A2 dan ADR-055 masih menyebut fit di "prefix").
+
+**Verifikasi.** Baseline pristine (clone terpisah sebelum edit apa pun, dependensi dipin dari `poetry.lock`): 3498 terkumpul. Sesudah:
+3582 terkumpul (+84), 3580 lulus, 2 gagal (`test_check_poetry_env`, tanpa Poetry di sandbox; sama dengan baseline), satu proses penuh 312 dtk.
+Mutan pada salinan sekali-pakai: 30 dari 30 terbunuh, kontrol tanpa mutan hijau; satu klausa aturan split tidak terlihat di registry nyata
+(semua job weekly hanya ber-guard hari) sehingga mendapat tes registry sintetis sendiri. Tidak diverifikasi: data live, tail Minggu yang nyata di
+belakang rantai harian yang nyata, perilaku `register_views` setelah run layer, durasi estimasi registry. Detail: dev-log 2026-11-10, RISK-47.
+
 ## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — spesialis teknikal diberi nama sesuai domainnya: `gold_xgboost` -> `technical_xgboost`; blok fitur opsional (`candle`, default MATI); skrip ablasi dan probe intraday (ADR-053 Amendment 2)
 
 **Latar.** Usulan Ovi (9 Nov 2026): spesialis `gold_xgboost` tidak pernah melihat `tech_signals_{1H,4H}`, sehingga

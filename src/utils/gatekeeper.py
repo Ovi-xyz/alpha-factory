@@ -229,14 +229,17 @@ def _job_completed(
          registry, a missed weekly run was first flagged 14 days after the
          last success (a full week late) under a 7-day window, versus on
          the due day itself with an exact match.
-      3. Non-daily jobs with no run_on_weekdays-only guard (silver_macro,
-         silver_global_rates carry none; multi-day-window guards) — the
-         WEEKLY_STALE_DAYS staleness window, same convention DependencyGuard
-         already applies to cross-cadence *dependencies* (FIX NEW-1). These
-         have no single due day, and operators legitimately run them daily
-         (silver_macro reads the daily FRED files bronze_fred_daily writes)
-         or weekly — a window is correct for both. Measured: flagged 8 days
-         after last success, i.e. the day after the window lapses.
+      3. Non-daily jobs with no run_on_weekdays-only guard (multi-day-window
+         guards, or a job added without a guard) — the WEEKLY_STALE_DAYS
+         staleness window, same convention DependencyGuard already applies to
+         cross-cadence *dependencies* (FIX NEW-1). These have no single due
+         day, so a window is the only honest test. Measured: flagged 8 days
+         after last success, i.e. the day after the window lapses. NO job in
+         the registry is in this class since ADR-060: silver_macro and
+         silver_global_rates, its former members (they ran daily under
+         `--job silver`, never under `--job all`), now declare their Sunday
+         cadence and fall in class 2 — a missed Sunday is flagged on that
+         Sunday, not 8 days later. The class stays for the guard shapes above.
     """
     from src.scheduler.job_registry import JOB_REGISTRY
 
@@ -338,9 +341,11 @@ def _classify_jobs(
     *,
     allow_pending: bool = False,
     paused_layers: frozenset[str] = frozenset(),
+    pending_jobs: frozenset[str] = frozenset(),
 ) -> dict[str, str]:
     """{job: done | missing | pending | paused}. `pending` only with allow_pending (the evaluation
-    day) and only for a due weekly-only job while the weekly sequence has not started (GHR-04)."""
+    day) and only for a due weekly-only job while the weekly sequence has not started (GHR-04) —
+    or, ADR-060, for any job named in `pending_jobs` (a caller that runs BEFORE them in the chain)."""
     from src.scheduler.job_registry import JOB_REGISTRY
 
     started: bool | None = None
@@ -350,6 +355,8 @@ def _classify_jobs(
             states[job_name] = JOB_PAUSED
         elif _job_completed(guard, job_name, run_date, daily_sequence):
             states[job_name] = JOB_DONE
+        elif job_name in pending_jobs:
+            states[job_name] = JOB_PENDING
         elif allow_pending and _is_weekly_only_guard_job(job_name, daily_sequence):
             if started is None:
                 started = _weekly_sequence_started(guard, run_date, daily_sequence)
@@ -527,14 +534,20 @@ def _domain_raw_status(
     *,
     allow_pending: bool = False, pauses: dict | None = None,
     evidence: list[dict] | None = None, day_offset: int = 0,
+    before_weekly_tail: bool = False,
 ) -> str:
     """One day's raw status of a domain chain: block when any member job that was due did not
     complete; otherwise the worst of (a) Silver's persisted-check verdict, ONLY when silver_validate
     is part of the chain, and (b) a Bronze quarantine warning, ONLY when a Bronze job is.
 
     ADR-059: `skipped` when any layer the chain runs through is paused that day (GHR-09); due
-    weekly-only members are `pending` rather than `missing` on the evaluation day (GHR-04)."""
-    from src.scheduler.job_registry import GATE_DOMAINS, JOB_REGISTRY
+    weekly-only members are `pending` rather than `missing` on the evaluation day (GHR-04).
+
+    ADR-060: `before_weekly_tail` (day_offset 0 only) marks the due weekly-TAIL members `pending`. The
+    specialists' predict jobs read this status from INSIDE the daily chain, which now runs before the
+    Sunday tail (HMM fits, walk-forward, cross-asset weeklies); without it every Sunday's `quality`
+    tag would read those not-yet-run members as missing."""
+    from src.scheduler.job_registry import GATE_DOMAINS, JOB_REGISTRY, WEEKLY_TAIL
 
     pauses = load_pauses() if pauses is None else pauses
     members = domain_members(domain, run_date)
@@ -547,7 +560,9 @@ def _domain_raw_status(
                 states={j: JOB_PAUSED for j in members}, guard=guard, daily_sequence=daily_sequence)
         return SKIPPED
 
-    states = _classify_jobs(guard, members, run_date, daily_sequence, allow_pending=allow_pending)
+    pending_jobs = frozenset(WEEKLY_TAIL) if (before_weekly_tail and day_offset == 0) else frozenset()
+    states = _classify_jobs(guard, members, run_date, daily_sequence, allow_pending=allow_pending,
+                            pending_jobs=pending_jobs)
     if any(st == JOB_MISSING for st in states.values()):
         _record(evidence, scope=domain, run_date=run_date, day_offset=day_offset, raw="block",
                 states=states, guard=guard, daily_sequence=daily_sequence)
@@ -570,7 +585,8 @@ def _domain_raw_status(
 
 def domain_status(domain: str, run_date: date, guard: DependencyGuard | None = None,
                   quality_log: pl.DataFrame | None = None, *,
-                  pauses: dict | None = None, evidence: list[dict] | None = None) -> dict:
+                  pauses: dict | None = None, evidence: list[dict] | None = None,
+                  before_weekly_tail: bool = False) -> dict:
     """{'layer_health', 'gate_status', 'streak_days'} for one domain scope — the same hysteresis
     (_emit_status) as the layer scopes, recomputed from the sentinels over LOOKBACK_DAYS."""
     from src.scheduler.job_registry import DAILY_SEQUENCE
@@ -581,7 +597,8 @@ def domain_status(domain: str, run_date: date, guard: DependencyGuard | None = N
     daily_sequence = set(DAILY_SEQUENCE)
     history = [
         _domain_raw_status(domain, guard, run_date - timedelta(days=o), daily_sequence, quality_log,
-                           allow_pending=(o == 0), pauses=pauses, evidence=evidence, day_offset=o)
+                           allow_pending=(o == 0), pauses=pauses, evidence=evidence, day_offset=o,
+                           before_weekly_tail=before_weekly_tail)
         for o in range(LOOKBACK_DAYS)
     ]
     emitted, streak = _emit_status(history)
@@ -590,9 +607,13 @@ def domain_status(domain: str, run_date: date, guard: DependencyGuard | None = N
 
 def domain_gate_status(domain: str, run_date: date) -> str:
     """What a specialist model stamps as its `quality` column. 'unknown' (never an exception) when
-    the status cannot be computed — scoring must not die because the gate could not be read."""
+    the status cannot be computed — scoring must not die because the gate could not be read.
+
+    The caller is a daily predict job, which runs BEFORE the weekly tail of the same day's chain
+    (ADR-060), so today's not-yet-run tail members are `pending`, not missing; yesterday and earlier
+    are final."""
     try:
-        return domain_status(domain, run_date)["gate_status"]
+        return domain_status(domain, run_date, before_weekly_tail=True)["gate_status"]
     except Exception as e:                                  # noqa: BLE001 — see docstring
         logger.warning(f"[Gatekeeper] domain status for {domain!r} unavailable ({e}) — 'unknown'")
         return "unknown"

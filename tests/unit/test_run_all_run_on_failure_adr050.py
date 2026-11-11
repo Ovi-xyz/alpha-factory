@@ -63,15 +63,21 @@ def _fail_with(name: str, exc: BaseException):
 
 class TestRegistryContract:
 
-    def test_only_gatekeeper_carries_the_flag(self):
+    def test_only_the_two_util_jobs_carry_the_flag(self):
         """Pinned on purpose: run_on_failure changes failure semantics for a
         job, so adding it anywhere else should be a deliberate decision that
-        has to touch this test."""
+        has to touch this test. ADR-060: health_report joined the gatekeeper — its FAILED-jobs
+        alert reads today's failed rows, so it has to run on a failed day."""
         flagged = {n for n, j in JOB_REGISTRY.items() if j.get("run_on_failure")}
-        assert flagged == {"gatekeeper"}
+        assert flagged == {"gatekeeper", "health_report"}
+        assert all(JOB_REGISTRY[n]["layer"] == "util" for n in flagged)
 
-    def test_flagged_job_is_in_daily_sequence(self):
-        assert "gatekeeper" in DAILY_SEQUENCE
+    def test_flagged_jobs_are_in_daily_sequence(self):
+        assert "gatekeeper" in DAILY_SEQUENCE and "health_report" in DAILY_SEQUENCE
+
+    def test_health_report_has_no_upstream_so_a_failed_day_cannot_refuse_it(self):
+        """ADR-060: it used to depend on gold_screener — after any failure that sentinel is missing."""
+        assert JOB_REGISTRY["health_report"]["depends_on"] == []
 
 
 class TestNoFailureUnchanged:
@@ -88,8 +94,10 @@ class TestFailureStillRunsGatekeeper:
         with pytest.raises(RuntimeError, match="boom"):
             run_all(force=False, run_date=RUN_DATE)
         assert "gatekeeper" in stubbed_registry
+        # ADR-060: the report that carries the FAILED alert runs on the failed day too
+        assert stubbed_registry[-2:] == ["gatekeeper", "health_report"]
         # everything after the failure that is NOT flagged was skipped
-        for skipped in ("silver_validate", "gold_signals", "gold_screener", "health_report"):
+        for skipped in ("silver_validate", "gold_signals", "gold_screener"):
             assert skipped not in stubbed_registry
 
     def test_jobs_before_failure_still_ran(self, stubbed_registry, sandboxed_guard):
@@ -147,6 +155,18 @@ class TestKeyboardInterrupt:
         with pytest.raises(KeyboardInterrupt):
             run_all(force=False, run_date=RUN_DATE)
         assert "gatekeeper" not in stubbed_registry
+
+
+class TestStandaloneUtilJobs:
+
+    def test_health_report_runs_with_zero_sentinels(self, stubbed_registry, tmp_path, monkeypatch):
+        """ADR-060: after a failed day gold_screener has no sentinel; `--job health_report` must still
+        run instead of exiting on a missing dependency."""
+        guard = DependencyGuard(sentinel_dir=tmp_path / ".sentinels")
+        monkeypatch.setattr("src.runner.guard", guard)
+        run_job("health_report", run_date=RUN_DATE)      # must not SystemExit
+        assert stubbed_registry == ["health_report"]
+        assert guard.is_done("health_report", RUN_DATE)
 
 
 class TestStandaloneGatekeeper:

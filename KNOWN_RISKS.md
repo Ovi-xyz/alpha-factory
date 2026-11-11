@@ -4829,3 +4829,50 @@ session; no version bump (repo stays at v1.24.0 with the Unreleased entries). Ne
 - Mutants on a throw-away copy (rename, feature blocks, ablation logic, CLI paths, isolation pins): all killed; one
   equivalent mutant removed as redundant code; the unmutated control was green.
 - Not verified: anything on live data, the live 1D schema, the probe on live Gold, an intraday builder.
+
+## RISK-47 (NEW): Job alignment (ADR-060, GMI-JOB-ALIGN-001) — built and unit-tested in sandbox only, never run against the live stores; `silver_macro` / `silver_global_rates` leave daily operation; the weekly Gold jobs now run after the daily chain; the first Sunday `all` is long
+
+**Status:** 🟡 **OPEN (accepted, 10 Nov 2026).** v1.24.0 + Unreleased. ADR number and component tag are proposals. Cross-reference: RISK-43
+(Gatekeeper / health report), RISK-42 (HMM gap guard), RISK-40 (the specialists never ran live).
+
+**Reference:** ADR-060 (proposed), ADR-059 GHR-04 / GHR-09, ADR-053 D4, ADR-051 A2, `src/scheduler/job_registry.py`, `src/runner.py`,
+`src/utils/gatekeeper.py`, `tests/integration/test_job_alignment_adr060.py`.
+
+### What changed (facts)
+- One canonical chain, `jobs_for(run_date)` = weekly head, `DAILY_SEQUENCE` core, weekly tail, util. `--job all` runs it; `--job bronze|silver|gold`
+  run it filtered by layer (without `--force`) or list every layer member (`--force`, unchanged). A test pins, for every weekday, that `all` minus util
+  equals the union of the three layer runs and that each layer list is an ordered subsequence of `all`.
+- Measured before the change (registry imported): Mon-Sat 24 vs 24 jobs with different members; Sunday 26 vs 34, ten jobs never run by `all`.
+- `silver_macro` and `silver_global_rates` declare `run_on_weekdays: [6]`; head = jobs due by a weekday guard whose parents are all head jobs
+  (Bronze weekly set + those two); tail = the eight weekly Gold jobs; `health_report` has no upstream and `run_on_failure: True`.
+- Layer runs share `_run_chain` with `all`; `main` runs the Gatekeeper after a failed layer run and after a completed `gold` run, and registers the views
+  after a completed `gold` run (`--no-gate` opts out of the Gatekeeper step).
+
+### What is accepted, and why
+1. **Never run live.** Orchestration was exercised with every job stubbed (a 28-day `all`-only simulation, failure-order cases, post-step cases); no
+   real job ran in the new order. The Sunday tail has never executed behind the real daily chain.
+2. **`silver_macro` cadence is a behaviour change (reversible).** `--job silver` Mon-Sat no longer runs it; operators who relied on that must use
+   `--job silver_macro --force` for an off-day refresh. The Gatekeeper now expects it on Sunday only and flags a missed Sunday on that Sunday (it used
+   to flag on day 8, through the cadence-class-3 window). Revert = remove the two guard lines and the dependent test edits; the head then no longer
+   contains them and the 7-day cliff for an `all`-only operator returns.
+3. **A long Sunday.** `all` on a Sunday now adds silver_macro / silver_global_rates (~13 min, registry estimates) and the tail (~100 min estimated;
+   the first `technical_xgboost_fit` builds the full OOF). Estimates are the registry's, not measured. A failing tail job is isolated from the other
+   tail jobs but still makes the run exit non-zero.
+4. **Tail after the daily chain changes what the specialists see.** Their predict jobs read the domain gate status before the tail exists. They now
+   treat that day's due tail members as `pending` (evaluation day only, tail members only); yesterday and earlier stay final, and a missing head or
+   daily member still blocks. If the tail then fails, that day's `quality` tag was already written as healthy; the Gatekeeper (after the tail) and the
+   next day's tag show it.
+5. **Gate history is read as recorded.** Sundays before this change have the weekly Gold jobs as `missing` in the 14-day window, so the first
+   fortnight can show a hysteresis `warn` that is history, not a new fault. GHR-09 pause markers can mark such days `skipped` if wanted.
+6. **A fifth job list remains.** `src/scheduler/pipeline_scheduler.py` (APScheduler, optional) hand-lists ten daily jobs plus two weekly ones and does
+   not call the schedule guard; it was already stale and is untouched. It would drift again the moment it is used unattended.
+7. **Positional coupling is untouched.** Under stop-at-first-failure a failure of `gold_global_regime` (cross-asset, the first Gold job) skips the
+   technical engine, the HMM engine and the screener, although the screener treats it as a soft source. Fixing that means reordering the daily chain
+   against ADR-051 A2 / ADR-055's schedule-level pins, which is a separate decision.
+8. **Names outside the repo.** ADR-051 A2 and ADR-055 (texts live outside the repo) still describe the HMM fits as sitting in the "prefix"; the code and
+   its pins now place them in the Sunday tail after `gold_context_regime`. Historical CHANGELOG / KNOWN_RISKS / dev-log entries keep the old wording on purpose.
+
+### Verification
+- Pristine baseline 3498 collected. After: 3582 collected (+84), 3580 passed, the same 2 environmental failures (`test_check_poetry_env`), one process, 312 s.
+- 30 of 30 mutants killed on a throw-away copy; the unmutated control was green. See the dev-log of 10 Nov 2026 for the per-file comparison and the mutation list.
+- Not verified: anything on live data, a real Sunday tail behind the real daily chain, `register_views` after a layer run, the registry's duration estimates.

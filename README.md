@@ -110,9 +110,11 @@ python scripts/validate_instruments.py
 ### 3. Run the Pipeline
 
 ```bash
-python src/runner.py --list                        # all 27 registered jobs
+python src/runner.py --list                        # all 40 registered jobs
 python src/runner.py --status                       # today's DONE/PENDING
-python src/runner.py --job all                      # full DAILY_SEQUENCE (16 jobs)
+python src/runner.py --job all                      # today's canonical chain (24 jobs Mon-Sat, 36 on Sunday)
+python src/runner.py --job bronze                   # the same chain, one layer: bronze | silver | gold
+python src/runner.py --job gold --no-gate            # layer runs also run the Gatekeeper after a failed run / a completed gold run
 python src/runner.py --job bronze_ohlcv_daily        # single job
 python src/runner.py --job gold_context_regime --force   # bypass dependency check
 python src/runner.py --job all --date 2026-07-13     # backfill a specific date
@@ -208,28 +210,35 @@ CrossAssetEngine computation itself not yet built).
 
 ---
 
-## Pipeline Jobs (23 registered, `JOB_REGISTRY`)
+## Pipeline Jobs (40 registered, `JOB_REGISTRY`)
 
-### DAILY_SEQUENCE (14 jobs — `python src/runner.py --job all`)
+`runner.py --job all` and `--job bronze|silver|gold` run ONE chain (ADR-060): `job_registry.jobs_for(run_date)` =
+weekly head, `DAILY_SEQUENCE` (core), weekly tail, then the util jobs; a layer run is that list filtered by layer, in the
+same order, restricted to the jobs due that day (`--force` lists every member of the layer). A test pins that on every
+weekday `all` minus util equals the union of the three layer runs.
+
+### DAILY_SEQUENCE (24 jobs, every day)
 
 ```
-bronze_ohlcv_daily          bronze_ohlcv_context_daily     bronze_treasury
-silver_ohlcv                silver_ohlcv_context           silver_validate
-silver_active_symbols       silver_context_anchors         gold_signals
-gold_mtf                    signal_aggregation             gold_context_regime
-gold_screener                health_report
+bronze_ohlcv_daily     bronze_ohlcv_context_daily  bronze_treasury          bronze_fred_daily
+silver_ohlcv           silver_ohlcv_context        silver_validate          silver_active_symbols
+silver_context_anchors gold_global_regime          gold_signals             gold_mtf
+signal_aggregation     gold_technical_xgboost_predict                       silver_fred_daily
+gold_raw_macro         gold_hmm_macro_regime       gold_raw_market          gold_hmm_market_regime
+gold_context_regime    gold_hmm_xgboost_predict    gold_screener            gatekeeper
+health_report
 ```
 
-### WEEKLY_SEQUENCE (6 weekly-only jobs, prepended to DAILY_SEQUENCE — run Sunday)
+### Weekly-only jobs (13) — scheduled by `run_on_weekdays`, split by derivation into a head and a tail
 
-```bash
-python src/runner.py --job bronze_macro_weekly   # FRED, BLS, BEA, IMF
-python src/runner.py --job bronze_bis_rates      # 12 non-FED central banks
-python src/runner.py --job bronze_eia            # Wednesday-only, schedule-gated
-python src/runner.py --job silver_macro          # PIT integrity, revisions
-python src/runner.py --job silver_global_rates   # Dedicated PIT table (not merged into silver_macro)
-python src/runner.py --job gold_correlation      # Rolling 60D, active symbols only
-```
+HEAD (runs BEFORE the daily chain; due by a weekday guard only, parents are head jobs):
+`bronze_macro_weekly`, `bronze_bis_rates` (Sunday), `bronze_eia` (Wednesday), `silver_macro`, `silver_global_rates` (Sunday).
+
+TAIL (runs AFTER the daily chain, before the util jobs; Sunday): `gold_cross_asset_correlation`, `gold_lead_lag`,
+`gold_forecast`, `gold_hmm_macro_fit`, `gold_hmm_market_fit`, `gold_hmm_walk_forward`, `gold_hmm_xgboost_fit`,
+`gold_technical_xgboost_fit`. A failed tail job does not skip the other tail jobs; a failure anywhere earlier skips the tail.
+
+Off-day refresh of one weekly job: `python src/runner.py --job silver_macro --force`.
 
 ### Maintenance
 

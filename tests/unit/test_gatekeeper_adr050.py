@@ -90,6 +90,21 @@ def sandbox(tmp_path, monkeypatch):
     return Sandbox()
 
 
+SYNTH_UNGUARDED = "zz_unguarded_weekly"
+
+
+@pytest.fixture
+def unguarded_weekly(monkeypatch):
+    """ADR-060: no real job is in cadence class 3 (non-daily, no run_on_weekdays-only guard) any more —
+    silver_macro / silver_global_rates now declare their Sunday cadence — so the window-class tests use a
+    synthetic non-daily, unguarded silver-layer job registered for the test only."""
+    monkeypatch.setitem(JOB_REGISTRY, SYNTH_UNGUARDED, {
+        "description": "synthetic", "fn": lambda d: None, "depends_on": [], "layer": "silver", "est_minutes": 1,
+    })
+    monkeypatch.setitem(LAYER_JOB_NAMES, "silver", [*LAYER_JOB_NAMES["silver"], SYNTH_UNGUARDED])
+    return SYNTH_UNGUARDED
+
+
 class TestWorseOrdering:
 
     def test_pass_pass_is_pass(self):
@@ -160,14 +175,20 @@ class TestExpectedJobsForLayer:
         assert "bronze_eia" in gk._expected_jobs_for_layer("bronze", wednesday)
         assert "bronze_eia" not in gk._expected_jobs_for_layer("bronze", sunday)
 
-    def test_weekly_only_jobs_with_no_explicit_guard_appear_every_day(self):
-        """silver_macro/silver_global_rates carry no run_on_weekdays guard
-        of their own -- _passes_schedule() alone can't exclude them on a
-        non-Sunday. This is exactly why _job_completed() applies a
-        staleness window to non-DAILY_SEQUENCE jobs instead of trusting
+    def test_silver_weekly_jobs_are_due_on_sunday_only(self):
+        """ADR-060: silver_macro / silver_global_rates declare their Sunday cadence. They used to carry no
+        guard, so they were expected on EVERY day and the staleness window absorbed the difference."""
+        wednesday, sunday = date(2026, 9, 30), date(2026, 9, 27)
+        assert wednesday.weekday() == 2 and sunday.weekday() == 6
+        for job in ("silver_macro", "silver_global_rates"):
+            assert job not in gk._expected_jobs_for_layer("silver", wednesday)
+            assert job in gk._expected_jobs_for_layer("silver", sunday)
+
+    def test_a_job_with_no_explicit_guard_appears_every_day(self, unguarded_weekly):
+        """_passes_schedule() alone can't exclude an unguarded job on a non-Sunday. This is exactly why
+        _job_completed() applies a staleness window to non-DAILY_SEQUENCE jobs instead of trusting
         _passes_schedule() to have already handled cadence."""
-        wednesday = date(2026, 9, 30)
-        assert "silver_macro" in gk._expected_jobs_for_layer("silver", wednesday)
+        assert unguarded_weekly in gk._expected_jobs_for_layer("silver", date(2026, 9, 30))
 
     def test_daily_jobs_expected_every_day(self):
         for d in (date(2026, 9, 27), date(2026, 9, 30)):
@@ -182,17 +203,25 @@ class TestJobCompleted:
             sandbox.guard, "bronze_ohlcv_daily", ANCHOR, set(DAILY_SEQUENCE)
         )
 
-    def test_weekly_job_tolerates_staleness_within_window(self, sandbox):
-        sandbox.guard.mark_done("silver_macro", ANCHOR - timedelta(days=6))
+    def test_weekly_job_tolerates_staleness_within_window(self, sandbox, unguarded_weekly):
+        sandbox.guard.mark_done(unguarded_weekly, ANCHOR - timedelta(days=6))
         assert gk._job_completed(
-            sandbox.guard, "silver_macro", ANCHOR, set(DAILY_SEQUENCE)
+            sandbox.guard, unguarded_weekly, ANCHOR, set(DAILY_SEQUENCE)
         )
 
-    def test_weekly_job_fails_beyond_staleness_window(self, sandbox):
-        sandbox.guard.mark_done("silver_macro", ANCHOR - timedelta(days=8))
+    def test_weekly_job_fails_beyond_staleness_window(self, sandbox, unguarded_weekly):
+        sandbox.guard.mark_done(unguarded_weekly, ANCHOR - timedelta(days=8))
         assert not gk._job_completed(
-            sandbox.guard, "silver_macro", ANCHOR, set(DAILY_SEQUENCE)
+            sandbox.guard, unguarded_weekly, ANCHOR, set(DAILY_SEQUENCE)
         )
+
+    def test_silver_macro_now_needs_its_exact_due_day(self, sandbox):
+        """ADR-060: a Sunday-guarded job is cadence class 2 — exact date, not the 7-day window."""
+        sandbox.guard.mark_done("silver_macro", ANCHOR - timedelta(days=6))
+        assert not gk._job_completed(sandbox.guard, "silver_macro", ANCHOR, set(DAILY_SEQUENCE))
+        sandbox.guard.mark_done("silver_macro", ANCHOR)
+        assert gk._job_completed(sandbox.guard, "silver_macro", ANCHOR, set(DAILY_SEQUENCE))
+
 
 
 class TestBronzeRawStatus:
@@ -398,8 +427,8 @@ class TestDueExactlyOnGuardDays:
         assert d(JOB_REGISTRY["bronze_bis_rates"])               # Sunday
         assert d(JOB_REGISTRY["bronze_eia"])                     # Wednesday
         assert d(JOB_REGISTRY["gold_lead_lag"])                  # Sunday
-        assert not d(JOB_REGISTRY["silver_macro"])               # no guard at all
-        assert not d(JOB_REGISTRY["silver_global_rates"])        # no guard at all
+        assert d(JOB_REGISTRY["silver_macro"])                   # Sunday (ADR-060)
+        assert d(JOB_REGISTRY["silver_global_rates"])            # Sunday (ADR-060)
         assert not d(JOB_REGISTRY["bronze_bls_cpi"])             # day-of-month window
         assert not d(JOB_REGISTRY["bronze_bea_gdp"])             # months + day window
 
@@ -422,8 +451,8 @@ class TestDetectionLag:
             first flagged at day+14 (a full week late), because the window
             still covered the previous run on the due day itself and the job
             is not "expected" on any other day.
-        unguarded weekly (silver_macro) — flagged the day after its window
-            lapses (day+8).
+        unguarded weekly (a synthetic job — none is left in the registry since
+            ADR-060) — flagged the day after its window lapses (day+8).
     """
 
     def _first_flag(self, sandbox, job, layer, last_success):
@@ -442,8 +471,12 @@ class TestDetectionLag:
     def test_guarded_wednesday_job_flagged_on_the_missed_due_day(self, sandbox):
         assert self._first_flag(sandbox, "bronze_eia", "bronze", date(2026, 9, 2)) == 7
 
-    def test_unguarded_weekly_job_flagged_day_after_window_lapses(self, sandbox):
-        assert self._first_flag(sandbox, "silver_macro", "silver", date(2026, 9, 6)) == 8
+    def test_unguarded_weekly_job_flagged_day_after_window_lapses(self, sandbox, unguarded_weekly):
+        assert self._first_flag(sandbox, unguarded_weekly, "silver", date(2026, 9, 6)) == 8
+
+    def test_silver_macro_is_flagged_on_the_missed_due_day_since_adr060(self, sandbox):
+        """Was day+8 while it carried no guard; a missed Sunday is now seen ON that Sunday."""
+        assert self._first_flag(sandbox, "silver_macro", "silver", date(2026, 9, 6)) == 7
 
     def test_guarded_job_completed_on_due_day_is_ok(self, sandbox):
         sunday = date(2026, 9, 13)
@@ -457,14 +490,14 @@ class TestDetectionLag:
             sandbox.guard, "bronze_macro_weekly", date(2026, 9, 13), set(DAILY_SEQUENCE)
         )
 
-    def test_unguarded_job_run_daily_is_never_flagged(self, sandbox):
-        """Real live pattern (your sentinel history): silver_macro runs
-        every day via `--job silver` — a window must not make that look bad."""
+    def test_unguarded_job_run_daily_is_never_flagged(self, sandbox, unguarded_weekly):
+        """A job that has no guard and is run every day must not look bad under the window."""
         for i in range(20):
-            sandbox.guard.mark_done("silver_macro", date(2026, 9, 1) + timedelta(days=i))
+            sandbox.guard.mark_done(unguarded_weekly, date(2026, 9, 1) + timedelta(days=i))
         daily = set(DAILY_SEQUENCE)
         for i in range(20):
-            assert gk._job_completed(sandbox.guard, "silver_macro", date(2026, 9, 1) + timedelta(days=i), daily)
+            assert gk._job_completed(sandbox.guard, unguarded_weekly, date(2026, 9, 1) + timedelta(days=i), daily)
+
 
 
 class TestDomainScopes:

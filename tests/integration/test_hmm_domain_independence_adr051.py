@@ -18,7 +18,7 @@ import pathlib
 
 import pytest
 
-from src.scheduler.job_registry import DAILY_SEQUENCE, JOB_REGISTRY, WEEKLY_SEQUENCE
+from src.scheduler.job_registry import DAILY_SEQUENCE, JOB_REGISTRY, WEEKLY_SEQUENCE, WEEKLY_TAIL
 
 HMM_DIR = pathlib.Path("src/gold/hmm")
 GOLD_DIR = pathlib.Path("src/gold")
@@ -201,13 +201,16 @@ class TestSchedule:
         assert "gold_hmm_macro_regime" in DAILY_SEQUENCE
         assert "gold_hmm_macro_fit" not in _upstream("gold_hmm_macro_regime")
 
-    def test_macro_fit_is_sunday_only_weekly_prefix_with_a_cross_cadence_tolerance(self):
+    def test_macro_fit_is_sunday_only_weekly_tail_with_a_cross_cadence_tolerance(self):
         j = JOB_REGISTRY["gold_hmm_macro_fit"]
         assert j["depends_on"] == ["gold_raw_macro"] and j["stale_tolerance"] == {"gold_raw_macro": 3}
         assert j["run_on_weekdays"] == [6]
         assert "gold_hmm_macro_fit" in WEEKLY_SEQUENCE and "gold_hmm_macro_fit" not in DAILY_SEQUENCE
-        # prefix = before the daily jobs it would otherwise be mistaken for
-        assert WEEKLY_SEQUENCE.index("gold_hmm_macro_fit") < WEEKLY_SEQUENCE.index("bronze_ohlcv_daily")
+        # ADR-060: the fit sits in the Sunday TAIL — after the daily classify jobs, so it never sees an
+        # unscored gap, and after gold_screener, so it cannot stop anything the daily chain produces
+        assert "gold_hmm_macro_fit" in WEEKLY_TAIL
+        assert WEEKLY_SEQUENCE.index("gold_hmm_macro_fit") > WEEKLY_SEQUENCE.index("gold_context_regime")
+        assert WEEKLY_SEQUENCE.index("gold_hmm_macro_fit") > WEEKLY_SEQUENCE.index("gold_screener")
 
     def test_market_pair_mirrors_the_macro_pair(self):
         c, f = JOB_REGISTRY["gold_hmm_market_regime"], JOB_REGISTRY["gold_hmm_market_fit"]
@@ -216,7 +219,8 @@ class TestSchedule:
         assert f["run_on_weekdays"] == [6]
         assert "gold_hmm_market_regime" in DAILY_SEQUENCE and "gold_hmm_market_fit" not in DAILY_SEQUENCE
         assert "gold_hmm_market_fit" in WEEKLY_SEQUENCE
-        assert WEEKLY_SEQUENCE.index("gold_hmm_market_fit") < WEEKLY_SEQUENCE.index("bronze_ohlcv_daily")
+        assert "gold_hmm_market_fit" in WEEKLY_TAIL                                   # ADR-060: see above
+        assert WEEKLY_SEQUENCE.index("gold_hmm_market_fit") > WEEKLY_SEQUENCE.index("gold_context_regime")
         assert "gold_hmm_market_fit" not in _upstream("gold_hmm_market_regime")
 
     def test_context_regime_is_a_pure_join_of_the_two_classify_jobs(self):

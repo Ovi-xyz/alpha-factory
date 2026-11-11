@@ -24,8 +24,10 @@ from src.scheduler.job_registry import (
     GATE_DOMAINS,
     JOB_REGISTRY,
     LAYER_JOB_NAMES,
+    WEEKLY_HEAD,
     _passes_schedule,
     due_weekly_head_jobs,
+    jobs_for,
 )
 from src.utils import data_paths, pause_markers
 
@@ -167,8 +169,10 @@ class TestPendingWeeklyJobs:
 class TestWeeklyHeadJobs:
     """The runner side of GHR-04: only jobs that can never fail a dependency run ahead of the chain."""
 
-    def test_sunday_head_is_the_bronze_weekly_set(self):
-        assert due_weekly_head_jobs(SUNDAY) == ["bronze_macro_weekly", "bronze_bis_rates"]
+    def test_sunday_head_is_the_weekly_bronze_and_silver_set(self):
+        """ADR-060 widened the head: silver_macro / silver_global_rates rest only on Bronze weekly jobs."""
+        assert due_weekly_head_jobs(SUNDAY) == [
+            "bronze_macro_weekly", "bronze_bis_rates", "silver_macro", "silver_global_rates"]
 
     def test_wednesday_head_is_eia(self):
         assert due_weekly_head_jobs(WEDNESDAY) == ["bronze_eia"]
@@ -176,11 +180,11 @@ class TestWeeklyHeadJobs:
     def test_tuesday_has_no_head(self):
         assert due_weekly_head_jobs(TUESDAY) == []
 
-    def test_every_head_job_is_dependency_free_and_guard_only(self):
+    def test_every_head_job_depends_only_on_head_jobs_and_is_guard_only(self):
         for day in (SUNDAY, WEDNESDAY):
             for name in due_weekly_head_jobs(day):
                 job = JOB_REGISTRY[name]
-                assert not job.get("depends_on")
+                assert set(job.get("depends_on", [])) <= set(WEEKLY_HEAD)
                 assert {k for k in job if k.startswith("run_on_")} == {"run_on_weekdays"}
                 assert name not in DAILY_SEQUENCE
 
@@ -188,7 +192,7 @@ class TestWeeklyHeadJobs:
         """They hard-depend on same-day DAILY Silver jobs; ahead of the chain they would stop it."""
         head = set(due_weekly_head_jobs(SUNDAY))
         for name in ("gold_cross_asset_correlation", "gold_lead_lag", "gold_forecast",
-                     "gold_hmm_macro_fit", "silver_macro"):
+                     "gold_hmm_macro_fit"):
             assert name not in head
 
     def test_run_all_runs_the_head_before_the_daily_chain(self, monkeypatch):
@@ -197,8 +201,8 @@ class TestWeeklyHeadJobs:
         calls: list[str] = []
         monkeypatch.setattr(runner, "run_job", lambda name, force=False, run_date=None: calls.append(name))
         runner.run_all(run_date=SUNDAY)
-        assert calls[:2] == ["bronze_macro_weekly", "bronze_bis_rates"]
-        assert calls[2:] == list(DAILY_SEQUENCE)
+        assert calls[:4] == ["bronze_macro_weekly", "bronze_bis_rates", "silver_macro", "silver_global_rates"]
+        assert calls == jobs_for(SUNDAY)                       # ADR-060: head, daily, weekly tail, util
         assert calls.index("bronze_bis_rates") < calls.index("gatekeeper")
 
     def test_run_all_on_a_non_weekly_day_is_unchanged(self, monkeypatch):
