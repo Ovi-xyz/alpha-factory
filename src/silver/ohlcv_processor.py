@@ -38,6 +38,43 @@ CURRENT_SILVER_VERSION = "1.2"
 SILVER_OHLCV_PATH  = Path("data/silver/market_ohlcv")
 BRONZE_OHLCV_PATH  = Path("data/bronze/market/ohlcv")
 
+# FIX SIL-DEDUP-PERIOD-01 [chat thread, 13 Nov 2026]: Silver 1W/1M held MORE THAN ONE bar per period.
+# Measured on live data (13 Nov 2026): Gold 1M (built from Silver) had a duplicated November 2026 period
+# for 156 of 200 symbols - 149 with the month-to-date bar stamped 2026-11-01 plus a one-day fragment
+# stamped 2026-11-03, 7 with five to eight fragments stamped on different days and no 2026-11-01 bar -
+# and Silver 1M of AAPL / SPX / VIX the same; Gold 1W had two duplicated weeks for ABBV only.
+# Mechanism, read on VIX: the Bronze 1M file ingested on 3 Nov is a one-row fetch whose bar is stamped
+# 2026-11-03 and carries the 3 Nov values only (open 21.66, close 20.83 = that day's daily bar) while the
+# ingests of 2, 4, 5 and 12 Nov stamp the in-progress month at 2026-11-01 with the month-to-date open
+# (19.05). A bar built from a partial request window is stamped LATER than the period start and covers
+# less of the period. Bronze is append-only, so every Silver rebuild reads that file again, and
+# _deduplicate keyed on the raw timestamp (2026-11-03 is not 2026-11-01). One bar per period is the
+# invariant of coarse bars; two rows in one month make every 1M indicator run on a spurious bar.
+# Rule (1W/1M only): per period keep the bar with the EARLIEST stamp date, and among rows on that same
+# date the last ingested one (the in-progress bar grows, so the latest ingest of the same stamp is the
+# fullest). 1D is untouched. The period is read from the stamp's own LOCAL date, like the rest of the
+# project (src/utils/trade_date.py): a Jakarta 2026-11-01 00:00 stamp is 2026-10-31 in UTC and must
+# stay a November bar. Weeks run Sunday..Saturday (the date is shifted one day before the Monday
+# truncation) so that a Sunday-stamped weekly bar (forex convention) opens the week that follows it
+# instead of colliding with the previous week's Monday bar; Monday..Saturday stamps are unaffected.
+# Known limit: when Bronze holds ONLY fragments for the in-progress period (YM_F, NKD_F, NQ_F, ES_F, AU,
+# AG, CL on 13 Nov 2026: no 2026-11-01 bar, one one-day fragment per ingest day) the earliest fragment
+# survives; it is still a fragment. One bar per period is restored, not a month-to-date bar.
+_PERIOD_DEDUP_TIMEFRAMES = ("1W", "1M")
+
+
+def period_key_expr(timeframe: str, timestamp: str = "timestamp") -> pl.Expr:
+    """Period of a coarse bar from its stamp's own local date: the first of the month (1M) or the
+    Monday of the Sunday..Saturday week (1W). Shared by OHLCVProcessor._deduplicate and
+    scripts/audit_silver_period_duplicates.py so the two cannot drift apart."""
+    day = pl.col(timestamp).dt.date()
+    if timeframe == "1M":
+        return day.dt.truncate("1mo")
+    if timeframe == "1W":
+        return day.dt.offset_by("1d").dt.truncate("1w")
+    raise ValueError(f"period_key_expr: no period for timeframe {timeframe!r}")
+
+
 # v1.5 refactoring: 4H dipindah ke Silver layer (GD §4.1 Enrichment)
 # Bronze menyediakan raw data untuk TF berikut (yfinance/Polygon menyediakan langsung):
 BRONZE_TIMEFRAMES = ["5m", "15m", "1H", "1D", "1W", "1M"]
@@ -236,12 +273,30 @@ class OHLCVProcessor:
         """
         Deduplicate by (symbol, timestamp, timeframe).
         Keep last record per key (most recent ingestion wins).
+
+        FIX SIL-DEDUP-PERIOD-01: for 1W/1M the key is the PERIOD, not the raw timestamp - one bar per
+        period, the one with the earliest stamp date, and among rows on that date the last ingested
+        (see the comment block above _PERIOD_DEDUP_TIMEFRAMES). "Last" relies on the stable sort in
+        process_symbol that precedes this step (checked: no out-of-order winner at 800,000 rows).
         """
         if "timestamp" not in df.columns:
             return df
 
         before = len(df)
-        df = df.unique(subset=["timestamp"], keep="last", maintain_order=True)
+        if timeframe in _PERIOD_DEDUP_TIMEFRAMES:
+            day = pl.col("timestamp").dt.date()
+            df = df.with_columns(day.alias("_stamp_day"), period_key_expr(timeframe).alias("_period"))
+            df = df.filter(pl.col("_stamp_day") == pl.col("_stamp_day").min().over("_period"))
+            fragments = before - len(df)
+            if fragments > 0:
+                logger.debug(
+                    f"[OHLCVProcessor] Dropped {fragments} later-stamped partial-period row(s) "
+                    f"for {symbol}/{timeframe} (kept the earliest stamp per period)"
+                )
+            df = df.unique(subset=["_stamp_day"], keep="last", maintain_order=True)
+            df = df.drop("_stamp_day", "_period")
+        else:
+            df = df.unique(subset=["timestamp"], keep="last", maintain_order=True)
         dupes = before - len(df)
         if dupes > 0:
             logger.debug(
@@ -706,12 +761,43 @@ _RUN_CONTEXT_TFS = ["1D", "1W", "1M"]
 # unknown and guessing would mis-stamp silently.
 _UTC_NAIVE_SOURCES = frozenset({"polygon"})
 _BRONZE_PRICE_COLS = ("open", "high", "low", "close")
+#
+# FIX SIL-BRZ-SCHEMA-02 [chat thread, 12 Nov 2026]: a THIRD drift class, same mechanism. After the
+# 12 Nov rebuild from Bronze, context/VIX 1D/1W/1M failed ("failed to determine supertype of
+# datetime[ms, America/Chicago] and datetime[ms, America/New_York]"): two tz-aware zones in one
+# group, which the reconcile above leaves alone on purpose. silver_ohlcv_context still ended
+# SUCCESS (failed=3 of 174), VIX had no Silver, and gold_signals fell back to FRED VIXCLS.
+# Measured (12 Nov 2026): 13 of the 71 Bronze VIX 1D files were read and ALL are
+# tz=America/Chicago (yfinance's own zone for ^VIX, stamps at 00:00 Chicago) although their
+# `_tz_hint` column says America/New_York. The file(s) in America/New_York were NOT located, so
+# whether their stamps are the same instants as the Chicago ones (01:00 New York) or the same
+# wall-clock midnight (00:00 New York) is unmeasured. The failure itself was reproduced with the
+# real files plus one New-York-labelled file.
+# Rule, deliberately narrow and independent of that unknown: a 1D/1W/1M bar carries a TRADE DATE,
+# not an instant (src/utils/trade_date.py: take the stamp's own date, no zone conversion). In a
+# group with more than one tz-aware zone, every file outside the group's majority zone is
+# re-stamped to local midnight of its OWN calendar date in the majority zone, so an instant-equal
+# label (01:00 NY) and a wall-clock-equal label (00:00 NY) both land on the same date and the
+# Silver stamps stay what the uniform fast path would have written (VIX: Chicago midnight). A stamp
+# that is not within the first _COARSE_STAMP_MAX_LOCAL_HOUR hours of its own local day is NOT a
+# date label, so the read raises instead of guessing. Intraday timeframes keep raising: an instant
+# cannot be re-dated.
+_COARSE_TIMEFRAMES = frozenset({"1D", "1W", "1M"})
+_COARSE_STAMP_MAX_LOCAL_HOUR = 6
 
 
 def _bronze_source_of(path: str) -> Optional[str]:
     """`source=NAME` path segment of a Bronze file (Hive layout), else None."""
     for part in Path(path).parts:
         if part.startswith("source="):
+            return part.split("=", 1)[1]
+    return None
+
+
+def _bronze_timeframe_of(path: str) -> Optional[str]:
+    """`timeframe=NAME` path segment of a Bronze file (Hive layout), else None."""
+    for part in Path(path).parts:
+        if part.startswith("timeframe="):
             return part.split("=", 1)[1]
     return None
 
@@ -744,6 +830,77 @@ def _harmonise_bronze_timestamp(
             ts = ts.dt.convert_time_zone(target_tz)
         return lf.with_columns(ts.alias("timestamp"))
     return lf
+
+
+def _canonical_zone(zones: list[str], tz_hint: Optional[str]) -> str:
+    """The zone a mixed group is re-stamped into: the one most files already use (so a drifting
+    group yields the same Silver stamps as the uniform fast path would), ties broken towards the
+    instrument's own zone, then alphabetically (deterministic)."""
+    counts: dict[str, int] = {}
+    for z in zones:
+        counts[z] = counts.get(z, 0) + 1
+    top = max(counts.values())
+    tied = sorted(z for z, c in counts.items() if c == top)
+    return tz_hint if tz_hint in tied else tied[0]
+
+
+def _reconcile_coarse_zones(
+    frames: list[pl.LazyFrame],
+    files: list[str],
+    tz_hint: Optional[str],
+    timeframe: Optional[str],
+) -> tuple[list[pl.LazyFrame], Optional[str]]:
+    """FIX SIL-BRZ-SCHEMA-02: bring tz-aware 1D/1W/1M files that sit in a minority zone onto the
+    group's majority zone BY LOCAL CALENDAR DATE (see the comment block above _COARSE_TIMEFRAMES).
+
+    Returns (frames, note). `note` is a WARNING line naming what was re-stamped, or None when
+    nothing was touched: a uniform group, an intraday timeframe, or fewer than two tz-aware zones
+    are returned unchanged. A minority file whose stamps are not date labels (local hour >=
+    _COARSE_STAMP_MAX_LOCAL_HOUR) raises ValueError. Reads only the `timestamp` column of the
+    minority files."""
+    if timeframe not in _COARSE_TIMEFRAMES:
+        return frames, None
+    zones: list[Optional[str]] = []
+    for lf in frames:
+        dtype = lf.collect_schema().get("timestamp")
+        zones.append(dtype.time_zone if isinstance(dtype, pl.Datetime) else None)
+    aware = [z for z in zones if z]
+    if len(set(aware)) < 2:
+        return frames, None
+
+    canon = _canonical_zone(aware, tz_hint)
+    out: list[pl.LazyFrame] = []
+    moved: list[tuple[str, str]] = []
+    for path, lf, zone in zip(files, frames, zones):
+        if not zone or zone == canon:
+            out.append(lf)
+            continue
+        stamps = lf.select("timestamp").collect()["timestamp"].drop_nulls()
+        late = stamps.dt.hour() >= _COARSE_STAMP_MAX_LOCAL_HOUR
+        if late.any():
+            raise ValueError(
+                f"Bronze {timeframe} file {Path(path).name} is stamped in {zone}, not {canon}, and "
+                f"{int(late.sum())} stamp(s) are not date labels (local time {stamps.filter(late)[0]}, "
+                f"limit hour < {_COARSE_STAMP_MAX_LOCAL_HOUR}); refusing to re-date them by guess"
+            )
+        out.append(
+            lf.with_columns(
+                pl.col("timestamp")
+                .dt.replace_time_zone(None)
+                .dt.truncate("1d")
+                .dt.replace_time_zone(canon)
+                .alias("timestamp")
+            )
+        )
+        moved.append((Path(path).name, zone))
+
+    by_zone = sorted({z for _, z in moved})
+    note = (
+        f"[OHLCVProcessor] Bronze timezone drift ({timeframe}): {len(moved)} of {len(files)} file(s) "
+        f"in {', '.join(by_zone)} re-stamped to {canon} by local calendar date "
+        f"(first {moved[0][0]}, last {moved[-1][0]})"
+    )
+    return out, note
 
 
 def _describe_schema_drift(files: list[str]) -> str:
@@ -782,6 +939,10 @@ def _read_bronze_symbol(
     ones), concat with diagonal_relaxed (dtype supertype + missing columns ->
     null), then refuse a result whose price columns are not numeric (a relaxed
     String/Float supertype would otherwise slip through as text).
+
+    FIX SIL-BRZ-SCHEMA-02: for 1D/1W/1M, tz-aware files in a minority zone are
+    first re-stamped to the majority zone by local calendar date
+    (_reconcile_coarse_zones); intraday groups with mixed zones still raise.
     """
     files = sorted(_glob.glob(pattern, recursive=True))
     if not files:
@@ -801,6 +962,12 @@ def _read_bronze_symbol(
         )
         for f in files
     ]
+    # FIX SIL-BRZ-SCHEMA-02: tz-aware 1D/1W/1M files in more than one zone (VIX: Chicago + New York)
+    frames, zone_note = _reconcile_coarse_zones(
+        frames, files, tz_hint, _bronze_timeframe_of(files[0])
+    )
+    if zone_note:
+        logger.warning(zone_note)
     df = pl.concat(frames, how="diagonal_relaxed").collect()
     for col in _BRONZE_PRICE_COLS:
         if col in df.columns and not df.schema[col].is_numeric():
@@ -816,6 +983,29 @@ def _read_bronze_symbol(
             f"({df.schema['volume']}) for {pattern} — refusing to continue"
         )
     return df
+
+
+def _failed_checkpoint_warnings(job_name: str, run_date: date) -> tuple[str, ...]:
+    """FIX SIL-BRZ-SCHEMA-02: failed (symbol, timeframe) reads of a ProgressCheckpoint job as
+    JobResult warnings, which the runner prints right after the job (src/runner.py run_job).
+
+    Why: a failed read is by design NOT a failed job (SIL-BRZ-SCHEMA-01: errors go to mark_failed +
+    logger.error so the run can resume), but nothing downstream reads the checkpoint, so the 12 Nov
+    2026 VIX failure (3 of 174) ended in SUCCESS, a green health report and a green Silver gate.
+    This makes the same facts visible in the operator's terminal without changing the job's outcome.
+    A re-run of the job on the same run_date resumes ONLY the failed items (pending_symbols == not
+    done)."""
+    from src.utils.progress_checkpoint import ProgressCheckpoint
+
+    failed = ProgressCheckpoint(job_name, run_date).failed_report()
+    if not failed:
+        return ()
+    items = [f"{r['symbol']}/{r['timeframe']}" if r["timeframe"] else str(r["symbol"]) for r in failed]
+    shown = ", ".join(items[:10]) + (f" (+{len(items) - 10} more)" if len(items) > 10 else "")
+    return (
+        f"{len(items)} (symbol, timeframe) read(s) FAILED, no Silver written: {shown}; "
+        f"see the ERROR lines, fix the cause, then re-run this job (only the failed items are retried)",
+    )
 
 
 def run(run_date: date) -> JobResult:
@@ -973,7 +1163,13 @@ def run(run_date: date) -> JobResult:
         f"P1={ProgressCheckpoint('silver_ohlcv_p1', run_date).summary()} | "
         f"P2={ckpt_4h.summary()}"
     )
-    return JobResult(rows_written=rows_written)
+    return JobResult(
+        rows_written=rows_written,
+        warnings=(
+            _failed_checkpoint_warnings("silver_ohlcv_p1", run_date)
+            + _failed_checkpoint_warnings("silver_ohlcv_4h", run_date)
+        ),
+    )
 
 
 # ── ADD GMI-SIL-001 — Layer 2 Context OHLCV (Bronze → Silver) ────────────────
@@ -992,7 +1188,7 @@ def run(run_date: date) -> JobResult:
 # (see _RUN_CONTEXT_TFS comment above) — nothing would exist to synthesize
 # from. Checkpoint namespace ("silver_ohlcv_context") kept fully separate
 # from Layer 1's ("silver_ohlcv_p1"/"silver_ohlcv_4h") — GD §17.3.1 pattern.
-def run_context(run_date: date) -> None:
+def run_context(run_date: date) -> JobResult:
     """
     Job entry point for 'silver_ohlcv_context' — dipanggil oleh job_registry.py.
 
@@ -1070,3 +1266,5 @@ def run_context(run_date: date) -> None:
         f"[silver_ohlcv_context] Complete | "
         f"{ProgressCheckpoint('silver_ohlcv_context', run_date).summary()}"
     )
+    # FIX SIL-BRZ-SCHEMA-02: rows_written stays unknown (None); only the failures are reported.
+    return JobResult(warnings=_failed_checkpoint_warnings("silver_ohlcv_context", run_date))

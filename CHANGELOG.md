@@ -1,5 +1,79 @@
 # CHANGELOG — Data Platform
 
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — Silver 1W/1M kembali satu bar per periode: dedupe berkunci periode, bukan timestamp mentah (FIX SIL-DEDUP-PERIOD-01, RISK-49)
+
+**Latar.** Temuan saat memverifikasi FIX SIL-BRZ-SCHEMA-02 pada data live (13 Nov 2026), lalu permintaan Ovi untuk menyelidiki apa yang tidak bisa dijawab log,
+memperbaikinya, dan merevisi patch lanjutan. Nomor FIX dan RISK adalah usulan.
+
+**Temuan (diukur, 13 Nov 2026).**
+- Gold 1M (satu file untuk 200 simbol): 156 dari 200 simbol punya lebih dari satu bar pada periode November 2026, dan hanya periode itu yang bermasalah. 149 simbol punya
+  bar month-to-date berstempel 2026-11-01 ditambah fragmen satu hari berstempel 2026-11-03; 7 simbol (YM_F, NKD_F, NQ_F, ES_F, AU, AG, CL) punya lima sampai delapan
+  fragmen berstempel hari-hari ingest dan tidak punya bar 2026-11-01; 44 simbol (saham IDX dan pasangan FX) hanya punya satu bar. Gold 1W: hanya ABBV (dua pekan ganda).
+  Silver 1M AAPL, SPX, dan VIX sama: 183 baris untuk 182 bulan.
+- Sebab, dibaca pada Bronze VIX: file 1M ingest 3 Nov hanya satu baris, berstempel 2026-11-03 dengan nilai 3 Nov saja (open 21,66, close 20,83), sedangkan ingest 2, 4, 5,
+  dan 12 Nov menstempel bulan berjalan pada 2026-11-01 dengan open month-to-date 19,05. Bar dari jendela permintaan parsial distempel LEBIH LAMBAT daripada awal periode.
+  Bronze append-only dan `_deduplicate` berkunci pada timestamp mentah, jadi 11-03 tidak pernah runtuh ke 11-01. Mengapa yfinance menstempel begitu tidak diketahui.
+- Untuk ketujuh simbol itu duplikasi MASIH bertambah: Bronze YM_F berisi file riwayat penuh 7 Nov (bar berjalan berstempel 2026-11-06) lalu file inkremental kecil tiap
+  hari; file 9 Nov (dibaca) berisi satu bar berstempel 2026-11-09 dengan nilai hari itu saja, dan Gold menunjukkan bar berstempel 10, 11, dan 12 Nov. Pernyataan awal bahwa tidak ada duplikat baru sejak 6 Nov hanya benar untuk VIX.
+- ABBV: seluruh riwayat mingguannya berstempel Selasa (713 dari 726 bar Silver). Bar berstempel Senin cocok dengan close Jumat sebenarnya pada 11 dari 11 pekan penuh,
+  bar berstempel Selasa hanya pada 54 dari 425. Itu cacat terpisah (pembinaan pekan Selasa-Senin) dan tidak diperbaiki di sini.
+
+**Perubahan.**
+1. `ohlcv_processor.py` — `_deduplicate` untuk 1W/1M: satu bar per periode; yang menang adalah bar dengan tanggal stempel TERAWAL, dan di antara baris pada tanggal itu yang
+   terakhir di-ingest. Periode dibaca dari tanggal lokal stempel (stempel Jakarta 2026-11-01 00:00 adalah 31 Okt di UTC dan tetap bar November). Pekan berjalan Minggu sampai
+   Sabtu supaya bar mingguan berstempel Minggu (konvensi forex) tidak bertabrakan dengan bar Senin pekan sebelumnya. 1D tidak berubah. `period_key_expr` dipakai bersama
+   oleh pemroses dan skrip audit.
+2. `scripts/audit_silver_period_duplicates.py` (baru, hanya-baca): sensus periode yang berisi lebih dari satu bar; exit 1 bila ada.
+3. Dua fixture tes lama diubah dengan sengaja karena memodelkan bug itu sendiri: lima hari berturut-turut yang diperlakukan sebagai lima bar mingguan, dan sepuluh stempel
+   hari-dalam-bulan yang diperlakukan sebagai sepuluh bar bulanan.
+
+**Tidak berubah.** Tidak ada bump `processing_version`: `silver_ohlcv` membaca ulang Bronze dan menulis ulang setiap file Silver pada setiap run, sehingga perbaikan sampai ke file
+yang ada pada run berikutnya. Silver yang sudah ada dan Gold TIDAK berubah sampai Silver dijalankan ulang, lalu Gold. Tidak ada perubahan pada Bronze atau ingester. Untuk periode
+yang di Bronze hanya punya fragmen (ketujuh simbol di atas) satu fragmen tetap bertahan: satu bar per periode dipulihkan, bukan bar month-to-date.
+
+**Verifikasi.** Sebelum: 3611 collected; sesudah: 3641 collected (+30), 3609 passed dan 32 gagal, yaitu himpunan gagal yang SAMA dengan clone pristine (paket
+tidak terpasang di venv sandbox, mis. `fredapi`). 17 mutan pada throw-away copy terbunuh semua. Pada frame Silver live yang asli (AAPL, SPX, VIX 1M; ABBV, AAPL, VIX 1W) dedupe baru
+menghapus tepat bar 2026-11-03 (tiga simbol) dan bar Selasa 2026-08-18 dan 2026-08-25 (ABBV); baris yang tersisa identik dan 1W AAPL/VIX tidak berubah. Belum diverifikasi: run Silver
+dan Gold sesungguhnya, sensus seluruh simbol (skrip audit), serta Bronze AG, NKD_F, NQ_F, ES_F.
+
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — VIX kembali punya Silver: zona waktu campuran pada Bronze 1D/1W/1M diselaraskan menurut tanggal lokal, kegagalan baca per-symbol kini terlihat, dan cek coverage menamai anchor forecast yang hilang (FIX SIL-BRZ-SCHEMA-02, RISK-48)
+
+**Latar.** Permintaan Ovi (12 Nov 2026): periksa log run Silver dan Gold sesudah rebuild dari Bronze, lalu buat patch dari temuannya. Nomor FIX dan
+RISK adalah usulan. Dikerjakan terhadap GitHub `main` (`fae5154`); `ohlcv_processor.py`, `quality_validator.py`, `technical_signals.py` dan kedua YAML
+instrumen identik byte-per-byte dengan repo live.
+
+**Temuan (diukur).**
+- `silver_ohlcv_context` selesai `SUCCESS` dengan `{'done': 171, 'failed': 3}` (57 dari 58 anchor x 3 timeframe). Yang gagal adalah VIX 1D/1W/1M:
+  "failed to determine supertype of datetime[ms, America/Chicago] and datetime[ms, America/New_York]". `audit_bronze_schema_drift.py` mencantumkan ketiganya
+  sebagai "Bronze without Silver", dan `gold_signals` jatuh ke FRED `VIXCLS` pada kelima timeframe (hanya baris DEBUG).
+- Kegagalan direproduksi di sandbox dengan file Bronze VIX yang asli ditambah satu file berlabel New York: pesan galatnya sama persis dengan log.
+  Dari 71 file Bronze VIX 1D, 13 file dibaca dan SEMUANYA `America/Chicago` (zona asli yfinance untuk ^VIX), padahal kolom `_tz_hint` berisi
+  `America/New_York`. File berzona New York BELUM ditemukan, sehingga belum diketahui apakah stempelnya instan yang sama (01:00 NY) atau tengah malam yang
+  sama (00:00 NY). Keduanya diuji.
+- Dugaan pertama bahwa file 11 Nov-lah yang berbeda ternyata SALAH (file itu juga Chicago): rencana eksekusi polars menyebut satu input pada titik gagal,
+  bukan file yang dtype-nya menyimpang.
+- Dari 6 Nov file Bronze VIX berubah dari fetch inkremental (~7 baris) menjadi fetch riwayat penuh (~2.514 baris).
+- Kegagalan baca per-symbol memang bukan kegagalan job (SIL-BRZ-SCHEMA-01), tetapi tidak ada konsumen yang membaca checkpoint: health report "0 failed",
+  gate Silver `pass`, dan `context_coverage_check` tetap hijau pada 57/58 = 98,3% (ambang 95%).
+
+**Perubahan.**
+1. `ohlcv_processor.py` — `_read_bronze_symbol`: untuk 1D/1W/1M, bila satu grup berisi lebih dari satu zona tz-aware, file di luar zona mayoritas distempel
+   ulang ke tengah malam lokal pada TANGGAL LOKAL-nya sendiri di zona mayoritas (bar harian membawa tanggal dagang, bukan instan; `src/utils/trade_date.py`).
+   Seri dengan zona seragam tidak tersentuh (fast path), stempel Silver VIX tetap Chicago. Stempel minoritas yang bukan label tanggal (jam lokal >= 6)
+   membuat pembacaan RAISE, bukan menebak. Timeframe intraday tetap raise. Baris WARNING menyebut file yang distempel ulang (pertama dan terakhir).
+2. `ohlcv_processor.py` — `run()` dan `run_context()` mengembalikan kegagalan baca sebagai `JobResult.warnings` (dicetak runner); hasil job tidak berubah.
+   `run_context` kini mengembalikan `JobResult` (`rows_written` tetap tidak diketahui).
+3. `quality_validator.py` — `context_coverage_check` (tetap WARNING-tier) juga gagal bila anchor `include_in_forecast` tidak punya bar Silver dalam 5 hari,
+   dan menamainya. Perilaku persentase tidak berubah.
+4. `scripts/audit_bronze_schema_drift.py` — menyebut file zona minoritas per grup (jawaban untuk "file mana" yang tidak bisa diberikan himpunan tipe).
+
+**Sengaja tidak diubah.** Gate Silver dan health report tetap tidak membaca checkpoint gagal (keputusan desain, lihat RISK-48); tidak ada perubahan pada
+Bronze, ingester, Gatekeeper, `technical_signals` (`_get_latest_vix` tetap jatuh ke FRED tanpa pesan di atas DEBUG), maupun semantik `is_clean` (XAE-R06).
+
+**Verifikasi.** Baseline pristine 3582 collected; sesudah: 3611 collected (+29), 3579 passed dan 32 gagal, yaitu himpunan gagal yang SAMA dengan clone pristine (paket tidak terpasang di venv sandbox, mis. `fredapi`; baseline live mencatat 2 kegagalan lingkungan). 22 dari 29 tes baru gagal terhadap source lama (7 sisanya mengunci perilaku yang tidak
+boleh berubah) dan semuanya lulus terhadap yang baru. Mutan pada throw-away copy: 11/11 (pembaca), 9/9 (visibilitas), 3 dari 4 (skrip audit; yang selamat setara secara perilaku). Belum
+diverifikasi: data live, file berzona New York yang asli, dan rebuild Silver VIX sesungguhnya.
+
 ## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — penyelarasan job: `--job all` dan `--job bronze|silver|gold` kini satu rantai kanonik; weekly head/tail; `health_report` jalan di hari gagal (ADR-060, GMI-JOB-ALIGN-001)
 
 **Latar.** Permintaan Ovi (10 Nov 2026): evaluasi misalignment empat perintah `runner.py --job all|bronze|silver|gold`,

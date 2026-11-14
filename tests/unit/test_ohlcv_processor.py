@@ -590,8 +590,12 @@ class TestRunEntryPoint:
         # outputs would end up with identical row counts.
         from src.silver.ohlcv_processor import BRONZE_OHLCV_PATH
         base = date(2024, 6, 1)
+        # FIX SIL-DEDUP-PERIOD-01 [13 Nov 2026]: the 1W fixture used to be FIVE CONSECUTIVE DAYS posed as
+        # five weekly bars - several bars in one week, which is exactly what Silver 1W must no longer
+        # hold. Five stamps a week apart are a real weekly series; the test's point (1D and 1W must not
+        # share rows) is unchanged.
         small_df = pl.DataFrame({
-            "timestamp": [base + timedelta(days=i) for i in range(5)],
+            "timestamp": [base + timedelta(days=7 * i) for i in range(5)],
             "open":      [200.0] * 5, "high": [201.0] * 5,
             "low":       [199.0] * 5, "close": [200.5] * 5,
             "volume":    [500_000] * 5,
@@ -1144,3 +1148,466 @@ class TestBronzePolygonNaiveVsYfinanceTzAware:
         assert out.exists(), "LHX shape (tz-aware yfinance + naive polygon) silently/loudly dropped"
         silver = pl.read_parquet(out)
         assert len(silver) == 3 and silver["timestamp"].is_unique().all()
+
+
+class TestBronzeCoarseZoneDrift:
+    """
+    FIX SIL-BRZ-SCHEMA-02 [chat thread, 12 Nov 2026]: regression guard for the VIX drop after the
+    rebuild from Bronze. context/VIX 1D/1W/1M carried tz=America/Chicago files (yfinance's own zone for
+    ^VIX) plus file(s) in tz=America/New_York; two tz-aware zones have no supertype, so the read raised
+    "failed to determine supertype of datetime[ms, America/Chicago] and datetime[ms, America/New_York]"
+    and silver_ohlcv_context ended SUCCESS with failed=3 (no Silver for VIX).
+
+    It is NOT known whether the New York stamps are the same instants as the Chicago ones (01:00 NY) or
+    the same wall-clock midnight (00:00 NY), so both are covered. The close of every bar is
+    100 + day-of-month, so a bar that lands on the wrong date fails on its close, not only on a count.
+    """
+
+    CHI = "America/Chicago"
+    NY = "America/New_York"
+
+    @staticmethod
+    def _write(tmp_path, tf, fname, days, zone, *, label="wall", source="yfinance", symbol="VIX",
+               hour=0, year=2026, month=9):
+        """days: day-of-month list (bar date `year-month-day`). zone: tz of the stamps; None writes a
+        NAIVE epoch-UTC stamp (polygon shape). label='instants': stamps are Chicago midnight converted
+        to `zone` (same instant); label='wall': midnight (+hour) relabelled as `zone`."""
+        from src.silver.ohlcv_processor import BRONZE_OHLCV_PATH
+        wall = [datetime(year, month, d, hour) for d in days]
+        ts = pl.Series("timestamp", wall, dtype=pl.Datetime("ms"))
+        if zone is not None:
+            if label == "instants":
+                ts = ts.dt.replace_time_zone("America/Chicago").dt.convert_time_zone(zone)
+            else:
+                ts = ts.dt.replace_time_zone(zone)
+        n = len(days)
+        close = [100.0 + d for d in days]
+        df = pl.DataFrame({
+            "timestamp": ts,
+            "open": [c - 0.5 for c in close], "high": [c + 1.0 for c in close],
+            "low": [c - 1.0 for c in close], "close": close,
+            "volume": pl.Series([None] * n, dtype=pl.Null),
+            "_source": [source] * n,
+        })
+        out_dir = (tmp_path / BRONZE_OHLCV_PATH / "context" / f"timeframe={tf}"
+                   / f"source={source}" / f"symbol={symbol}" / "year=2026" / "month=09")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        df.write_parquet(out_dir / fname)
+        return out_dir / fname
+
+    @staticmethod
+    def _pattern(tmp_path, tf="1D", symbol="VIX"):
+        from src.silver.ohlcv_processor import BRONZE_OHLCV_PATH
+        return str(tmp_path / BRONZE_OHLCV_PATH / "context" / f"timeframe={tf}"
+                   / "**" / f"symbol={symbol}" / "**" / "*.parquet")
+
+    def _vix_group(self, tmp_path, tf="1D", label="wall"):
+        """Two Chicago files + one New York file, overlapping dates; 10 distinct bars (Sep 1..10)."""
+        self._write(tmp_path, tf, "VIX_raw_20260904.parquet", [1, 2, 3, 4], self.CHI)
+        self._write(tmp_path, tf, "VIX_raw_20260906.parquet", [3, 4, 5, 6, 7, 8], self.CHI)
+        self._write(tmp_path, tf, "VIX_raw_20260910.parquet", [5, 6, 7, 8, 9, 10], self.NY, label=label)
+        return list(range(1, 11))
+
+    def _assert_one_bar_per_date(self, df, days, zone):
+        from src.silver.ohlcv_processor import OHLCVProcessor
+        out = OHLCVProcessor._deduplicate(df, "VIX", "1D").sort("timestamp")
+        assert out["timestamp"].dtype.time_zone == zone
+        assert out["timestamp"].is_unique().all()
+        assert out["timestamp"].dt.hour().unique().to_list() == [0], "re-stamped bars must sit at local midnight"
+        assert out["timestamp"].dt.day().to_list() == days, "a bar landed on the wrong date"
+        assert out["close"].to_list() == [100.0 + d for d in days], "a bar kept a close from another date"
+
+    # ── root cause ──────────────────────────────────────────────────────────────────────
+
+    def test_two_zone_group_reproduces_original_failure(self, tmp_path):
+        """Pins the root cause: the plain scan raises SchemaError on this fixture."""
+        self._vix_group(tmp_path)
+        with pytest.raises(pl.exceptions.SchemaError):
+            pl.scan_parquet(self._pattern(tmp_path)).collect()
+
+    # ── the fix, both possible meanings of the New York label ──────────────────────────────
+
+    @pytest.mark.parametrize("label", ["instants", "wall"])
+    def test_new_york_file_is_restamped_onto_the_majority_zone(self, tmp_path, label):
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        days = self._vix_group(tmp_path, label=label)
+        df = _read_bronze_symbol(self._pattern(tmp_path), tz_hint=self.NY)
+        assert df is not None and len(df) == 4 + 6 + 6
+        self._assert_one_bar_per_date(df, days, self.CHI)
+
+    def test_majority_zone_files_are_not_touched(self, tmp_path):
+        """The Chicago files keep their exact instants and values; only the minority file is re-stamped."""
+        from zoneinfo import ZoneInfo
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        self._vix_group(tmp_path)
+        df = _read_bronze_symbol(self._pattern(tmp_path), tz_hint=self.NY)
+        first = df.head(4)      # files are read in name order; 20260904 is the first Chicago file
+        assert first["timestamp"].to_list() == [
+            datetime(2026, 9, d, tzinfo=ZoneInfo(self.CHI)) for d in (1, 2, 3, 4)
+        ]
+        assert first["close"].to_list() == [101.0, 102.0, 103.0, 104.0]
+
+    def test_majority_zone_stamps_are_never_re_dated(self, tmp_path):
+        """A Chicago file stamped at 03:00 (inside the hour limit) must keep 03:00: only the MINORITY
+        zone is re-stamped, never the majority one."""
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        self._write(tmp_path, "1D", "a.parquet", [1, 2, 3], self.CHI, hour=3)
+        self._write(tmp_path, "1D", "b.parquet", [4, 5], self.CHI, hour=3)
+        self._write(tmp_path, "1D", "c.parquet", [6, 7], self.NY)
+        df = _read_bronze_symbol(self._pattern(tmp_path), tz_hint=self.NY)
+        chi = df.filter(pl.col("close") < 106.0)
+        assert chi["timestamp"].dt.hour().unique().to_list() == [3]
+        assert df.filter(pl.col("close") >= 106.0)["timestamp"].dt.hour().unique().to_list() == [0]
+
+    def test_polygon_naive_utc_beside_a_chicago_majority_lands_on_the_same_date(self, tmp_path):
+        """polygon (naive epoch UTC, target_tz New York) is converted to New York first; the zone
+        reconcile must then carry it onto the Chicago majority without a duplicate bar."""
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        self._write(tmp_path, "1D", "VIX_raw_20260904.parquet", [1, 2, 3, 4], self.CHI)
+        self._write(tmp_path, "1D", "VIX_raw_20260906.parquet", [3, 4, 5, 6], self.CHI)
+        # polygon: 04:00 UTC = New York midnight under EDT, for 5 and 6 Sep
+        self._write(tmp_path, "1D", "VIX_raw_20260907.parquet", [5, 6], None, source="polygon", hour=4)
+        df = _read_bronze_symbol(self._pattern(tmp_path), tz_hint=self.NY)
+        self._assert_one_bar_per_date(df, [1, 2, 3, 4, 5, 6], self.CHI)
+
+    # ── which zone wins ─────────────────────────────────────────────────────────────────
+
+    def test_majority_beats_the_instrument_zone_hint(self, tmp_path):
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        self._vix_group(tmp_path)     # 2 Chicago, 1 New York
+        df = _read_bronze_symbol(self._pattern(tmp_path), tz_hint=self.NY)
+        assert df["timestamp"].dtype.time_zone == self.CHI, "the hint must not flip a Chicago majority"
+
+    def test_majority_new_york_wins_even_against_a_chicago_hint(self, tmp_path):
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        self._write(tmp_path, "1D", "a.parquet", [1, 2, 3], self.NY)
+        self._write(tmp_path, "1D", "b.parquet", [3, 4, 5], self.NY)
+        self._write(tmp_path, "1D", "c.parquet", [5, 6], self.CHI)
+        df = _read_bronze_symbol(self._pattern(tmp_path), tz_hint=self.CHI)
+        self._assert_one_bar_per_date(df, [1, 2, 3, 4, 5, 6], self.NY)
+
+    def test_tie_goes_to_the_instrument_zone_then_alphabetical(self, tmp_path):
+        from src.silver.ohlcv_processor import _read_bronze_symbol, _canonical_zone
+        self._write(tmp_path, "1D", "a.parquet", [1, 2, 3], self.CHI)
+        self._write(tmp_path, "1D", "b.parquet", [3, 4, 5], self.NY)
+        assert _read_bronze_symbol(self._pattern(tmp_path), tz_hint=self.NY)["timestamp"].dtype.time_zone == self.NY
+        assert _read_bronze_symbol(self._pattern(tmp_path), tz_hint=None)["timestamp"].dtype.time_zone == self.CHI
+        assert _canonical_zone([self.NY, self.CHI], None) == self.CHI
+        assert _canonical_zone([self.NY, self.CHI], self.NY) == self.NY
+        assert _canonical_zone([self.NY, self.CHI, self.CHI], self.NY) == self.CHI
+
+    # ── what must still raise ───────────────────────────────────────────────────────────
+
+    def test_stamps_that_are_not_date_labels_raise_instead_of_being_redated(self, tmp_path):
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        self._write(tmp_path, "1D", "a.parquet", [1, 2, 3], self.CHI)
+        self._write(tmp_path, "1D", "b.parquet", [3, 4, 5], self.CHI)
+        self._write(tmp_path, "1D", "c.parquet", [5, 6], self.NY, hour=20)    # 20:00 New York
+        with pytest.raises(ValueError, match="not date labels"):
+            _read_bronze_symbol(self._pattern(tmp_path), tz_hint=self.NY)
+
+    def test_the_local_hour_limit_is_exact(self, tmp_path):
+        from src.silver.ohlcv_processor import _read_bronze_symbol, _COARSE_STAMP_MAX_LOCAL_HOUR
+        assert _COARSE_STAMP_MAX_LOCAL_HOUR == 6
+        for hour, ok in ((5, True), (6, False)):
+            d = tmp_path / f"h{hour}"
+            self._write(d, "1D", "a.parquet", [1, 2], self.CHI)
+            self._write(d, "1D", "b.parquet", [2, 3], self.CHI)
+            self._write(d, "1D", "c.parquet", [3, 4], self.NY, hour=hour)
+            if ok:
+                assert _read_bronze_symbol(self._pattern(d), tz_hint=self.NY) is not None
+            else:
+                with pytest.raises(ValueError, match="not date labels"):
+                    _read_bronze_symbol(self._pattern(d), tz_hint=self.NY)
+
+    def test_intraday_two_zone_group_still_raises(self, tmp_path):
+        """An instant cannot be re-dated: only 1D/1W/1M are reconciled."""
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        self._write(tmp_path, "1H", "a.parquet", [1, 2], self.CHI)
+        self._write(tmp_path, "1H", "b.parquet", [2, 3], self.NY)
+        with pytest.raises(pl.exceptions.PolarsError):
+            _read_bronze_symbol(self._pattern(tmp_path, tf="1H"), tz_hint=self.NY)
+
+    def test_uniform_zone_group_takes_the_fast_path_unchanged(self, tmp_path):
+        from src.silver.ohlcv_processor import _read_bronze_symbol
+        self._write(tmp_path, "1D", "a.parquet", [1, 2, 3], self.CHI)
+        self._write(tmp_path, "1D", "b.parquet", [3, 4, 5], self.CHI)
+        pat = self._pattern(tmp_path)
+        assert _read_bronze_symbol(pat, tz_hint=self.NY).equals(pl.scan_parquet(pat).collect())
+
+    # ── helpers ─────────────────────────────────────────────────────────────────────────
+
+    def test_timeframe_segment_helper(self):
+        from src.silver.ohlcv_processor import _bronze_timeframe_of
+        p = "data/bronze/market/ohlcv/context/timeframe=1W/source=yfinance/symbol=VIX/x.parquet"
+        assert _bronze_timeframe_of(p) == "1W"
+        assert _bronze_timeframe_of("data/bronze/other/x.parquet") is None
+
+    # ── the job, end to end ─────────────────────────────────────────────────────────────
+
+    @pytest.mark.parametrize("label", ["instants", "wall"])
+    def test_run_context_produces_silver_for_every_context_timeframe(self, tmp_path, monkeypatch, label):
+        """THE VIX regression: all three context timeframes, Chicago files + a New York file."""
+        import src.silver.ohlcv_processor as ohlcv_mod
+        from src.utils.progress_checkpoint import ProgressCheckpoint
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "src.config.instrument_loader.get_loader",
+            lambda: TestRunContextEntryPoint._fake_loader(
+                [TestRunContextEntryPoint._fake_context_instrument("VIX", timezone=self.NY)]
+            ),
+        )
+        for tf in ohlcv_mod._RUN_CONTEXT_TFS:
+            self._vix_group(tmp_path, tf=tf, label=label)
+
+        ohlcv_mod.run_context(date(2026, 11, 12))
+
+        silver_dir = tmp_path / ohlcv_mod.SILVER_OHLCV_PATH / "context" / "symbol=VIX"
+        ckpt = ProgressCheckpoint("silver_ohlcv_context", date(2026, 11, 12))
+        assert ckpt.failed_report() == [], "VIX must not be a failed checkpoint any more"
+        for tf in ohlcv_mod._RUN_CONTEXT_TFS:
+            out = silver_dir / f"VIX_{tf}_silver.parquet"
+            assert out.exists(), f"VIX {tf} has no Silver — the original bug"
+            s = pl.read_parquet(out).sort("timestamp")
+            assert s["timestamp"].dtype.time_zone == self.CHI
+            # 10 stamps (Sep 1..10 2026) are ten bars only for 1D; as 1W / 1M bars they fall in two weeks
+            # (Sun..Sat: 1-5 Sep and 6-10 Sep) and one month, and the earliest stamp of each period survives
+            # (FIX SIL-DEDUP-PERIOD-01).
+            expected = {"1D": list(range(1, 11)), "1W": [1, 6], "1M": [1]}[tf]
+            assert s["timestamp"].is_unique().all()
+            assert s["timestamp"].dt.day().to_list() == expected
+            assert s["close"].to_list() == [100.0 + d for d in expected]
+
+
+class TestFailedReadVisibility:
+    """
+    FIX SIL-BRZ-SCHEMA-02 [chat thread, 12 Nov 2026]: a failed per-symbol read is by design not a failed
+    job (SIL-BRZ-SCHEMA-01), but it was invisible: 12 Nov 2026 silver_ohlcv_context ended SUCCESS with
+    {'done': 171, 'failed': 3} and nothing downstream reads the checkpoint. The jobs now return their
+    failures as JobResult.warnings (printed by src/runner.py run_job); the job outcome is unchanged.
+    """
+
+    @staticmethod
+    def _corrupt_context_bronze(tmp_path, symbol="VIX"):
+        f = TestBronzeSchemaDrift._write(
+            tmp_path, "context", "1D", symbol, "a.parquet",
+            [date(2026, 9, 1) + timedelta(days=i) for i in range(3)],
+        )
+        f.write_bytes(b"not a parquet file")
+
+    def test_run_context_reports_failed_reads_as_warnings(self, tmp_path, monkeypatch):
+        import src.silver.ohlcv_processor as ohlcv_mod
+        from src.utils.job_result import JobResult
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "src.config.instrument_loader.get_loader",
+            lambda: TestRunContextEntryPoint._fake_loader([TestRunContextEntryPoint._fake_context_instrument("VIX")]),
+        )
+        self._corrupt_context_bronze(tmp_path)
+
+        result = ohlcv_mod.run_context(date(2026, 11, 12))   # must still not raise out of the job
+
+        assert isinstance(result, JobResult)
+        assert result.rows_written is None, "unknown stays unknown: no row count is claimed"
+        assert len(result.warnings) == 1
+        assert "VIX/1D" in result.warnings[0] and "FAILED" in result.warnings[0]
+
+    def test_run_context_clean_run_has_no_warnings(self, tmp_path, monkeypatch):
+        import src.silver.ohlcv_processor as ohlcv_mod
+        from src.utils.job_result import JobResult
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "src.config.instrument_loader.get_loader",
+            lambda: TestRunContextEntryPoint._fake_loader([TestRunContextEntryPoint._fake_context_instrument("CNH", timezone="UTC")]),
+        )
+        for tf in ohlcv_mod._RUN_CONTEXT_TFS:
+            TestBronzeSchemaDrift()._write_cnh_mixed(tmp_path, tf=tf)
+
+        result = ohlcv_mod.run_context(date(2026, 11, 12))
+
+        assert isinstance(result, JobResult) and result.warnings == ()
+
+    def test_run_layer1_reports_failed_reads_as_warnings(self, tmp_path, monkeypatch):
+        import src.silver.ohlcv_processor as ohlcv_mod
+
+        monkeypatch.chdir(tmp_path)
+        inst = TestRunEntryPoint._fake_instrument("EUR_USD", market="forex")
+        monkeypatch.setattr(
+            "src.config.instrument_loader.get_loader",
+            lambda: TestRunEntryPoint._fake_loader([inst]),
+        )
+        f = TestBronzeSchemaDrift._write(
+            tmp_path, "forex", "1D", "EUR_USD", "a.parquet",
+            [date(2026, 9, 1) + timedelta(days=i) for i in range(3)], source="yfinance",
+        )
+        f.write_bytes(b"not a parquet file")
+
+        result = ohlcv_mod.run(date(2026, 11, 12))
+
+        assert len(result.warnings) >= 1 and "EUR_USD/1D" in " ".join(result.warnings)
+
+    def test_helper_caps_the_listed_items(self, tmp_path, monkeypatch):
+        from src.silver.ohlcv_processor import _failed_checkpoint_warnings
+        from src.utils.progress_checkpoint import ProgressCheckpoint
+
+        monkeypatch.chdir(tmp_path)
+        ckpt = ProgressCheckpoint("silver_ohlcv_context", date(2026, 11, 12))
+        for i in range(12):
+            ckpt.mark_failed(f"S{i:02d}", ValueError("boom"), timeframe="1D")
+        (w,) = _failed_checkpoint_warnings("silver_ohlcv_context", date(2026, 11, 12))
+        assert w.startswith("12 (symbol, timeframe) read(s) FAILED")
+        assert "(+2 more)" in w and "S09/1D" in w and "S10/1D" not in w
+
+
+class TestPeriodDeduplication:
+    """
+    FIX SIL-DEDUP-PERIOD-01 [chat thread, 13 Nov 2026]: Silver 1W/1M must hold ONE bar per period. Live
+    case: Silver 1M of AAPL / SPX / VIX (and Gold 1M of 156 of 200 symbols) held the month-to-date bar
+    stamped 2026-11-01 AND a one-day fragment stamped 2026-11-03 from a partial-window Bronze fetch, because
+    the dedupe keyed on the raw timestamp. Rule: per period the EARLIEST stamp date wins, among rows on that
+    date the LAST ingested; the period is read from the stamp's own local date; 1D is untouched.
+    The close of each fixture bar is chosen so a wrong survivor is visible in the value, not only in a count.
+    """
+
+    @staticmethod
+    def _bars(rows, tz=None):
+        """rows: [(ISO stamp, close)] in INGEST (file) order."""
+        ts = pl.Series("timestamp", [datetime.fromisoformat(s) for s, _ in rows], dtype=pl.Datetime("ms"))
+        if tz:
+            ts = ts.dt.replace_time_zone(tz)
+        c = [float(x) for _, x in rows]
+        return pl.DataFrame({
+            "timestamp": ts, "open": [x - 1 for x in c], "high": [x + 1 for x in c],
+            "low": [x - 2 for x in c], "close": c, "volume": [1000] * len(c),
+        })
+
+    @classmethod
+    def _dedupe(cls, rows, timeframe, tz=None):
+        # process_symbol sorts by timestamp (stable) before _deduplicate; do the same here
+        df = cls._bars(rows, tz).sort("timestamp", maintain_order=True)
+        return OHLCVProcessor._deduplicate(df, "SYM", timeframe)
+
+    @staticmethod
+    def _stamps(df):
+        return [t.strftime("%Y-%m-%d") for t in df["timestamp"].to_list()]
+
+    # ── the live 1M case ───────────────────────────────────────────────────────────────
+
+    def test_one_day_fragment_does_not_survive_next_to_the_month_bar(self):
+        out = self._dedupe([("2026-10-01", 100), ("2026-11-01", 118.70), ("2026-11-03", 120.83)], "1M")
+        assert self._stamps(out) == ["2026-10-01", "2026-11-01"]
+        assert out["close"].to_list() == [100.0, 118.70], "the fragment's close must not survive"
+
+    def test_the_earliest_stamp_wins_even_when_the_fragment_is_the_latest_ingest(self):
+        """As of the 3 Nov run the fragment IS the most recent ingest; it must still lose."""
+        out = self._dedupe([("2026-11-01", 121.15), ("2026-11-03", 120.83)], "1M")
+        assert self._stamps(out) == ["2026-11-01"] and out["close"].to_list() == [121.15]
+
+    def test_among_equal_stamps_the_last_ingest_wins(self):
+        out = self._dedupe([("2026-11-01", 100.0), ("2026-11-01", 101.0), ("2026-11-01", 102.0)], "1M")
+        assert len(out) == 1 and out["close"].to_list() == [102.0]
+
+    def test_many_fragments_collapse_to_the_earliest_one(self):
+        """YM_F / AU shape: one fragment per ingest day, no stamp on the 1st."""
+        rows = [(f"2026-11-{d:02d}", 100 + d) for d in (6, 9, 10, 11, 12)]
+        out = self._dedupe([("2026-10-01", 90.0)] + rows, "1M")
+        assert self._stamps(out) == ["2026-10-01", "2026-11-06"]
+        assert out["close"].to_list() == [90.0, 106.0]
+
+    def test_two_instants_on_the_same_stamp_date_are_one_bar(self):
+        """A coarse bar is dated, not timed: 00:00 and 01:00 of the same local date are the same bar."""
+        out = self._dedupe([("2026-11-01T00:00", 1.0), ("2026-11-01T01:00", 2.0)], "1M")
+        assert len(out) == 1 and out["close"].to_list() == [2.0]
+
+    def test_month_boundaries_are_respected(self):
+        out = self._dedupe([("2026-10-01", 1.0), ("2026-10-31", 2.0), ("2026-11-01", 3.0), ("2026-12-01", 4.0)], "1M")
+        assert self._stamps(out) == ["2026-10-01", "2026-11-01", "2026-12-01"]
+        assert out["close"].to_list() == [1.0, 3.0, 4.0]
+
+    def test_local_date_not_utc_date_decides_the_month(self):
+        """Jakarta 2026-11-01 00:00 is 2026-10-31 17:00 UTC: it is a NOVEMBER bar."""
+        out = self._dedupe(
+            [("2026-10-01", 1.0), ("2026-11-01", 2.0), ("2026-11-03", 3.0)], "1M", tz="Asia/Jakarta")
+        assert self._stamps(out) == ["2026-10-01", "2026-11-01"]
+        assert out["close"].to_list() == [1.0, 2.0]
+
+    def test_the_local_stamp_date_orders_the_bars_not_the_utc_date(self):
+        """Jakarta 2026-11-01 20:00 (13:00 UTC) and 2026-11-02 01:00 (18:00 UTC) share a UTC date but are two
+        local dates: the earlier LOCAL date is the period's earliest stamp."""
+        out = self._dedupe([("2026-11-01T20:00", 1.0), ("2026-11-02T01:00", 2.0)], "1M", tz="Asia/Jakarta")
+        assert out["close"].to_list() == [1.0]
+
+    # ── 1W ────────────────────────────────────────────────────────────────────────────
+
+    def test_abbv_monday_and_tuesday_stamped_week_keeps_the_monday(self):
+        """GD9 shape: Mon 17 Aug (253.93..264.96, the true Friday close) and Tue 18 Aug (264.52)."""
+        out = self._dedupe([("2026-08-17", 264.96), ("2026-08-18", 264.52), ("2026-08-24", 255.48), ("2026-08-25", 255.48)], "1W")
+        assert self._stamps(out) == ["2026-08-17", "2026-08-24"]
+        assert out["close"].to_list() == [264.96, 255.48]
+
+    def test_adjacent_weeks_are_never_merged(self):
+        out = self._dedupe([(f"2026-11-{d:02d}", d) for d in (2, 9, 16)], "1W")
+        assert self._stamps(out) == ["2026-11-02", "2026-11-09", "2026-11-16"]
+
+    def test_sunday_stamped_weeks_open_the_week_that_follows(self):
+        """Forex convention: Sunday 8 Nov opens the week of 9 Nov; it must not collide with Monday 2 Nov,
+        which a plain ISO-week truncation would put in the same week."""
+        out = self._dedupe([("2026-11-02", 1.0), ("2026-11-08", 2.0), ("2026-11-15", 3.0)], "1W")
+        assert self._stamps(out) == ["2026-11-02", "2026-11-08", "2026-11-15"]
+
+    def test_sunday_and_monday_of_the_same_week_collapse_to_the_earlier(self):
+        out = self._dedupe([("2026-11-08", 1.0), ("2026-11-09", 2.0)], "1W")
+        assert self._stamps(out) == ["2026-11-08"] and out["close"].to_list() == [1.0]
+
+    # ── what must not change ───────────────────────────────────────────────────────────
+
+    def test_daily_bars_are_not_period_deduplicated(self):
+        out = self._dedupe([("2026-11-02", 1.0), ("2026-11-03", 2.0), ("2026-11-03", 3.0), ("2026-11-04", 4.0)], "1D")
+        assert self._stamps(out) == ["2026-11-02", "2026-11-03", "2026-11-04"]
+        assert out["close"].to_list() == [1.0, 3.0, 4.0], "1D: one bar per timestamp, last ingest wins"
+
+    def test_columns_are_unchanged(self):
+        df = self._bars([("2026-11-01", 1.0), ("2026-11-03", 2.0)])
+        out = OHLCVProcessor._deduplicate(df.sort("timestamp"), "SYM", "1M")
+        assert out.columns == df.columns and out.schema == df.schema
+
+    def test_period_key_rejects_other_timeframes(self):
+        from src.silver.ohlcv_processor import period_key_expr
+        with pytest.raises(ValueError):
+            period_key_expr("1D")
+
+    # ── through the real pipeline ─────────────────────────────────────────────────────────
+
+    def test_process_symbol_1m_has_one_bar_per_month(self, proc):
+        raw = pl.DataFrame({
+            "timestamp": [date(2026, 9, 1), date(2026, 10, 1), date(2026, 11, 1), date(2026, 11, 3)],
+            "open": [10.0, 11.0, 19.05, 21.66], "high": [12.0, 13.0, 29.0, 22.0],
+            "low": [9.0, 10.0, 16.0, 20.0], "close": [11.0, 19.42, 18.70, 20.83],
+            "volume": [1000, 1000, 1000, 1000],
+        })
+        out = proc.process_symbol(raw, "AAPL", "us_stocks", "1M")
+        assert len(out) == 3 and out["close"].to_list() == [11.0, 19.42, 18.70]
+        assert out["timestamp"].dt.month().to_list() == [9, 10, 11]
+
+    def test_run_context_silver_1m_has_one_bar_per_month(self, tmp_path, monkeypatch):
+        """The live VIX case end to end: a month bar, a one-row fragment ingested after it, a later bar."""
+        import src.silver.ohlcv_processor as ohlcv_mod
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "src.config.instrument_loader.get_loader",
+            lambda: TestRunContextEntryPoint._fake_loader(
+                [TestRunContextEntryPoint._fake_context_instrument("VIX", timezone="America/Chicago")]),
+        )
+        w = TestBronzeCoarseZoneDrift._write
+        w(tmp_path, "1M", "VIX_raw_20260902.parquet", [1], "America/Chicago")          # month-to-date bar, close 101
+        w(tmp_path, "1M", "VIX_raw_20260903.parquet", [3], "America/Chicago")          # fragment stamped the 3rd, close 103
+        w(tmp_path, "1M", "VIX_raw_20260904.parquet", [1], "America/Chicago")          # month-to-date again (stamp the 1st)
+        for tf in ("1D", "1W"):
+            w(tmp_path, tf, "VIX_raw_20260904.parquet", [1, 2, 3], "America/Chicago")
+        ohlcv_mod.run_context(date(2026, 11, 12))
+        s = pl.read_parquet(tmp_path / ohlcv_mod.SILVER_OHLCV_PATH / "context" / "symbol=VIX" / "VIX_1M_silver.parquet")
+        assert len(s) == 1, "one September bar, not two"
+        assert s["timestamp"].dt.day().to_list() == [1] and s["close"].to_list() == [101.0]

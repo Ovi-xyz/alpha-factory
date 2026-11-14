@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
@@ -52,6 +52,22 @@ def _schema_of(path: Path) -> dict[str, str]:
     return {name: str(schema.field(name).type) for name in schema.names}
 
 
+def _zone_minority(files: list[Path], schemas: list[dict[str, str]]) -> list[tuple[str, str]]:
+    """FIX SIL-BRZ-SCHEMA-02: (file name, timestamp type) of the files whose tz-aware `timestamp`
+    zone is NOT the group's majority zone (ties: alphabetical, the reader's no-hint rule). Empty
+    unless the group holds two or more tz-aware zones. This is the answer the arrow-type SET in
+    `columns` cannot give: WHICH files carry the odd zone (VIX 12 Nov 2026: Chicago + New York,
+    one of 71 files was not findable by reading footers by hand)."""
+    types = [sc.get("timestamp", "") for sc in schemas]
+    aware = [t for t in types if "tz=" in t]
+    if len(set(aware)) < 2:
+        return []
+    counts = Counter(aware)
+    top = max(counts.values())
+    major = sorted(t for t, c in counts.items() if c == top)[0]
+    return [(f.name, t) for f, t in zip(files, types) if "tz=" in t and t != major]
+
+
 def find_drift(groups: dict[GroupKey, list[Path]], workers: int = 8) -> list[dict]:
     """Groups whose files disagree on a column's dtype or presence."""
     out = []
@@ -67,7 +83,11 @@ def find_drift(groups: dict[GroupKey, list[Path]], workers: int = 8) -> list[dic
                 if sum(c in sc for sc in schemas) < len(schemas):
                     cols.setdefault(c, sorted(seen[c]) + ["<absent in some files>"])
             if cols:
-                out.append({"key": key, "n_files": len(files), "columns": cols})
+                entry = {"key": key, "n_files": len(files), "columns": cols}
+                minority = _zone_minority(files, schemas)
+                if minority:
+                    entry["zone_minority"] = minority
+                out.append(entry)
     return out
 
 
@@ -114,12 +134,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     gaps = find_silver_gaps(groups, args.silver_root, registry)
 
     print(f"\nSCHEMA DRIFT — {len(drift)} group(s) (the reader reconciles String/Date "
-          "timestamps and polygon-naive vs tz-aware; any other unresolvable supertype "
-          "or a non-numeric price still raises and is marked FAILED):")
+          "timestamps, polygon-naive vs tz-aware and, for 1D/1W/1M, two tz-aware zones "
+          "(SIL-BRZ-SCHEMA-02); any other unresolvable supertype or a non-numeric price "
+          "still raises and is marked FAILED):")
     for d in drift:
         m, tf, sym = d["key"]
         print(f"  {m}/{sym} {tf}  files={d['n_files']}  " +
               "; ".join(f"{c}: {t}" for c, t in d["columns"].items()))
+        for name, typ in d.get("zone_minority", [])[:5]:
+            print(f"      minority zone: {name}  {typ}")
+        if len(d.get("zone_minority", [])) > 5:
+            print(f"      ... +{len(d['zone_minority']) - 5} more minority-zone file(s)")
     print(f"\nBRONZE WITHOUT SILVER — {len(gaps)} group(s):")
     for m, tf, sym in gaps:
         print(f"  {m}/{sym} {tf}")

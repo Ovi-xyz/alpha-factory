@@ -1179,3 +1179,77 @@ class TestContextOutlierIsfiniteGuard:
             [{"check": "context_outlier_detection", "detail": "outlier detection query failed, x"}])
         row = pl.read_parquet(tmp_path / "quality_gate_log.parquet").row(0, named=True)
         assert row["passed"] is True and "query failed" in row["detail"]
+
+
+class TestContextForecastAnchorCoverage:
+    """
+    FIX SIL-BRZ-SCHEMA-02 [chat thread, 12 Nov 2026]: context_coverage_check divides fresh anchors by the
+    active ones against a 95% floor, which tolerates a missing anchor (VIX missing = 57 of 58 = 98.3%), so
+    VIX had no Silver for days while the check stayed green (CNH before it). An anchor that
+    include_in_forecast is not optional: it is named and the check fails at WARNING tier.
+    """
+
+    @staticmethod
+    def _setup(tmp_path, monkeypatch, anchors, fresh, stale=()):
+        """anchors: [(symbol, include_in_forecast)]. fresh: symbols with a bar on run_date.
+        stale: symbols whose only bar is 30 days old."""
+        import polars as pl
+        from types import SimpleNamespace
+        import src.silver.quality_validator as qv_mod
+
+        monkeypatch.setattr(qv_mod, "SILVER_OHLCV_PATH", tmp_path)
+
+        class _Loader:
+            def count_context(self, include_deferred=False):
+                return len(anchors)
+
+            def forecast_context(self):
+                return [SimpleNamespace(symbol=s) for s, f in anchors if f]
+
+        monkeypatch.setattr("src.config.instrument_loader.get_loader", lambda: _Loader())
+        run_date = date(2026, 11, 12)
+        for sym, d in [(s, run_date) for s in fresh] + [(s, date(2026, 10, 13)) for s in stale]:
+            p = tmp_path / "context" / f"symbol={sym}" / f"{sym}_1D_silver.parquet"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            pl.DataFrame({
+                "symbol": [sym], "timestamp": [d], "open": [100.0], "high": [105.0], "low": [95.0],
+                "close": [102.0], "volume": [1_000_000], "is_clean": [True], "log_return": [0.001],
+            }).write_parquet(p)
+        return run_date
+
+    def test_a_missing_forecast_anchor_fails_even_when_the_percentage_passes(self, tmp_path, monkeypatch):
+        anchors = [(f"A{i:02d}", True) for i in range(19)] + [("VIX", True)]
+        rd = self._setup(tmp_path, monkeypatch, anchors, fresh=[s for s, _ in anchors if s != "VIX"])
+        qv = QualityValidator()
+        assert qv._check_context_coverage(rd) is False, "19/20 = 95.0% passes the floor; the anchor must not"
+        (issue,) = [i for i in qv._issues if i["check"] == "context_coverage_check"]
+        assert "VIX" in issue["detail"] and "forecast anchor" in issue["detail"]
+
+    def test_a_missing_non_forecast_anchor_is_still_tolerated(self, tmp_path, monkeypatch):
+        anchors = [(f"A{i:02d}", True) for i in range(20)] + [("ETF", False)]
+        rd = self._setup(tmp_path, monkeypatch, anchors, fresh=[f"A{i:02d}" for i in range(20)])
+        qv = QualityValidator()
+        assert qv._check_context_coverage(rd) is True and qv._issues == []
+
+    def test_a_stale_forecast_anchor_counts_as_missing(self, tmp_path, monkeypatch):
+        anchors = [(f"A{i:02d}", True) for i in range(19)] + [("VIX", True)]
+        rd = self._setup(tmp_path, monkeypatch, anchors,
+                         fresh=[s for s, _ in anchors if s != "VIX"], stale=["VIX"])
+        assert QualityValidator()._check_context_coverage(rd) is False
+
+    def test_all_anchors_fresh_passes(self, tmp_path, monkeypatch):
+        anchors = [(f"A{i:02d}", i % 2 == 0) for i in range(20)]
+        rd = self._setup(tmp_path, monkeypatch, anchors, fresh=[s for s, _ in anchors])
+        qv = QualityValidator()
+        assert qv._check_context_coverage(rd) is True and qv._issues == []
+
+    def test_the_percentage_floor_still_fails_on_its_own(self, tmp_path, monkeypatch):
+        anchors = [(f"A{i:02d}", False) for i in range(20)]
+        rd = self._setup(tmp_path, monkeypatch, anchors, fresh=[f"A{i:02d}" for i in range(15)])
+        qv = QualityValidator()
+        assert qv._check_context_coverage(rd) is False
+        assert "coverage=75.0%" in qv._issues[0]["detail"]
+
+    def test_the_check_stays_warning_tier(self):
+        from src.silver.quality_validator import CRITICAL_CHECKS, WARNING_CHECKS
+        assert "context_coverage_check" in WARNING_CHECKS and "context_coverage_check" not in CRITICAL_CHECKS

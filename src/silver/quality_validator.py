@@ -945,23 +945,25 @@ class QualityValidator:
         FIX QV-L2-01's root cause)."""
         try:
             from src.config.instrument_loader import get_loader
-            total_expected = get_loader().count_context(include_deferred=False)
+            loader = get_loader()
+            total_expected = loader.count_context(include_deferred=False)
 
             con = duckdb.connect()
             glob = context_glob(SILVER_OHLCV_PATH, "*_1D_silver.parquet")
             if glob is None:
                 return True
             start_5d = (run_date - timedelta(days=5)).isoformat()
-            result = con.execute(
+            rows = con.execute(
                 with_trade_date("""
-                SELECT COUNT(DISTINCT symbol) AS symbol_count
+                SELECT DISTINCT symbol AS symbol
                 FROM read_parquet($glob, hive_partitioning=true)
                 WHERE __TRADE_DATE__ >= $start_date
                 """),
                 {"glob": glob, "start_date": start_5d},
-            ).fetchone()
+            ).fetchall()
 
-            fresh_count = result[0] if result else 0
+            fresh       = {r[0] for r in rows}
+            fresh_count = len(fresh)
             coverage    = fresh_count / total_expected * 100 if total_expected else 0
 
             if coverage < COVERAGE_MIN_PCT:
@@ -969,6 +971,20 @@ class QualityValidator:
                     "check":  "context_coverage_check",
                     "detail": f"Layer 2 coverage={coverage:.1f}% < {COVERAGE_MIN_PCT}% "
                               f"(of {total_expected} active context anchors)"
+                })
+                return False
+
+            # FIX SIL-BRZ-SCHEMA-02 [chat thread, 12 Nov 2026]: the percentage floor tolerates a
+            # missing anchor (57 of 58 = 98.3% vs 95%), which is how VIX lost its Silver unnoticed
+            # (and CNH before it, FIX SIL-BRZ-SCHEMA-01). An anchor that the CrossAssetEngine
+            # forecasts on (include_in_forecast) is not optional: name it, WARNING tier.
+            missing = sorted(i.symbol for i in loader.forecast_context() if i.symbol not in fresh)
+            if missing:
+                self._issues.append({
+                    "check":  "context_coverage_check",
+                    "detail": f"Layer 2 forecast anchor(s) without a Silver bar in the last 5 days: "
+                              f"{', '.join(missing)} (coverage {coverage:.1f}% passes the "
+                              f"{COVERAGE_MIN_PCT}% floor, which tolerates missing anchors)"
                 })
                 return False
         except Exception as e:

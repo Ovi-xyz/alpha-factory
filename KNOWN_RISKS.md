@@ -4876,3 +4876,96 @@ session; no version bump (repo stays at v1.24.0 with the Unreleased entries). Ne
 - Pristine baseline 3498 collected. After: 3582 collected (+84), 3580 passed, the same 2 environmental failures (`test_check_poetry_env`), one process, 312 s.
 - 30 of 30 mutants killed on a throw-away copy; the unmutated control was green. See the dev-log of 10 Nov 2026 for the per-file comparison and the mutation list.
 - Not verified: anything on live data, a real Sunday tail behind the real daily chain, `register_views` after a layer run, the registry's duration estimates.
+
+
+## RISK-48 (NEW): Mixed tz-aware zones in Bronze 1D/1W/1M and invisible per-symbol read failures (FIX SIL-BRZ-SCHEMA-02) — built and unit-tested in sandbox only; the odd Bronze file(s) were never located; never run against the live Bronze/Silver stores
+
+### What changed (facts)
+- After the 12 Nov 2026 rebuild from Bronze, `silver_ohlcv_context` ended `SUCCESS` with `{'done': 171, 'failed': 3}`: context/VIX 1D/1W/1M raised `failed to
+  determine supertype of datetime[ms, America/Chicago] and datetime[ms, America/New_York]`. VIX had no Silver; `gold_signals` used the FRED `VIXCLS` fallback
+  (DEBUG line only); the health report said 0 failed; the Silver gate was `raw pass` (57/58 = 98.3% vs the 95% floor).
+- Reproduced in the sandbox with the real Bronze files plus one New-York-labelled file (same error text). Measured on 13 of the 71 Bronze VIX 1D files (30 Aug,
+  1/2/15/25/30 Sep, 8/15/28 Oct, 3/6/10/11 Nov): all `tz=America/Chicago`, while their `_tz_hint` column says `America/New_York` (the registry zone for VIX).
+  From 6 Nov the files switch from ~7-row incremental fetches to ~2,514-row full-history fetches. The 58 unread files were not examined.
+- `_read_bronze_symbol` (1D/1W/1M only): with two or more tz-aware zones in a group, files outside the majority zone are re-stamped to local midnight of their OWN
+  calendar date in the majority zone (ties: instrument zone, then alphabetical). Uniform groups take the unchanged fast path. A minority stamp with local hour >= 6 raises
+  `ValueError` ("not date labels"). Intraday groups still raise.
+- `run()` / `run_context()` return failed (symbol, timeframe) reads as `JobResult.warnings`; the job outcome and `rows_written` semantics are unchanged.
+- `context_coverage_check` (WARNING tier) also fails when an `include_in_forecast` anchor has no Silver bar in the last 5 days, and names it.
+- `scripts/audit_bronze_schema_drift.py` lists the minority-zone files of each drifting group.
+
+### What is accepted, and why
+1. **The odd file(s) were not found, so the meaning of their stamps is unmeasured** (same instant at 01:00 New York, or the same wall-clock midnight at 00:00 New York).
+   The rule does not depend on it: both land on the same local date, and both are tested. A third shape (stamps outside the first six local hours) raises, so VIX would then
+   fail loudly again instead of being re-dated by guess. The WARNING the reader now logs names the first and last re-stamped file; the audit script lists them all.
+2. **The majority rule can flip.** Bronze is append-only; if the New York labelling became the norm, New York files would eventually outnumber Chicago ones and every VIX
+   bar would be re-stamped to New York midnight (same dates, one hour earlier in absolute time). Consumers take a 1D bar's own date without a zone conversion
+   (`src/utils/trade_date.py`), so none should notice, but the Silver stamps would change zone at that point. Pinning a zone per instrument is the alternative; not done.
+3. **The 5-day anchor rule is a new chronic-red risk.** An `include_in_forecast` anchor that is legitimately without a bar for more than 5 days (an exchange closure
+   longer than the window) turns Silver to `warn` for as long as it lasts. A baseline-aware severity is GHR-06 and is not built here. Today the only anchor it names is VIX.
+4. **Visibility is operator-level only.** `JobResult.warnings` are printed by `run_job`; nothing in the health report or the Gatekeeper reads failed checkpoints
+   (`failed_report`'s own docstring says the health reporter does; it does not). The coverage change is what lets the gate see this one class.
+5. **`rows_written` of `silver_ohlcv_context` stays unknown (NULL).** No count is claimed.
+6. **Not fixed, only noted:** `_get_latest_vix` swallows any exception and logs the fallback at DEBUG; the validator's `except` in this check still logs at DEBUG; the
+   `quality_validator` docstring says 49 anchors while the run covers 58.
+7. **Operator action is still required after applying:** re-run `silver_ohlcv_context` (the checkpoint retries only the three failed items), then `silver_validate`.
+   Gold was built while VIX Silver was absent; `vix_at_signal` / `high_volatility_flag` come from FRED until `gold_signals` is re-run, and the Sunday CrossAssetEngine
+   needs VIX Silver before it runs.
+
+### Verification
+- Pristine baseline 3582 collected. After: 3611 collected (+29), 3579 passed, 32 failed: the identical set of 32 on the pristine clone, caused by packages missing from the sandbox venv (e.g. `fredapi`); the live baseline records 2 environmental failures (`test_check_poetry_env`). The sandbox venv held a subset of the 118 pins, so the full run on the live environment is still to be done.
+- 22 of the 29 new tests fail against the old source (13 of 16, 4 of 4, 2 of 6 and 3 of 3 per class); the other 7 pin behaviour that must not change. All pass against the new
+  source. Mutants: 11/11, 9/9 and 3/4 killed (the survivor is behaviourally equivalent).
+- Not verified: anything on live data; the real New-York-labelled file; the Silver VIX rebuild; the 58 unread Bronze files.
+
+
+### Update 2026-11-13 — applied to the live repo and measured (RISK-48 above is left as written)
+- Both patches applied. `python -m pytest tests/ -q` in the live environment: 3611 passed (the 32 failures seen in the sandbox were missing packages there).
+- `silver_ohlcv_context` re-run for run_date 2026-11-13 (1 symbol pending per timeframe): `{'done': 174}`; VIX 1D / 1W / 1M Silver written (2,565 / 793 / 183 rows).
+  `audit_bronze_schema_drift.py`: "Bronze without Silver: 0 group(s)". Bronze files per VIX group: 72.
+- **The odd Bronze file is exactly one per timeframe, the 5 Nov 2026 ingest**: `VIX_raw_20261105_220352.parquet` (1D, 7 rows), `VIX_raw_20261105_220434.parquet` (1W, 2 rows),
+  `VIX_raw_20261105_220516.parquet` (1M, 1 row), all `tz=America/New_York`, `_tz_hint` America/New_York. Against the 6 Nov Chicago file, 7 shared 1D dates: same UTC
+  instant 0 of 7, same wall-clock midnight 7 of 7, same close 7 of 7. So the label is a wall-clock relabel (00:00 New York), not a conversion. This closes accepted item 1:
+  converting those stamps to Chicago would have put every bar at 23:00 of the PREVIOUS day. Why that one ingest was labelled New York is not established.
+- Silver VIX 1D: 2,565 stamps, all unique, all 00:00 Chicago; 2,514 of 2,514 bars of the 11 Nov Chicago Bronze file match on identical instant and close; the 5 Nov bar sits on
+  2026-11-05 (close 28.18).
+- Still unobserved live: the new `context_coverage_check` clause firing (no run with VIX absent happened after the patch; unit tests only) and the Gold chain after the patch.
+
+## RISK-49 (NEW): Silver 1W/1M deduplicated on the raw timestamp, so a partial-window Bronze bar stamped inside a period survived next to the real period bar (FIX SIL-DEDUP-PERIOD-01) — built and unit-tested in sandbox only; existing Silver and Gold are unchanged until Silver is re-run and then Gold
+### What was measured (13 Nov 2026, live files)
+- **Census, Gold 1M (one file, 200 symbols):** 156 of 200 symbols hold more than one bar in the November 2026 period, and no other period has a duplicate. 149 symbols: the
+  month-to-date bar stamped 2026-11-01 plus a one-day fragment stamped 2026-11-03 (e.g. AAPL 11-01 open 342.67 / close 354.88; 11-03 open 325.58 / close 331.90). 7 symbols (YM_F,
+  NKD_F, NQ_F, ES_F with 5 November bars; AU, AG, CL with 8): no 2026-11-01 bar, one one-day fragment per ingest day. 44 symbols (IDX stocks, forex pairs) hold a single bar.
+- **Census, Gold 1W:** one symbol, ABBV (two duplicated weeks). Silver 1M of AAPL, SPX, VIX: 183 rows for 182 months; Silver 1W of AAPL, SPX, VIX: clean.
+- **Cause, read on VIX:** Bronze `VIX_raw_20261103_215311.parquet` (1M) is one row stamped 2026-11-03 with the 3 Nov values only (open 21.66, close 20.83). The ingests of 2, 4, 5 and
+  12 Nov stamp the in-progress month at 2026-11-01 with the month-to-date open (19.05; closes 21.15, 16.61, 28.18, 18.70). A bar built from a partial request window is stamped later
+  than the period start. Bronze is append-only, so each Silver rebuild reads the 3 Nov file again, and `_deduplicate` keyed on `timestamp` (11-03 is not 11-01). Why yfinance stamps the
+  in-progress bar inconsistently was not established.
+- **Still growing for the 7 symbols:** Bronze YM_F holds a full-history file of 7 Nov (in-progress month stamped 2026-11-06) and then small incremental files on 8-12 Nov; the 9 Nov file
+  (read) is one bar stamped 2026-11-09 holding that day only (open 51,390, close 52,512), and Gold shows further bars stamped 10, 11 and 12 Nov. (AU and CL were seen in Gold only; AG, NKD_F, NQ_F, ES_F by count only.) The first draft of this risk said no new duplicates were created after 6
+  Nov: true for VIX, false for these symbols.
+- **ABBV is a separate defect:** 713 of its 726 Silver 1W bars are stamped Tuesday. The Monday-stamped bars equal the true Friday close (computed from Silver 1D) in 11 of 11 full weeks,
+  the Tuesday-stamped ones in 54 of 425: the series looks Tuesday-to-Monday binned. ABBV is the only symbol in Gold 1W with a non-Monday stamp. Not fixed here.
+### What changed
+- `_deduplicate` (1W/1M only): one bar per period; the bar with the EARLIEST stamp date wins, and among rows on that date the last ingested. The period comes from the stamp's own local
+  date (a Jakarta 2026-11-01 00:00 stamp is 2026-10-31 in UTC and stays a November bar); weeks run Sunday..Saturday so a Sunday-stamped weekly bar (forex) opens the week that follows it;
+  1D is untouched. `period_key_expr` is shared with the new read-only `scripts/audit_silver_period_duplicates.py` (census before, check after; exit 1 if any period holds more than one bar).
+- Two existing test fixtures were changed on purpose because they encoded the bug: five consecutive days posed as five weekly bars (`test_run_does_not_blend_timeframes_across_bronze_partitions`)
+  and ten day-of-month stamps posed as ten 1W/1M bars (`test_run_context_produces_silver_for_every_context_timeframe`).
+- No `processing_version` bump: `silver_ohlcv` re-reads Bronze and rewrites every Silver file on each run, so the rule reaches existing files on the next run of each job.
+### What is accepted, and why
+1. **One fragment still survives for the 7 symbols whose Bronze holds only fragments for the in-progress month.** The earliest one wins; one bar per period is restored, a month-to-date bar
+   is not. Building it would mean aggregating Silver 1D; not done.
+2. **Two instants on the same local stamp date are one bar** (the later instant in timestamp order survives, which is not necessarily the later ingest). The zone reconcile of RISK-48 makes
+   this rare.
+3. **"Latest ingest wins" among equal stamps rests on the stable sort in `process_symbol`**, which polars does not promise (default `maintain_order=False`); no out-of-order winner was found at
+   800,000 rows with polars 1.42.1. Pre-existing and unchanged.
+4. **The Sunday..Saturday week key is checked against Gold 1W (no Sunday stamps among 200 symbols), not against the ~400 Silver symbols outside Gold.** The audit script reads all of them.
+5. **The audit script sees only duplicated periods in Silver.** A lone fragment (item 1) and a Bronze fragment already collapsed are invisible to it.
+6. **Existing Silver and Gold stay as they are until Silver is re-run and Gold after it.** The Gold run of 12-13 Nov read Silver with the duplicate; `tech_signals_1M` and the MTF 1M
+   features very probably carry it (inference: the Gold 1M census above shows the duplicate rows).
+### Verification
+- 3611 -> 3641 collected (+30); 3609 passed and 32 failed in the sandbox, the identical 32 that fail on the pristine clone (packages missing from the sandbox venv); the live baseline
+  had none. 17 mutants of the new code and script were all killed; 12 of the 17 new processor tests fail against the old source (the other 5 pin behaviour that must not change).
+- Real frames: the new `_deduplicate` applied to the live Silver frames removes exactly 2026-11-03 from AAPL, SPX and VIX 1M, exactly 2026-08-18 and 2026-08-25 from ABBV 1W, and nothing from
+  AAPL and VIX 1W; surviving rows are identical. Not verified: a real Silver/Gold run, the census over all symbols, Bronze of AG / NKD_F / NQ_F / ES_F.
