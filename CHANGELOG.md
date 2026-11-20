@@ -1,5 +1,146 @@
 # CHANGELOG — Data Platform
 
+## Unreleased (tanpa version bump `pyproject.toml`, tetap 1.24.0; `CURRENT_SILVER_VERSION` 1.3 -> 1.4)
+
+### FIX SIL-SEAM-SCOPE-01, SIL-OHLC-POSITIVE-01, SIL-AUDIT-OHLCV-03 - patch 18 Nov terlalu lebar; Silver OHLCV belum layak naik ke Gold (audit 19 Nov)
+
+Audit `silver_audit_2026-11-19.json` setelah patch 18 Nov: gate `technical_xgboost` BLOCK (CL 1W/1M: `ohlc`; MNTS 1W: `anchor` dan `leak`), `cross_asset_xgboost` ATTENTION. Di balik dua simbol itu ada tiga cacat yang berasal dari patch 18 Nov sendiri dan satu celah audit. Keputusan Ovi (20 Nov): D1 diterapkan, dan bila dampak kode Silver besar, Silver OHLCV ditulis ulang seluruhnya dari Bronze setelah perbaikan kode; D2 `technical_xgboost` tetap dilewati (fit `skipped`, `LabelsMissing`) sampai aturan window FX ditetapkan, jadi tidak ada yang membaca 1W/1M FX sebelum itu.
+
+**Temuan (terukur pada JSON audit dan file Silver nyata MARA, CLSK, CVNA, MNST, MNTS, NG, CL; bukan sensus):**
+1. Aturan seam 18 Nov (toleransi 8% di sekitar faktor 2-20; pembalikan dalam 25 bar, untuk semua timeframe) dikalibrasi pada enam seri, tidak satu pun saham volatil. Ia mengarantina SELURUH seri dari 27 seri kasar (21 1M dan 6 1W): MARA, RIOT, CLSK, HUT, CVNA, UPST dan sejenisnya. CVNA: 1D tanpa seam, penutupan 1M sama persis dengan penutupan akhir bulan 1D, dan gerak harian terbesar pada bulan yang ditandai hanya 15-56%, jadi bulan 2x adalah tren, bukan lompatan. MARA 1W cocok dengan 1D pada 532 dari 532 periode, tetapi 0 dari 760 barisnya bersih. Pada 1D aturan yang sama hanya mengenai 1 dari 654 seri (MNST, glitch sungguhan: 7 dari 7 lompatan berbalik dalam hitungan hari). 25 bar adalah lima minggu pada 1D dan dua tahun pada 1M.
+2. Guard rebuild "lewati bila 1D punya seam apa pun" menonaktifkan rebuild 38 simbol karena satu hari 2x yang menetap (NG 2026-01-29, MNTS 2026-05-26). Akibatnya: fragmen 1M November NG (-10,5% terhadap penutupan harian terakhir, 17 bulan yang bisa dibangun hilang), 346 bar weekly MNTS bercap Rabu (dua hari lookahead; ini leak FAIL yang memblokir), dan bulan Agustus-September 1M MARA dan CLSK yang beku (hingga 14%). Pada MARA dan CLSK vendor 1W/1M sepakat dengan 1D di sekitar semua tanggal seam, jadi guard tidak melindungi apa pun di sana; MNST sudah tercakup guard basis.
+3. `_flag_is_clean` tidak punya uji harga > 0: hari negatif CL 1D hanya terflag lewat `log_return` NaN, sehingga bar 1W/1M April 2020 dengan low <= 0 tetap `is_clean=TRUE` (satu-satunya alasan CL memblokir).
+4. Audit: cek `window` (min-match 0,95) tidak melihat dua bulan beku dari 122 (98%); gate menampilkan 27 seri terkarantina sebagai "tertangani" tanpa biaya; dan `Options.checks` default `()` berarti nol cek, sehingga gate PASS tanpa menilai apa pun (terungkap saat verifikasi, tidak sampai ke laporan).
+
+**Perubahan:**
+- `src/silver/ohlcv_processor.py` (`CURRENT_SILVER_VERSION` 1.4, tanpa kolom baru): karantina seam hanya untuk 1D (`SEAM_QUARANTINE_TIMEFRAMES`). Seri kasar mewarisi karantina 1D hanya bila ia mereproduksinya (>= `SEAM_INHERIT_SHARE` 0,95 periodenya sama dengan penutupan 1D; MNST 1W ya, MNST 1M tidak). Rebuild dilewati hanya untuk seam 1D yang BERBALIK; seam yang menetap hanya menurunkan minimum uji rasio konstan ke `SEAM_BASIS_MIN_PERIODS` 3 agar split tak-dikoreksi yang baru tetap tertangkap. Harga non-finite atau <= 0 tidak pernah bersih di semua timeframe (`_flag_is_clean` dan `_flag_is_clean_4h`).
+- `scripts/audit_silver_ohlcv.py`: seam berbalik pada 1W/1M menjadi WARN (FAIL hanya 1D); cek baru `recent` (17 cek; 26 periode 1W / 12 periode 1M terbaru, cocok pada salah satu dari tiga window; FAIL bila pasar Layer 1 dan selisih > 1%; FX tidak dinilai); gate melaporkan `quarantined_count`, `quarantined_symbols` dan `deferred_series` (FX 1W/1M: konsumen tidak bisa PASS selama ada); `Options.checks` default semua cek dan daftar kosong ditolak.
+- Tes: `test_silver_seam_scope.py` (22, baru), `test_audit_silver_ohlcv.py` 148 -> 171, `test_silver_coarse_rebuild.py` 42 -> 43 (tiga tes yang mengunci perilaku 18 Nov dibalik, satu pin versi 1.4). Baseline 3831 -> 3877.
+
+**Yang diterima:**
+1. Ambang [U]: `SEAM_INHERIT_SHARE` 0,95, `SEAM_BASIS_MIN_PERIODS` 3, `RECENT_PERIODS` 26/12, `RECENT_FAIL_GAP` 1%.
+2. Split tak-dikoreksi pada 1D yang baru (kurang dari 3 periode tak cocok) tidak tertangkap: rebuild menyalin basis 1D dan hanya seam WARN yang tampil.
+3. Seri kasar tidak lagi dinilai lewat seam: glitch yang hanya ada di seri kasar ditangkap `basis`, `window`, `recent`; glitch pada 1D yang tidak bolak-balik dalam 25 bar tidak dapat dibedakan dari gerak nyata hanya dari data (WARN).
+4. FX tetap ditangguhkan (GHR-11); gate `technical_xgboost` tidak bisa PASS selama ada seri FX 1W/1M.
+5. WARN seam yang menetap (gerak nyata) masih dihitung ATTENTION, sehingga PASS tidak tercapai pada data nyata. Keputusan terbuka D3; rekomendasi: jadikan informasional karena `basis`, `window` dan `recent` sudah membandingkan lintas timeframe.
+6. Aturan 1D: presisi 1/1 pada satu-satunya hit dari 654 seri; recall tidak diketahui.
+7. MNTS 1W menyisakan satu bar bercap Rabu (periode 1D pertama dipertahankan dari Bronze): `anchor` WARN.
+
+**Verifikasi:**
+- Sandbox (klon GitHub `main` a67007b + file live patch 18 Nov): 3831 tes terkumpul sebelum, 3877 sesudah (+46). Suite penuh: 259 gagal sebelum dan sesudah, himpunan identik (0 hanya-sebelum, 0 hanya-sesudah; lingkungan sandbox), 3618 lolos (= 3572 + 46).
+- 38 mutan (20 prosesor, 18 audit): semua terbunuh. Tiga selamat pada putaran pertama (hitungan seri vs simbol; positivitas 4H `>= 0` dan tanpa `is_finite`) dan ditutup dengan tes; tiga mutan berjangkar ambigu diulang per kemunculan. Tes baru gagal pada kode 18 Nov (14 dari 21 saat itu) dan lolos pada kode baru.
+- File nyata (Silver 19 Nov dipakai sebagai pseudo-Bronze lewat `process_symbol` lalu rebuild): MARA 1W bersih 0 -> 750 dari 760; MARA 1M 0 -> 174 dari 175 dan dua bulan beku diperbaiki (Sep 12,92 -> 11,33); CLSK 1M 0 -> 120 dari 121 (dua diperbaiki); CVNA 1M 0 -> 115 dari 116; NG 1M 3 diganti dan 17 diisi, bar terakhir 3,198 = penutupan 1D terakhir; MNTS 1W 345 diganti, cap Rabu 346 -> 1; CL 1W/1M bar harga <= 0 tidak lagi bersih; MNST 1D tetap terkarantina (0 dari 2564, 7 seam berbalik).
+- Audit penuh (17 cek) atas pohon hasil tujuh simbol (16 file): satu-satunya FAIL adalah MNST 1D; kedua gate ATTENTION dengan 0 FAIL (BLOCK sebelumnya karena CL dan MNTS).
+- Mirror ke live, byte-verified (lima file).
+- Tidak diverifikasi: `run()` atas Bronze live, sekitar 30 simbol lain yang rebuild-nya kini dibuka, waktu run penuh.
+
+**Rollout (belum dijalankan):** (1) cadangkan `data/silver/market_ohlcv`; (2) `python -m pytest tests/ -q` (3877 terkumpul); (3) `python src/runner.py --job silver_ohlcv --force`, lalu `--job silver_ohlcv_context --force`, lalu `--job silver_validate`; (4) audit dengan `--format json`: `meta` tidak lagi melaporkan file di 1.3 sebagai "rebuild pending", baca `gate` (`quarantined_count` diharapkan 1, yaitu MNST 1D) dan `deferred_series`; (5) Gold lalu `--status`. Catatan: `--force` hanya melewati cek dependensi; checkpoint progres per `run_date` tidak dihapus (CLI `--reset` hanya mereset sentinel). Bila Silver sudah selesai pada `run_date` yang sama, semua simbol dilewati; gunakan `run_date` baru atau hapus checkpoint: `python -c "from datetime import date; from src.utils.progress_checkpoint import ProgressCheckpoint as C; d = date.today(); [C(j, d).clear(d) for j in ('silver_ohlcv_p1', 'silver_ohlcv_4h', 'silver_ohlcv_context')]"` (`run_date` adalah tanggal WIB). Rollback: pulihkan cadangan dan revert patch.
+
+---
+
+## Unreleased (tanpa version bump `pyproject.toml`, tetap 1.24.0; `CURRENT_SILVER_VERSION` 1.2 -> 1.3) — Silver OHLCV aman dan bersih sebelum Gold: 1W/1M dibangun dari 1D, karantina seam split, dan gerbang Silver -> Gold (FIX SIL-COARSE-REBUILD-01, SIL-SEAM-QUARANTINE-01, SIL-AUDIT-OHLCV-02; pembaruan RISK-50)
+
+**Latar.** Tujuan yang dinyatakan Ovi (17 Nov 2026): Silver OHLCV, kode dan datanya, harus aman dan bersih sebelum masuk ke Gold agar keluarannya tidak mencemari `technical_xgboost` dan `cross_asset_xgboost`. Keputusan 1, 2 dan 3 dari analisis
+audit JSON 15 Nov disetujui sesuai rekomendasi (18 Nov): (1) bangun 1W/1M dari 1D untuk pasar non-FX dengan penjaga basis; (2) MNST dikarantina lewat `is_clean` sekarang dan riwayat vendornya diambil ulang; (3) pemisahan `is_clean` (XAE-R06) tetap menjadi paket berikutnya.
+Nomor FIX dan RISK adalah usulan. Patch ini mengubah `src/silver/ohlcv_processor.py` (satu-satunya perubahan di `src/`) dan skrip audit; data Silver baru berubah setelah Silver dijalankan ulang (lihat Rollout).
+
+**Temuan (diukur 15-18 Nov 2026 pada file Silver/Bronze live; contoh, bukan sensus).**
+- Hanya satu pembaca `technical_xgboost` dan satu pembaca cross-asset yang relevan: `technical_xgboost` membaca tech_signals 1D/1W/1M dari lima pasar Layer 1; semua modul `cross_asset` membaca `*_1D_silver.parquet` saja. Cacat 1W/1M tidak mencapai mesin cross-asset; cacat 1D mencapai keduanya.
+- 1W/1M dari Bronze menyimpang dari 1D: 12 seri futures Yahoo kehilangan bulan yang tanggal 1-nya Minggu (27 dari 28 bulan; ES_F: 17 bulan punya bar 1D dan bisa dibangun, 10 mendahului riwayat 1D) dan November tinggal fragmen; ABBV (Selasa) dan MNTS (Rabu) berstempel hari bukan Senin sehingga
+  close pekan = close Senin berikutnya, tepat pada hari aturan ketersediaan `features_technical.py` menyebutnya tersedia (lookahead satu sesi; ABBV: 465 dari 529 bar yang cocok pada jendelanya sendiri); ALL dan CSX 1W: rasio konstan 1,00416 dan 1,0027 pada 519 dari 533 pekan lalu tepat 1,0 mulai pekan 2026-08-17 (vintage penyesuaian, dividen sebagai sebab adalah inferensi);
+  bar 1M Agustus dan September 2026 membeku pada snapshot awal tidak hanya pada ARM, LAZR, MNST, RDDT, WOLF tetapi juga AAPL (2 bar, selisih sampai 0,89%; lolos dari ambang kecocokan 0,95 audit); KOSPI 1M 2026-11-01 low = 0,0 dengan `is_clean` TRUE.
+- MNST 1D adalah sisi yang salah: close 97,5 pada 2026-07-17, 47,7 pada 07-20, lalu bergantian sekitar 47 dan 93 sampai 08-11 (tujuh lonjakan faktor 2). File Bronze 2026-09-01 (2510 baris) sudah memuat itu dan identik dengan Silver pada seluruh 2510 tanggal; vendor mengembalikan riwayat yang sebagian belum disesuaikan split.
+  Close 1M MNST tepat 0,5 kali 1D pada 118 dari 123 bulan; 1M-lah yang benar. Aturan "1D adalah kebenaran" akan menimpa satu-satunya seri yang benar.
+- Aturan ketersediaan `features_technical.py` disalin ke audit dan dipin oleh tes terhadap sumbernya. Repo live lebih maju daripada clone GitHub `main`; `ohlcv_processor.py`, `features_technical.py` dan `tests/unit/test_ohlcv_processor.py` live identik dengan clone.
+
+**Perubahan.**
+1. `src/silver/ohlcv_processor.py` (`CURRENT_SILVER_VERSION` 1.3):
+   - `rebuild_coarse_from_daily` + `_rebuild_coarse`: untuk pasar non-FX, bar 1W/1M dibangun dari bar 1D Silver periodenya (open pertama, high maks, low min, close terakhir, volume jumlah; stempel awal periode pada zona stempel 1D sendiri) bila 1D mencakup seluruh periode dan close Bronze berbeda lebih dari 1e-3 atau tanggal stempelnya
+     bukan awal periode; periode yang tidak ada diisi. Periode 1D pertama (mungkin parsial) dan seluruh periode sebelum 1D tetap memakai bar Bronze. Bar yang dibangun ditandai kolom baru `rebuilt_from_1d` (Boolean, selalu ada di file 1W/1M). Semua kolom turunan, flag dan `is_clean` dihitung ulang dengan jalur yang sama.
+   - Penjaga: tanpa 1D, 1D berisi seam faktor split apa pun, atau selisih berupa satu rasio konstan sebesar split (|ln r| >= 0,05) maka tidak dibangun (status `skipped_1d_seam` / `skipped_basis`, muncul sebagai warning JobResult). Rasio konstan ukuran dividen tidak dijaga: 1D adalah vintage yang lebih baru (ALL, CSX) dan pembangunan adalah perbaikannya.
+     FX dikecualikan (pasar `forex`, kategori konteks `context_dollar_basket` dan `context_fx_normalization`): bar FX 1W/1M tidak cocok dengan 1D pada jendela mana pun dan menunggu flag akhir pekan (GHR-11). Kegagalan membangun tidak menghilangkan bar Bronze: dicatat, jadi warning, `rebuilt_from_1d` = False.
+   - `_quarantine_reversing_seams` (1D/1W/1M): lonjakan close dengan faktor 2, 3, 4, 5, 8, 10 atau 20 (toleransi 8%) yang berbalik dalam 25 bar bukan gerakan pasar dan sisi mana yang benar tidak bisa dibaca dari seri, maka SELURUH seri `is_clean` = False. Dihitung ulang dari data setiap run: setelah riwayat vendor diambil ulang karantina hilang sendiri.
+     Satu lonjakan menetap tidak dikarantina (WARN di audit dan penjaga rebuild).
+   - Fungsi bersama `find_split_seams`, `reversing_seams`, `constant_ratio_step`, `coarse_rebuild_exclusion`; audit mengimpornya sehingga yardstick dan kode tidak bisa menyimpang.
+2. `scripts/audit_silver_ohlcv.py` (tetap hanya-baca), 12 -> 16 pemeriksaan: `basis`, `seam`, `leak`, `last_bar`; `gaps` dijelaskan oleh riwayat 1D (penutupan = INFO, lubang = WARN, sebelum 1D = WARN); `ohlc` FAIL untuk harga <= 0 yang `is_clean`-nya TRUE; WARN `window` menunjuk ke `basis`; dan gerbang per konsumen (`technical_xgboost`:
+   Layer 1, 1D/1W/1M; `cross_asset_xgboost`: semua pasar, 1D) di laporan teks dan JSON. Seri yang tidak punya baris `is_clean` TRUE adalah terkarantina: Gold tidak membaca apa pun darinya, jadi temuannya dicantumkan (`quarantined_series`) dan tidak memblokir; begitu pula temuan `basis` pada seri kasar yang 1D-nya terkarantina.
+3. Tes: `tests/unit/test_silver_coarse_rebuild.py` baru (42 tes); `test_audit_silver_ohlcv.py` 106 -> 148; dua tes lama di `test_ohlcv_processor.py` (`test_run_does_not_blend_timeframes_across_bronze_partitions`, `test_run_context_produces_silver_for_every_context_timeframe`) diubah asersinya karena fixture-nya
+   menaruh bar 1W yang tidak koheren di samping bar 1D (kini 1W dibangun dari 1D; maksud tes tetap). `tests/COUNT_BASELINE.txt` 3747 -> 3831.
+
+**Yang diterima.**
+1. Semua ambang baru adalah nilai awal [U] (`COARSE_REBUILD_TOL` 1e-3, `BASIS_MIN_PERIODS` 12, `BASIS_SHARE` 0,80, `BASIS_FAIL_LOG` 0,05, `SEAM_TOL` 0,08, `SEAM_REVERT_BARS` 25), dikalibrasi pada simbol nyata yang sedikit.
+2. Karantina seluruh seri adalah pilihan konservatif: lonjakan yang berbalik tidak menunjukkan basis mana yang benar. Akibatnya MNST hilang dari `technical_xgboost` (complete-case) dan dari mesin cross-asset sampai riwayatnya diambil ulang.
+3. Riwayat sebelum 1D (sekitar 2016-09) tidak bisa dibangun: 193 bar Selasa ABBV, 10 bulan Minggu-1 futures dan seterusnya tetap Bronze (audit: WARN `anchor` / `gaps`). Tidak ada keputusan latih yang jatuh sebelum 2016-09 (jendela 1D), tetapi nilai indikator memakai bar itu sebagai masukan.
+4. Dividen-sized constant ratio dibangun ulang dengan anggapan 1D lebih baru; ini terbukti pada ALL dan CSX, tidak pada simbol lain.
+5. Pembangunan membalik keputusan v1.5 (agregasi 1D -> 1W/1M dihapus sebagai kode mati) hanya untuk periode yang tercakup 1D dan hanya untuk pasar non-FX; keputusan itu disetujui Ovi pada 18 Nov.
+6. Belum selesai, jadi masih mencemari: (a) pelabel ADR-052 menilai bar berdasarkan struktur dan mengabaikan `is_clean` (disengaja), sehingga label MNST masih dibaca dari bar 1D yang bermasalah; `scripts/label_triple_barrier.py` perlu melewati seri tanpa baris `is_clean`; (b) FX; (c) XAE-R06 (pemisahan `is_clean`) tetap prasyarat
+   kedua model; (d) pengambilan ulang riwayat MNST dari vendor (jalur Bronze tidak dibaca di sini).
+
+**Verifikasi.**
+- Sandbox, clone GitHub `main` (a67007b) ditambah file live: file tes baru 42 lulus, `test_audit_silver_ohlcv.py` 148 lulus, `test_ohlcv_processor.py` lulus kecuali satu kegagalan lingkungan yang sama dengan `main` murni (versi polars). Suite penuh: 273 gagal sebelum dan sesudah (himpunan yang sama persis; kegagalan lingkungan karena clone usang dan paket),
+  0 kegagalan baru; 3831 tes terkumpul (3641 + 148 + 42; angka live 3747 + 84).
+- 20 mutan prosesor dan 19 mutan audit: semuanya terbunuh (dua selamat pada putaran pertama: versi tidak dipaku oleh tes dan ambang karantina n<=1; tes ditambahkan). Satu mutan salah sasaran (P14 mengubah `run()`, bukan `run_context()`) diulang pada kode yang benar dan terbunuh.
+- File nyata (diproses ulang di sandbox, bukan di data live): ALL, CSX, ABBV 1W dan MNST 1M; AAPL, BBCA 1W/1M; ES_F 1M. Hasil: AAPL 1W 0 diganti, AAPL 1M 2 diganti (Agu, Sep; maks 0,89%), BBCA 1W 6 diganti (semuanya +0,32%, beda vintage), ES_F 1M 17 diisi dan 1 di-restamp, ALL/CSX/ABBV 1W 518 diganti masing-masing
+  (basis dan jendela hilang dari audit); MNST 1M tidak dibangun (`skipped_1d_seam`), MNST 1D lewat `process_symbol` dari file Bronze 2026-09-01: 0 dari 2510 baris `is_clean`. Audit pada hasilnya: 0 FAIL pada AAPL, BBCA, ES_F; gerbang MNST: `cross_asset_xgboost` PASS dan `technical_xgboost` ATTENTION dengan MNST 1D tercantum terkarantina.
+- Belum diverifikasi: seluruh pohon Silver pada data live, waktu jalan Silver penuh, MNST 1W (file tidak disalin), MNTS dan ODFL pada datanya, delapan simbol dividen lain, perilaku `run()` pada Bronze live (diuji pada fixture).
+
+**Rollout (usulan; belum dijalankan).** (1) Cadangkan `data/silver/market_ohlcv` ke `data/archive/silver_market_ohlcv_pre_1_3_2026_11`; (2) `python -m pytest tests/ -q` (3831 terkumpul); (3) `python src/runner.py --job silver_ohlcv --force`, `--job silver_ohlcv_context --force`, `--job silver_validate`; (4)
+`python scripts/audit_silver_ohlcv.py --format json > data/health/silver_audit_<tanggal>.json` dan periksa `gate`; (5) baru kemudian Gold (`gold_signals`, `gold_mtf`, `signal_aggregation`) dan `--status`. Rollback: pulihkan cadangan dan batalkan patch.
+
+## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — skrip audit Silver OHLCV yang menyeluruh dan hanya-baca, dan hal-hal yang diukurnya pada data live (FIX SIL-AUDIT-OHLCV-01, RISK-50)
+
+**Latar.** Permintaan Ovi (14 Nov 2026), berdasarkan dua temuan FIX SIL-DEDUP-PERIOD-01 yang masih terbuka: tujuh simbol 1M (YM_F, NKD_F, NQ_F, ES_F, AU, AG, CL) yang punya lima sampai
+delapan fragmen dan tidak punya bar 2026-11-01, dan ABBV 1W yang berstempel Selasa. Diminta: patch berisi skrip yang mengaudit Silver OHLCV secara menyeluruh, bukan satu skrip per cacat.
+Nomor FIX dan RISK adalah usulan. Tidak ada perubahan pada `src/`, tidak ada Silver atau Gold yang ditulis, dan `processing_version` tidak berubah.
+
+**Temuan (diukur 14 Nov 2026 pada 10 file Silver live dari lima simbol: ABBV 1W/1D, AAPL 1W/1D, YM_F 1M/1D, EUR_USD 1W/1D, BBCA 1W/1D; contoh, bukan sensus).**
+- ABBV 1W bukan data rusak melainkan kalender yang bergeser. 713 dari 726 stempel adalah Selasa (2013-01-01..2026-08-25) dan 13 Senin (sejak 2026-08-17); AAPL 793 dari 793 Senin.
+  Terhadap bar 1D, bar Selasa cocok dengan blok Selasa-Senin (close 518 dari 521, volume 520, low 504, high 498, open 490, toleransi 5e-4) dan gagal pada pekan Senin-Jumat (close 71 dari 521).
+  Angka 54 dari 425 di RISK-49 memakai pencocok lain; kesimpulannya sama. Mengapa sumber menjangkar pekan pada Selasa belum diketahui (Bronze tidak dibaca).
+- YM_F 1M: enam fragmen berstempel 6, 9, 10, 11, 12, 13 Nov, 152 dari 158 stempel pada tanggal 1, dan tidak ada bar 2026-11-01 (sama dengan temuan awal). BARU: 27 dari 180 bulan antara
+  2011-12 dan 2026-11 tidak punya bar sama sekali (2012-01, 2012-04, 2012-07, 2013-09, ..., 2026-02, 2026-03). Sebabnya belum diketahui; hanya YM_F yang diukur.
+- EUR_USD 1D: 11 bar berstempel akhir pekan (2026-08-30..2026-11-08), 1 di antaranya datar penuh (O=H=L=C). Cocok dengan temuan GD5 di panduan gate/health.
+- EUR_USD 1W tidak cocok dengan EUR_USD 1D: close cocok pada 58,3% dari 532 bar bila hari stempel berikutnya ikut jendela (21,4% pada jendela biasa; toleransi 1e-3). Per tahun, jendela itu:
+  2016 1,00; 2017 0,94; 2018 0,40; 2019 0,58; 2020 0,67; 2021 0,79; 2022 0,54; 2023 0,37; 2024 0,42; 2025 0,52; 2026 0,45. Pada 2016-2017 close bar Senin sama dengan close 1D Senin berikutnya.
+  Sebabnya belum diketahui (label sumber kedua file sama, `yfinance_forex`); hanya satu pasangan yang diukur, 17 lainnya belum.
+- Kontrol AAPL 1W (531 pekan): close sama dengan close 1D sampai 6e-7 dan tidak ada satu pun pekan yang gagal, tetapi open hanya cocok pada 94% (33 pekan, empat per tahun, mengelompok di sekitar
+  Feb/Mei/Agu/Nov dengan tiga sisa di akhir Jan/Okt; waktu ex-dividend triwulanan, itu inferensi). Maka pemeriksaan jendela menghakimi close saja dan hanya melaporkan open/high/low/volume.
+- `is_clean` bernilai null pada baris pertama di 10 dari 10 file. Terbaca di `_flag_is_clean`: `clean & (zscore.abs() <= 4)` dengan `log_return` null pada bar pertama, dan True & null = null.
+  Pembaca `is_clean = TRUE` membuang bar pertama itu. Tidak diperbaiki di sini.
+- Pada 10 file itu `derived`, `meta`, `freshness` tidak menemukan apa pun dan `ohlc` hanya menghasilkan INFO.
+
+**Perubahan.**
+1. `scripts/audit_silver_ohlcv.py` (baru, hanya-baca; `--format json` mencetak ke stdout dan tidak menulis file). Dua belas pemeriksaan, dipilih dengan `--checks`, daftar di `--list-checks`:
+   `schema`, `timestamp`, `period`, `anchor`, `window`, `gaps`, `current_period`, `ohlc`, `derived`, `meta`, `freshness`, `coverage`. FAIL (exit 1) hanya untuk invarian struktural; temuan statistik atau
+   konvensi adalah WARN (exit 1 hanya dengan `--strict`). Dua rekonsiliasi terhadap 1D membedakan cacat NILAI dari cacat KALENDER: jendela bawaan stempel (dari stempel ke stempel berikutnya, dibatasi satu
+   periode agar celah tidak menggelembungkan bar sebelumnya) menguji apakah nilainya agregat bar harian nyata, jendela kalender (Minggu-Sabtu / bulan kalender) menguji konvensi. ABBV gagal pada yang kedua
+   dan lolos pada yang pertama; itulah diagnosisnya. Varian jendela yang menyertakan hari stempel berikutnya dikenali untuk pola FX. `period_key_expr`, `_PERIOD_DEDUP_TIMEFRAMES`,
+   `CURRENT_SILVER_VERSION`, dan `_COARSE_STAMP_MAX_LOCAL_HOUR` diimpor dari pemroses supaya tidak bisa menyimpang. Pemeriksaan yang melempar galat menjadi FAIL `internal`, bukan dilewati diam-diam.
+2. `tests/unit/test_audit_silver_ohlcv.py` (baru, 106 tes): satu cabang per tes pada fixture yang sehat secara bawaan, bentuk ABBV dan YM_F sebagai regresi, pin isolasi AST (skrip hanya-baca, tidak ada
+   modul `src` yang mengimpornya, tidak ada SQL f-string; pemindai diuji sendiri).
+3. `tests/COUNT_BASELINE.txt`: 3641 -> 3747.
+
+**Yang diterima.**
+1. `--tol 1e-3`, `--min-match 0.95`, `--stale-days 4`, dan `--vol-tol 1e-2` adalah nilai awal [U], dikalibrasi pada lima seri saja. Seri sehat berada di 0,987 ke atas dan cacat di 0,58 ke bawah (FX) dan 0,176
+   (pekan kalender ABBV), jadi marginnya lebar, tetapi n = 5.
+2. Skrip belum dijalankan pada seluruh pohon Silver live dan waktu jalannya belum diukur. Pada pohon sekarang diharapkan merah: `period`, `anchor`, dan `current_period` untuk simbol 1M yang masih menumpuk fragmen dan
+   untuk ABBV (inferensi dari sensus RISK-49, bukan hasil ukur); setelah patch RISK-49 dijalankan dan Silver dibangun ulang, `period` harus nol sedangkan ketujuh simbol fragmen-saja tetap gagal pada
+   `current_period` dan `anchor` (batas yang sudah dicatat di RISK-49, butir 1).
+3. Setelah dedupe RISK-49 dijalankan, bar Senin 2026-08-17 menang atas bar Selasa 2026-08-18, sehingga deret ABBV berganti dari blok Selasa-Senin ke pekan Senin-Jumat pada 2026-08-17 dan Senin itu muncul
+   di dua bar. Inferensi dari struktur data, belum diukur; pemeriksaan `window` akan menunjukkannya setelah Silver dijalankan ulang.
+4. `data_source` di Silver adalah `_source` baris Bronze pertama untuk seluruh file, jadi file bercampur sumber tidak terlihat; `meta` hanya melaporkan nilai yang ada.
+5. Anchor pekan baru dihakimi pada pasar yang punya sedikitnya tiga simbol sepakat dan jumlahnya sedikitnya separuh pasar; pasar yang lebih kecil hanya mendapat sensus.
+6. Skrip hanya mengukur. Tidak ada perbaikan untuk ABBV, tujuh simbol, celah YM_F, FX 1W, atau `is_clean` null pada bar pertama.
+
+**Verifikasi.**
+- 3641 -> 3747 collected (+106). Di sandbox: 3724 lulus dan 23 gagal; ke-23 itu identik dengan yang gagal pada clone bersih tanpa file baru (paket yang tidak ada di sandbox: `fredapi`, `yfinance`, `httpx`,
+  `pandas_ta_classic`); baseline live tidak punya yang gagal.
+- 37 mutan skrip terbunuh semuanya. Satu selamat pada putaran pertama (guard "lewati pemeriksaan lain setelah kegagalan skema yang memblokir" tidak terbedakan oleh fixture yang menjatuhkan `close`) dan
+  ditutup dengan satu tes baru (timestamp bertipe String).
+- Dijalankan pada 10 file live (plus empat salinan AAPL yang diganti namanya agar sensus anchor punya tiga simbol sepakat): 5 FAIL dan 4 WARN, semuanya cocok dengan temuan di atas; registri nyata (654 simbol)
+  terbaca benar oleh pemeriksaan `coverage`.
+- Belum diverifikasi: pohon Silver penuh, waktu jalan, `--tf all` pada file 1H/4H nyata, 17 pasangan FX lain.
+
 ## Unreleased (tanpa version bump, `pyproject.toml` tetap 1.24.0) — Silver 1W/1M kembali satu bar per periode: dedupe berkunci periode, bukan timestamp mentah (FIX SIL-DEDUP-PERIOD-01, RISK-49)
 
 **Latar.** Temuan saat memverifikasi FIX SIL-BRZ-SCHEMA-02 pada data live (13 Nov 2026), lalu permintaan Ovi untuk menyelidiki apa yang tidak bisa dijawab log,

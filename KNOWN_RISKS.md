@@ -4969,3 +4969,119 @@ session; no version bump (repo stays at v1.24.0 with the Unreleased entries). Ne
   had none. 17 mutants of the new code and script were all killed; 12 of the 17 new processor tests fail against the old source (the other 5 pin behaviour that must not change).
 - Real frames: the new `_deduplicate` applied to the live Silver frames removes exactly 2026-11-03 from AAPL, SPX and VIX 1M, exactly 2026-08-18 and 2026-08-25 from ABBV 1W, and nothing from
   AAPL and VIX 1W; surviving rows are identical. Not verified: a real Silver/Gold run, the census over all symbols, Bronze of AG / NKD_F / NQ_F / ES_F.
+
+## RISK-50 (NEW): Silver OHLCV had no audit that separates a value defect from a calendar defect, and the two open RISK-49 findings were only ever seen one file at a time (FIX SIL-AUDIT-OHLCV-01) — built and unit-tested in sandbox only; not yet run on the full live tree
+### What was measured (14 Nov 2026, 10 live Silver files of 5 symbols: ABBV 1W/1D, AAPL 1W/1D, YM_F 1M/1D, EUR_USD 1W/1D, BBCA 1W/1D; a sample, not a census)
+- **ABBV 1W is a shifted calendar, not bad values.** 713 of 726 stamps are Tuesday (2013-01-01..2026-08-25), 13 Monday (from 2026-08-17); AAPL is 793 of 793 Monday. Against the 1D bars the Tuesday
+  bars equal Tuesday..Monday blocks (close 518 of 521, volume 520, low 504, high 498, open 490, tolerance 5e-4) and fail the Monday..Friday week (close 71 of 521). The 54-of-425 figure in RISK-49 used a
+  different matcher; the conclusion is the same. Why the source anchors the week on a Tuesday was not established (Bronze not read).
+- **YM_F 1M:** six fragments stamped 6, 9, 10, 11, 12, 13 Nov, 152 of 158 stamps on day 1, no 2026-11-01 bar (as RISK-49 described). NEW: 27 of the 180 months between 2011-12 and 2026-11 have no bar at
+  all (2012-01, 2012-04, 2012-07, 2013-09, ..., 2026-02, 2026-03). Cause not established; only YM_F was measured.
+- **EUR_USD 1D:** 11 weekend-dated bars (2026-08-30..2026-11-08), one fully flat. Matches GD5 of the gate/health guide.
+- **EUR_USD 1W does not reconcile with EUR_USD 1D.** Close matches on 58.3% of 532 bars when the daily bar stamped on the next bar's date is included in the window (21.4% with the plain window; tolerance
+  1e-3). By year, that window: 2016 1.00, 2017 0.94, 2018 0.40, 2019 0.58, 2020 0.67, 2021 0.79, 2022 0.54, 2023 0.37, 2024 0.42, 2025 0.52, 2026 0.45. In 2016-2017 the Monday-stamped bar's close equals
+  the NEXT Monday's daily close. Cause not established (both files carry `data_source = yfinance_forex`); one pair measured, 17 not.
+- **Open/high/low are the wrong decision field.** AAPL 1W (531 weeks): close equals the daily close to 6e-7 and no week fails, but open matches only 94% (33 weeks, 4 a year, clustered around
+  Feb/May/Aug/Nov with three stragglers in late Jan / Oct). Quarterly ex-dividend timing is the inference, not a measurement; the audit therefore judges close only.
+- **`is_clean` is null on row 0 of 10 of 10 files.** `_flag_is_clean` does `clean & (zscore.abs() <= 4)` and the z-score of the first bar's null `log_return` is null; True & null = null. `is_clean = TRUE`
+  readers drop that bar. Benign in effect, a contract violation in form (GD §4.3 says Boolean).
+- On the same 10 files `derived`, `meta` and `freshness` found nothing and `ohlc` produced only INFO.
+### What changed
+- `scripts/audit_silver_ohlcv.py` (new, read-only; `--format json` prints to stdout, nothing is written): 12 checks (`schema`, `timestamp`, `period`, `anchor`, `window`, `gaps`, `current_period`, `ohlc`,
+  `derived`, `meta`, `freshness`, `coverage`). FAIL (exit 1) is reserved for structural invariants; statistical and convention findings are WARN (exit 1 only with `--strict`). The `window` check runs two
+  reconciliations of the CLOSE against 1D: IMPLIED (daily bars from the stamp to the next stamp, capped at one nominal period so a missing bar cannot inflate its neighbour) tests the values, CALENDAR
+  (Sunday..Saturday week / calendar month) tests the convention; implied holds + calendar fails = anchor defect (ABBV), implied fails = value defect. An end-inclusive variant is recognised for the FX
+  pattern. `period_key_expr`, `_PERIOD_DEDUP_TIMEFRAMES`, `CURRENT_SILVER_VERSION` and `_COARSE_STAMP_MAX_LOCAL_HOUR` are imported from the processor so the audit cannot drift from the rule it checks.
+  A check that raises becomes an `internal` FAIL, never a silent skip.
+- `tests/unit/test_audit_silver_ohlcv.py` (new, 106 tests) and `tests/COUNT_BASELINE.txt` 3641 -> 3747. No change under `src/`, no `processing_version` bump, nothing written to Silver or Gold.
+### What is accepted, and why
+1. **Thresholds are starting values [U] calibrated on five series.** `--tol 1e-3`, `--min-match 0.95`, `--vol-tol 1e-2`, `--stale-days 4`. Healthy series sit at >= 0.987 (close match, tol 1e-3: AAPL 1.000, YM_F 1M
+   0.991, BBCA 0.987, ABBV own window 0.989) and defects at <= 0.583 (EUR_USD) and 0.176 (ABBV calendar week), so the margin is wide, but n = 5.
+2. **The EUR_USD finding is reported, not explained.** Every FX pair is expected to raise the same WARN until the cause is found; it will sit in the audit output as a chronic WARN. Not hidden: no baseline
+   or suppression was added (the GHR-06 lesson applies if it becomes permanent).
+3. **After the RISK-49 dedupe runs, ABBV changes calendar at 2026-08-17.** The Monday bar 2026-08-17 beats the Tuesday bar 2026-08-18, so the series switches from Tuesday..Monday blocks to Monday..Friday
+   weeks with Monday 2026-08-17 inside two bars. Inference from the structure above, not measured; `window` should show it after the next Silver run.
+4. **`data_source` cannot reveal mixed sources.** Silver stores the first Bronze row's `_source` for the whole file; `meta` reports only the values present.
+5. **The 1W anchor is judged only where at least three symbols agree and they are at least half the market.** Smaller markets get the census only.
+6. **The audit measures; it repairs nothing.** ABBV's anchor, the seven fragment-only symbols, YM_F's missing months, FX 1W vs 1D and the null first-bar `is_clean` are all unchanged. A follow-up for the last is
+   a one-line `fill_null(True)` on the z-score term of `_flag_is_clean`; not made here because it changes `is_clean` on every Silver file.
+7. **Expected state of the live tree, as inference.** Before the RISK-49 patch is run, `period`, `anchor` and `current_period` should fail for the symbols with fragments and for ABBV 1W; after it,
+   `period` should be zero while the seven fragment-only symbols keep failing `anchor` and `current_period` (RISK-49 accepted item 1).
+### Verification
+- 3641 -> 3747 collected (+106). Sandbox: 3724 passed, 23 failed; the identical 23 fail on a pristine clone without the new files (missing packages in the sandbox: `fredapi`, `yfinance`, `httpx`,
+  `pandas_ta_classic`); the live baseline had none.
+- 37 mutants of the script, all killed. One survived the first round (the guard that skips the other checks after a blocking schema failure was not distinguished by a fixture that drops `close`) and is
+  now covered by a test with a String timestamp.
+- Run on the 10 real files plus four AAPL copies renamed to give the anchor census three agreeing symbols: 5 FAIL, 4 WARN, all matching the measurements above. The real registry (654 symbols) loaded
+  correctly in the `coverage` check.
+- Not verified: the full Silver tree, run time, `--tf all` on real 1H/4H files, the other 17 FX pairs, any market other than the five symbols above.
+
+### Update 2026-11-18 — Silver OHLCV is made safe for Gold: 1W/1M rebuilt from 1D, reversing-seam quarantine, quarantine-aware gate (FIX SIL-COARSE-REBUILD-01, SIL-SEAM-QUARANTINE-01, SIL-AUDIT-OHLCV-02; RISK-50 above is left as written)
+Stated objective (Ovi, 17 Nov 2026): Silver OHLCV, code and data, must be safe and clean before Gold, so that `technical_xgboost` and `cross_asset_xgboost` are not polluted. On 18 Nov Ovi approved the three recommendations: rebuild 1W/1M from 1D with a basis guard, quarantine MNST now and re-fetch its history, keep the `is_clean` split (XAE-R06) as the next package.
+Sandbox only; the first change to `src/` is `src/silver/ohlcv_processor.py` (`CURRENT_SILVER_VERSION` 1.2 -> 1.3). No live Silver or Gold file has been rewritten.
+
+#### What was measured (15-18 Nov 2026; the 15 Nov JSON audit plus live Silver files of ALL, CSX, MNST, ABBV, KOSPI, AAPL, BBCA, ES_F and a Bronze MNST file; a sample, not a census)
+- **Consumers.** `technical_xgboost` reads tech_signals 1D/1W/1M for commodity, forex, idx, us_stocks, index_futures; every existing `cross_asset` module reads `*_1D_silver.parquet` only. 1W/1M defects cannot reach the cross-asset engine; 1D defects reach both. All three Gold readers filter `is_clean = TRUE`, so `is_clean` is the working quarantine lever.
+- **Bronze-built 1W/1M drift from 1D.** Yahoo futures lose every Sunday-1st month (27 of 28; ES_F: 17 rebuildable from 1D, 10 predate it) and November is a fragment; ABBV (Tue) and MNTS (Wed) weeks are Tue..Mon / Wed..Tue blocks, so a bar closes on the Monday the `features_technical.py` availability rule calls it available (one-session lookahead; ABBV 465 of 529 reconciling bars); ALL / CSX 1W sit at 1.00416 / 1.0027 of 1D on 519 of 533 weeks, then exactly 1.0 from the week of 2026-08-17 (a vintage step; dividend rebase is the likely cause, inference); Aug and Sep 2026 1M bars are frozen at an early snapshot on ARM, LAZR, MNST, RDDT, WOLF and also on AAPL (2 bars, up to 0.89%, hidden by the audit's 0.95 match threshold); KOSPI 1M 2026-11-01 has low = 0.0 and `is_clean` TRUE.
+- **MNST 1D is the stale side, and Silver is faithful to Bronze.** Close 97.5 on 2026-07-17, 47.7 on 07-20, then ~47 / ~93 alternating until 08-11 (seven factor-2 jumps); the Bronze 1D file of 2026-09-01 (2,510 rows) already holds it and equals Silver on all 2,510 dates. MNST 1M is exactly 0.5x of 1D on 118 of 123 months and is the correct series. A rule "1D is the truth" would overwrite the only correct series. Why the vendor returned a partly unadjusted history is unknown.
+- **Healthy series barely move under the rebuild.** AAPL 1W: 0 of 794 bars replaced; BBCA 1W: 6 (all +0.32%, a vintage difference); BBCA 1M: 0.
+
+#### What changed
+- `ohlcv_processor.py`: for non-FX markets a 1W/1M bar is rebuilt from the Silver 1D bars of its period (open first, high max, low min, close last, volume sum, stamped at the period start in the 1D stamp's zone) when 1D covers the whole period and the Bronze close differs by more than 1e-3 or its stamp date is not the period start; absent periods are filled; the first 1D period and everything before 1D keep their Bronze bar. New column `rebuilt_from_1d` on every 1W/1M row. Guards: no 1D, any split-factor seam in 1D, or a split-sized constant ratio (|ln r| >= 0.05) skips the rebuild (JobResult warning); FX (forex market, context_dollar_basket, context_fx_normalization) is excluded; an error in the rebuild keeps the Bronze bars and is reported. A series whose close jumps by a split factor (2, 3, 4, 5, 8, 10, 20; 8% tolerance) and reverses within 25 bars is `is_clean = False` as a whole (which basis is right is not knowable), recomputed every run, so it lifts itself once the vendor history is re-fetched.
+- `audit_silver_ohlcv.py`: 16 checks (`basis`, `seam`, `leak`, `last_bar` added), `gaps` explained by 1D history, a clean non-positive price is a FAIL, and a per-consumer gate (`technical_xgboost`: Layer 1, 1D/1W/1M; `cross_asset_xgboost`: all markets, 1D) in the text and JSON reports. A series with no `is_clean` row is listed as quarantined instead of blocking (Gold reads nothing from it), as is a `basis` finding on a coarse series whose own 1D is quarantined. The seam, basis and exclusion rules are imported from the processor so the yardstick cannot drift from the code.
+- Tests: `test_silver_coarse_rebuild.py` (42, new), `test_audit_silver_ohlcv.py` 106 -> 148, two assertions changed in `test_ohlcv_processor.py` (their fixtures put incoherent 1W bars next to 1D bars). Baseline 3747 -> 3831.
+
+#### What is accepted, and why
+1. **Thresholds are [U]** (1e-3, 12 periods, 80% share, |ln r| 0.05, 8% tolerance, 25 bars), calibrated on a handful of real symbols.
+2. **Whole-series quarantine is conservative.** MNST drops out of `technical_xgboost` (complete-case) and of the cross-asset engine until its history is re-fetched.
+3. **History before 1D (~2016-09) stays as Bronze built it** (193 Tuesday-stamped ABBV weeks, 10 ES_F months, ...); audit `anchor` / `gaps` WARN. No training decision falls before 2016-09, but indicator values use those bars as input.
+4. **A dividend-sized constant ratio is rebuilt on the assumption that 1D is the fresher vintage**, shown on ALL and CSX only.
+5. **The rebuild reverses the v1.5 removal of 1D -> 1W/1M aggregation** for periods 1D covers and non-FX markets only; approved 18 Nov.
+
+#### Still open (not fixed by this patch)
+(a) The ADR-052 labeler judges bars by structure and ignores `is_clean` on purpose, so MNST labels are still built from the glitched 1D bars; `scripts/label_triple_barrier.py` should skip series with no `is_clean` row. (b) FX 1W/1M until the weekend-stub flag (GHR-11). (c) The `is_clean` split (XAE-R06) is still a prerequisite for both models. (d) Re-fetching MNST history from the vendor (the Bronze ingester was not read). (e) MNST 1W, MNTS, ODFL and the other eight dividend symbols were not opened.
+
+#### Verification
+- Sandbox (clone of GitHub `main` a67007b plus the live files): new test file 42 passed, audit tests 148 passed, `test_ohlcv_processor.py` passed except one polars-version failure identical on pristine `main`. Full suite: 273 failures before and after, the identical set (environment: the clone is stale and packages differ), 0 new; 3,831 tests collected (3641 + 148 + 42).
+- 20 processor mutants and 19 audit mutants: all killed; two survived at first (the version bump was not pinned, a quarantine threshold of n <= 1) and tests were added; one mutant was aimed at the wrong loop (`run()` instead of `run_context()`) and redone.
+- Real files rebuilt in the sandbox, never in live data: ALL, CSX, ABBV 1W and MNST 1M; AAPL, BBCA 1W/1M; ES_F 1M. ALL/CSX/ABBV 1W: 518 bars replaced each and basis / leak / window findings gone; MNST 1M not rebuilt (`skipped_1d_seam`); MNST 1D through `process_symbol` on the Bronze file: 0 of 2,510 rows clean; AAPL, BBCA, ES_F audit 0 FAIL; MNST gate: `cross_asset_xgboost` PASS, `technical_xgboost` ATTENTION with MNST 1D listed as quarantined.
+- Not verified: the full live Silver tree, full-run time, `run()` on live Bronze (fixtures only).
+- Rollout (proposed, not run): back up `data/silver/market_ohlcv`; run the suite; `--job silver_ohlcv --force`, `--job silver_ohlcv_context --force`, `--job silver_validate`; run the audit with `--format json` and read `gate`; then Gold and `--status`. Rollback: restore the backup and revert the patch.
+
+### Update 2026-11-20 - the 18 Nov quarantine and rebuild guard were too broad; Silver OHLCV is still not ready for Gold (FIX SIL-SEAM-SCOPE-01, SIL-OHLC-POSITIVE-01, SIL-AUDIT-OHLCV-03; RISK-50 and the 18 Nov entry above are left as written)
+Trigger (Ovi, 19-20 Nov 2026): `silver_audit_2026-11-19.json`, the audit re-run after the 18 Nov patch, shows `technical_xgboost` BLOCK (CL 1W/1M `ohlc`; MNTS 1W `anchor` + `leak`) and `cross_asset_xgboost` ATTENTION. Decisions: D1 apply the changes, and if the blast radius of the Silver OHLCV code is large, rewrite the Silver OHLCV datasets from Bronze after the code fix; D2 `technical_xgboost` stays skipped (its fit is `skipped`, `LabelsMissing`) until the FX window rule is settled, so nothing reads FX 1W/1M before that.
+Sandbox only for the code until the mirror; the mirror to live (five code/test files) was byte-verified. `CURRENT_SILVER_VERSION` 1.3 -> 1.4; no new column. No live Silver or Gold file has been rewritten.
+
+#### What was measured (19-20 Nov 2026; the 19 Nov JSON audit plus live Silver files of MARA, CLSK, CVNA, MNST, MNTS, NG, CL; a sample, not a census)
+- **The 18 Nov seam quarantine was the main cost.** Rule: a split-factor close jump (2, 3, 4, 5, 8, 10, 20; 8% tolerance) reversing within 25 bars, applied to 1D, 1W and 1M, sets `is_clean = False` on the whole series. It removed 27 coarse series from Gold (21 1M + 6 1W: MARA, RIOT, CLSK, HUT, CVNA, UPST and similar volatile names). CVNA: no 1D seam at all, 1M closes equal the 1D month-end closes exactly, the largest single-day move inside the flagged months is 15-56%. MARA 1W: 532 of 532 periods equal the 1D close, 0 of 760 rows clean. At 1D the same rule fires on 1 of 654 series (MNST, 7 of 7 jumps reverse within days). Its thresholds were calibrated on six series, none a volatile name. A volume-continuity discriminator was tried on the MNST control and dropped: the glitch shows no inverse volume step.
+- **The rebuild guard "skip if 1D has any seam" disabled the rebuild for 38 symbols** (one persistent 2x day each: NG 2026-01-29, MNTS 2026-05-26). Left uncorrected: NG 1M November fragment (stamped 11-02, close 2.861 vs last daily close 3.198, 17 rebuildable months missing), MNTS 1W 346 Wednesday-stamped bars (two sessions of lookahead; the blocking `leak`), MARA and CLSK 1M Aug/Sep 2026 frozen at an early snapshot (Sep close 12.92 vs 11.33, up to 14%). On MARA and CLSK the vendor 1W/1M agree with 1D across every seam date.
+- **`_flag_is_clean` has no price > 0 test.** CL 1D negative days were flagged only because `log_return` turned NaN; the vendor 1W/1M bars of April 2020 hold low <= 0 and were `is_clean = TRUE` (the only reason CL blocked).
+- **Audit blind spots.** The `window` check (min-match 0.95) cannot see two frozen months out of 122; the gate showed 27 quarantined series as handled with no cost; `Options.checks` defaulted to `()` = zero checks and a gate built from zero checks reads PASS (caught while verifying a real-file tree, never reported).
+
+#### What changed
+- `ohlcv_processor.py`: the reversing-seam quarantine acts on 1D only. A coarse series inherits a quarantined 1D only when it reproduces it (>= 95% of its periods equal the 1D period close: MNST 1W yes, MNST 1M no). The rebuild is skipped only for a REVERSING 1D seam; a persistent seam only lowers the constant-ratio test minimum from 12 to 3 periods so a recent unadjusted split is still caught. A non-finite or non-positive OHLC value is never `is_clean` on any timeframe (`_flag_is_clean`, `_flag_is_clean_4h`).
+- `audit_silver_ohlcv.py`: a reversing seam is a FAIL on 1D only and a WARN on 1W/1M; new check `recent` (17 checks: newest 26 1W / 12 1M closed bars, reconciled on any of the three windows, FAIL for a Layer 1 market above 1%, FX not judged); the gate reports `quarantined_count`, `quarantined_symbols` and `deferred_series` (FX 1W/1M, a consumer cannot be PASS while any exist); `Options.checks` defaults to every check and an empty selection raises.
+- Tests: `test_silver_seam_scope.py` (22, new), `test_audit_silver_ohlcv.py` 148 -> 171, `test_silver_coarse_rebuild.py` 42 -> 43 (three tests that pinned the 18 Nov behaviour flipped, one version pin). Baseline 3831 -> 3877.
+
+#### Blast radius (D1)
+One source file changes; no new column. `run()` reads every Bronze file of each symbol and timeframe and rewrites its Silver file, so one `silver_ohlcv` run is already a rebuild from Bronze. What differs in the output: `is_clean` of the 27 coarse series (back to clean), the 1W/1M of the roughly 37 symbols whose rebuild was blocked (now rebuilt), and, in the audited tree, two bars (CL 1W and 1M) that become unclean through the price test. Gold recomputes from Silver; `cross_asset` reads 1D only, so its input is unchanged apart from MNST, which stays quarantined; `technical_xgboost` is skipped. Judged not massive, so an in-place rebuild is sufficient; wiping `data/silver/market_ohlcv` first only adds orphan removal and is warranted only if the audit's `meta` check still lists files below 1.4 after the run.
+
+#### What is accepted, and why
+1. **Thresholds are [U]:** inheritance share 0.95, seam basis minimum 3 periods, recent window 26/12, recent FAIL gap 1%.
+2. **A new unadjusted split in 1D (fewer than 3 mismatching periods) is not caught:** the rebuild copies the 1D basis and only the seam WARN shows.
+3. **Coarse series are no longer judged by seams:** a glitch present only in a coarse series is caught by `basis`, `window`, `recent`; a 1D jump that does not alternate within 25 bars cannot be told from a real move from the data alone (WARN).
+4. **FX stays deferred (GHR-11):** `technical_xgboost` cannot read PASS while FX 1W/1M series exist.
+5. **Persistent-seam WARNs (real moves) still count as ATTENTION, so PASS is unreachable on live data** (open decision D3; recommendation: make them informational, since `basis`, `window` and `recent` already compare across timeframes).
+6. **The 1D rule has precision 1/1 on its single hit in 654 series; recall is unknown.**
+7. **MNTS 1W keeps one Wednesday-stamped bar** (the first 1D period is kept from Bronze): `anchor` WARN.
+
+#### Still open (not fixed by this patch)
+(a) The ADR-052 labeler ignores `is_clean` on purpose, so MNST labels are still built from the glitched 1D bars. (b) FX 1W/1M until the weekend-stub flag (GHR-11). (c) The `is_clean` split (XAE-R06). (d) Re-fetching MNST history from the vendor. (e) About 30 further symbols whose rebuild is now unblocked were not opened; the audit cannot see their stale months unless they reach 3 bad bars or the `recent` gap. (f) Operator trap: `--force` does not clear the per-`run_date` ProgressCheckpoint and CLI `--reset` clears sentinels only, so a same-`run_date` rerun skips every symbol already done.
+
+#### Verification
+- Sandbox (clone of GitHub `main` a67007b plus the live 18 Nov files): 3,831 tests collected before, 3,877 after (+46: 22 + 23 + 1). Full suite: 259 failures before and after, the identical set (0 only-before, 0 only-after; sandbox environment), 3,618 passed (= 3,572 + 46).
+- 38 mutants (20 processor, 18 audit): all killed. Three survived at first (series vs symbol count; 4H positivity `>= 0` and without `is_finite`) and tests were added; three mutants with ambiguous anchors were redone per occurrence. The new tests fail on the 18 Nov code (14 of the first 21).
+- Real files, never live data (Silver files of 19 Nov as pseudo-Bronze through `process_symbol`, then the rebuild): MARA 1W clean 0 -> 750 of 760; MARA 1M 0 -> 174 of 175 with the two frozen months replaced; CLSK 1M 0 -> 120 of 121 (two replaced); CVNA 1M 0 -> 115 of 116; NG 1M 3 replaced + 17 filled, last bar 3.198 = last daily close; MNTS 1W 345 replaced, Wednesday stamps 346 -> 1; CL 1W/1M price <= 0 bars no longer clean; MNST 1D still quarantined (0 of 2,564, 7 reversing seams).
+- Full audit (17 checks) over the rebuilt tree of those seven symbols (16 files): the only FAIL is MNST 1D; both gates ATTENTION with 0 FAIL.
+- Not verified: `run()` on live Bronze, the full live Silver tree, full-run time.
+- Rollout (proposed, not run): back up `data/silver/market_ohlcv`; run the suite (3,877 collected); `--job silver_ohlcv --force`, `--job silver_ohlcv_context --force`, `--job silver_validate`; run the audit with `--format json`, check `meta` (no file left at 1.3), `gate` (`quarantined_count` expected 1) and `deferred_series`; then Gold and `--status`. If Silver already completed for the same `run_date`, use a new `run_date` or clear the checkpoints (`silver_ohlcv_p1`, `silver_ohlcv_4h`, `silver_ohlcv_context`) first. Rollback: restore the backup and revert the patch.

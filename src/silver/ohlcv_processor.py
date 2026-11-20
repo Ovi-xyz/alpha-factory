@@ -24,16 +24,17 @@ from __future__ import annotations
 
 import glob as _glob  # FIX SIL-BRZ-SCHEMA-01
 import math
+import statistics
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import polars as pl
 from src.utils.atomic_io import atomic_write_parquet  # FIX SIL-AIO-001
 from src.utils.job_result import JobResult
 from loguru import logger
 
-CURRENT_SILVER_VERSION = "1.2"
+CURRENT_SILVER_VERSION = "1.4"   # 1.4: seam quarantine scoped to 1D, rebuild guard on reversing seams only, price > 0 in is_clean (SIL-SEAM-SCOPE-01, SIL-OHLC-POSITIVE-01); 1.3: 1W/1M rebuilt from 1D + split-seam quarantine (SIL-COARSE-REBUILD-01)
 
 SILVER_OHLCV_PATH  = Path("data/silver/market_ohlcv")
 BRONZE_OHLCV_PATH  = Path("data/bronze/market/ohlcv")
@@ -73,6 +74,115 @@ def period_key_expr(timeframe: str, timestamp: str = "timestamp") -> pl.Expr:
     if timeframe == "1W":
         return day.dt.offset_by("1d").dt.truncate("1w")
     raise ValueError(f"period_key_expr: no period for timeframe {timeframe!r}")
+
+
+
+# ═══ FIX SIL-COARSE-REBUILD-01 / SIL-SEAM-QUARANTINE-01 [chat thread, 17-18 Nov 2026] ═══════════════════════
+# Why (measured on live Silver, 15-17 Nov 2026; the audit scripts/audit_silver_ohlcv.py is the yardstick):
+#  * 1W/1M come from Bronze on their own and drift from 1D: AG / CNH / ES_F ... 1M frozen at a first snapshot
+#    (Sep close 63.457 vs 60.098 from the daily bars), 27 Sunday-1st months missing on the Yahoo futures,
+#    ABBV / MNTS weekly bars stamped Tue / Wed (Tue..Mon blocks: the Monday close lands on the day the technical
+#    builder calls the bar available = one-session lookahead in technical_xgboost), ARM / LAZR / MNST / RDDT / WOLF
+#    Aug-Sep 1M frozen, KOSPI 1M 2026-11-01 low = 0.0.
+#  * 1D carries one defect Silver cannot repair: MNST 1D is not split-adjusted before 2026-07-20 (97.5 -> 47.7)
+#    and alternates between the two levels until 08-11 (seven factor-2 jumps). The Bronze file fetched on 2026-09-01
+#    already holds it and equals Silver, so the vendor returned a partly unadjusted history. Its 1M is right.
+# Rule: for non-FX markets a 1W/1M bar is rebuilt from the Silver 1D bars of its period (open first, high max, low
+# min, close last, volume sum, stamped at the period start in the 1D stamp's own zone) whenever the 1D history
+# covers the whole period and the Bronze bar's close differs by more than COARSE_REBUILD_TOL or its stamp is not
+# the period start; absent periods are filled; the first 1D period (possibly partial) and every period before 1D
+# keep their Bronze bar. The rebuilt rows carry rebuilt_from_1d = True. FX is excluded until its window convention
+# and weekend stubs are settled (ADR-059 GHR-11): FX 1W/1M do not reconcile with 1D under any window variant.
+# Guards, because 1D is NOT always the right side (MNST): the rebuild is skipped for a symbol whose 1D has a
+# REVERSING split-factor seam (SIL-SEAM-SCOPE-01, below), and when the mismatch is one constant ratio of a
+# split-like size (|ln r| >= BASIS_FAIL_LOG; which side is stale cannot be read from the two series). A 1D series
+# whose close jumps by a split factor and reverses within SEAM_REVERT_BARS bars is a vendor glitch: its WHOLE
+# series is is_clean = False (which side is right is not knowable) until the vendor history is re-fetched; the
+# flag is recomputed from the data every run.
+# Dividend-sized constant steps (ALL / CSX 1W: 1.00416 / 1.0027 until 2026-08-17) are not guarded: 1D is the
+# fresher vintage there and the rebuild is the repair. All thresholds [U], calibrated on six real series.
+# === FIX SIL-SEAM-SCOPE-01 / SIL-OHLC-POSITIVE-01 [chat thread, 19 Nov 2026] =============================
+# Why (measured on silver_audit_2026-11-19.json and real Silver files; the 18 Nov rule was calibrated on six
+# series, none of them a volatile name, and shipped too broad):
+#  * The seam rule quarantined the WHOLE series of 27 coarse series (21 1M + 6 1W), mostly high-volatility names
+#    (MARA RIOT CLSK HUT CVNA UPST ...). CVNA 1D has no seam at all, its 1M closes equal the 1D month-end
+#    closes exactly and no single day inside the flagged months moves more than 56%: the 2x months are trends,
+#    not steps. MARA 1W reconciles with 1D in 532 of 532 periods yet 0 of 760 rows were clean. At 1D the same
+#    rule fires on 1 of 654 series (MNST, the real glitch: 7 of 7 jumps reverse within days). 25 bars is five
+#    weeks of 1D and two years of 1M.
+#  * The rebuild guard 'skip when 1D has ANY seam' disabled the rebuild for 38 symbols because of one
+#    persistent 2x day (NG 2026-01-29, MNTS 2026-05-26), leaving NG's November 1M fragment, MNTS's
+#    Wednesday-stamped weekly bars (2 days of lookahead) and MARA / CLSK frozen Aug-Sep 1M bars (close up to
+#    14% off). On MARA and CLSK the vendor 1W/1M agree with 1D across every seam date.
+#  * _flag_is_clean had no price > 0 test: CL 1D negative days were flagged only through a NaN log_return, so
+#    the vendor 1W/1M bars of April 2020 (low <= 0) stayed is_clean = TRUE.
+# Rule now: (1) the reversing-seam quarantine acts on 1D only. (2) A coarse series is quarantined only when its
+# symbol's 1D is (reversing seam) AND it reproduces that 1D (>= SEAM_INHERIT_SHARE of its periods equal the 1D
+# period close, i.e. it carries the same wrong basis; MNST 1W does, MNST 1M, the right side, does not). (3) The
+# rebuild is skipped for a REVERSING 1D seam; a persistent seam only lowers the constant-ratio test's minimum
+# to SEAM_BASIS_MIN_PERIODS so a recent unadjusted split is still caught. (4) Non-finite or non-positive
+# OHLC is is_clean = False on every timeframe. All thresholds [U]; the 1D census is the audit's seam check.
+COARSE_REBUILD_TOL = 1e-3
+BASIS_MIN_PERIODS  = 12      # mismatching bars needed before a constant ratio means anything
+BASIS_SHARE        = 0.80    # share of the mismatching bars on ONE ratio
+BASIS_BAND         = 1e-3    # relative width of "one ratio"
+BASIS_FAIL_LOG     = 0.05    # |ln ratio| at or above this is a scale seam, below it dividend-sized
+SPLIT_FACTORS      = (2.0, 3.0, 4.0, 5.0, 8.0, 10.0, 20.0)
+SEAM_TOL           = 0.08    # a close-to-close ratio within 8% of k or 1/k is a k-jump (the move rides on k)
+SEAM_REVERT_BARS   = 25      # 1D: an opposite k-jump this soon after (five weeks) is a vendor glitch
+SEAM_QUARANTINE_TIMEFRAMES = frozenset({"1D"})   # where a reversal means a glitch; 25 coarse bars are 6 months / 2 years
+SEAM_BASIS_MIN_PERIODS = 3   # mismatching bars the constant-ratio test needs when 1D holds a persistent seam
+SEAM_INHERIT_SHARE = 0.95    # share of a coarse series' periods equal to the 1D period close = it carries 1D's basis
+# Layer 2 FX (dollar_basket: CNH HKD IDR KRW NOK SGD TWD; fx_normalization: THB) and the Layer 1 forex market
+FX_CONTEXT_CATEGORIES = frozenset({"context_dollar_basket", "context_fx_normalization"})
+
+
+def coarse_rebuild_exclusion(market: str, context_category: Optional[str] = None) -> Optional[str]:
+    """Reason a symbol's 1W/1M are NOT rebuilt from 1D ('fx'), or None."""
+    if market == "forex" or context_category in FX_CONTEXT_CATEGORIES:
+        return "fx"
+    return None
+
+
+def find_split_seams(closes: Sequence[float]) -> list[tuple[int, float, str]]:
+    """(position, k, direction) of every close-to-close ratio within SEAM_TOL of a split factor k or 1/k.
+    ``closes`` must be time-ordered and already finite and positive. Shared with the audit so they cannot drift."""
+    out: list[tuple[int, float, str]] = []
+    for i in range(1, len(closes)):
+        r = closes[i] / closes[i - 1]
+        best = None
+        for k in SPLIT_FACTORS:
+            for direction, dev in (("up", abs(r / k - 1)), ("down", abs(r * k - 1))):
+                if dev <= SEAM_TOL and (best is None or dev < best[0]):
+                    best = (dev, k, direction)
+        if best:
+            out.append((i, best[1], best[2]))
+    return out
+
+
+def reversing_seams(seams: Sequence[tuple]) -> set[int]:
+    """Indexes (into ``seams``) of the jumps that are undone by an opposite jump of the same factor within
+    SEAM_REVERT_BARS bars: a vendor adjustment glitch cannot be a market move."""
+    flip: set[int] = set()
+    for a in range(len(seams)):
+        for b in range(a + 1, len(seams)):
+            if seams[b][0] - seams[a][0] > SEAM_REVERT_BARS:
+                break
+            if seams[a][1] == seams[b][1] and seams[a][2] != seams[b][2]:
+                flip.update((a, b))
+    return flip
+
+
+def constant_ratio_step(ratios: Sequence[float], tol: float, min_periods: Optional[int] = None) -> Optional[float]:
+    """The one ratio most mismatching bars sit on, or None. A window or staleness defect makes the ratio vary
+    bar to bar; an adjustment-basis difference (two vintages of one series) makes it a constant.
+    ``min_periods`` overrides BASIS_MIN_PERIODS (SIL-SEAM-SCOPE-01: lowered when 1D holds a persistent seam)."""
+    mis = [r for r in ratios if math.isfinite(r) and abs(r - 1) > tol]
+    if len(mis) < (BASIS_MIN_PERIODS if min_periods is None else min_periods):
+        return None
+    med = statistics.median(mis)
+    near = sum(1 for r in mis if abs(r / med - 1) <= BASIS_BAND)
+    return med if near >= BASIS_SHARE * len(mis) else None
 
 
 # v1.5 refactoring: 4H dipindah ke Silver layer (GD §4.1 Enrichment)
@@ -141,6 +251,7 @@ class OHLCVProcessor:
             .pipe(self._add_derived_fields, timeframe=timeframe)
             .pipe(self._add_adjustment_flags, is_adjusted=is_adjusted, adj_factor=adj_factor)
             .pipe(self._flag_is_clean)
+            .pipe(self._quarantine_reversing_seams, symbol=symbol, timeframe=timeframe)
             .pipe(self._add_metadata, symbol=symbol, timeframe=timeframe, market=market, actual_source=actual_source)
         )
 
@@ -413,6 +524,11 @@ class OHLCVProcessor:
                 & (pl.col("close") >= pl.col("low"))
                 & (pl.col("close") <= pl.col("high"))
             )
+            # FIX SIL-OHLC-POSITIVE-01: a non-finite or non-positive price is never clean on any timeframe
+            # (CL 2020-04: the vendor 1W/1M bars hold low <= 0 and were is_clean=TRUE; 1D was flagged only
+            # because its log_return turned NaN)
+            for _px in ("open", "high", "low", "close"):
+                clean = clean & pl.col(_px).is_finite() & (pl.col(_px) > 0)
 
         # Null check
         for col in ["open", "high", "low", "close"]:
@@ -449,6 +565,164 @@ class OHLCVProcessor:
             clean = clean & (~pl.col("staleness"))
 
         return df.with_columns(clean.alias("is_clean"))
+
+    @staticmethod
+    def _valid_closes(df: pl.DataFrame) -> list[float]:
+        """Time-ordered finite positive closes (the series find_split_seams reads)."""
+        if not {"timestamp", "close"} <= set(df.columns):
+            return []
+        return (df.sort("timestamp").filter(pl.col("close").is_finite() & (pl.col("close") > 0))
+                ["close"].to_list())
+
+    def _quarantine_reversing_seams(self, df: pl.DataFrame, symbol: str, timeframe: str) -> pl.DataFrame:
+        """FIX SIL-SEAM-QUARANTINE-01, scoped by SIL-SEAM-SCOPE-01 (1D ONLY): a split-factor jump that reverses
+        within SEAM_REVERT_BARS bars is a vendor adjustment glitch (MNST 1D, 17 Nov 2026) and which basis is right
+        cannot be read from the series, so the WHOLE series gets is_clean = False. Recomputed from the data on every
+        run: once the vendor history is re-fetched the seam is gone and so is the quarantine. 1W/1M are NOT judged
+        here: a reversal inside 25 weekly or monthly bars is an ordinary move of a volatile name (27 coarse series
+        were lost to that on 18 Nov); a coarse series inherits a quarantined 1D only when it reproduces it (see
+        rebuild_coarse_from_daily). A single persistent jump is left alone (an unadjusted split or a real move)."""
+        if timeframe not in SEAM_QUARANTINE_TIMEFRAMES or "is_clean" not in df.columns:
+            return df
+        seams = find_split_seams(self._valid_closes(df))
+        rev = reversing_seams(seams)
+        if not rev:
+            return df
+        logger.warning(
+            f"[OHLCVProcessor] {symbol}/{timeframe}: {len(rev)} split-factor jump(s) reverse within "
+            f"{SEAM_REVERT_BARS} bars (vendor adjustment glitch) - whole series is_clean=False until the "
+            f"history is re-fetched"
+        )
+        return df.with_columns(pl.lit(False).alias("is_clean"))
+
+    @staticmethod
+    def _derive_period_bars(daily: pl.DataFrame, timeframe: str) -> pl.DataFrame:
+        """One bar per period from structurally valid 1D bars (finite, > 0, high >= low), is_clean ignored: a real
+        crash bar belongs in its week. Columns: _period, open, high, low, close, volume."""
+        prices = ["open", "high", "low", "close"]
+        d = (daily.select(["timestamp", *prices, "volume"])
+             .filter(pl.all_horizontal([pl.col(c).is_finite() & (pl.col(c) > 0) for c in prices])
+                     & (pl.col("high") >= pl.col("low")))
+             .sort("timestamp"))
+        if d.is_empty():
+            return d.with_columns(pl.lit(None, dtype=pl.Date).alias("_period")).head(0)
+        d = d.with_columns(period_key_expr(timeframe).alias("_period"))
+        return d.group_by("_period", maintain_order=True).agg(
+            pl.col("open").first(), pl.col("high").max(), pl.col("low").min(), pl.col("close").last(),
+            pl.col("volume").sum(),
+        )
+
+    def rebuild_coarse_from_daily(
+        self,
+        coarse: pl.DataFrame,
+        daily: Optional[pl.DataFrame],
+        *,
+        symbol: str,
+        market: str,
+        timeframe: str,
+        skip_reason: Optional[str] = None,
+        is_adjusted: bool = True,
+        adj_factor: float = 1.0,
+        actual_source: str = "yfinance",
+    ) -> tuple[pl.DataFrame, dict]:
+        """FIX SIL-COARSE-REBUILD-01 (see the block above _PERIOD_DEDUP_TIMEFRAMES's neighbours): replace and fill
+        the 1W/1M bars of ``coarse`` (already Bronze-built Silver) from the Silver 1D bars. Returns (silver,
+        stats) with a boolean ``rebuilt_from_1d`` column on every row; ``stats['status']`` is one of rebuilt,
+        not_coarse, excluded_<reason>, no_1d, skipped_1d_seam, skipped_basis, no_eligible_period."""
+        stats: dict = {"status": "", "replaced": 0, "filled": 0, "kept": 0}
+
+        def untouched(status: str, df: pl.DataFrame = coarse) -> tuple[pl.DataFrame, dict]:
+            stats["status"] = status
+            stats["kept"] = df.height
+            return df.with_columns(pl.lit(False).alias("rebuilt_from_1d")), stats
+
+        if timeframe not in _PERIOD_DEDUP_TIMEFRAMES:
+            stats["status"] = "not_coarse"
+            return coarse, stats
+        if skip_reason:
+            return untouched(f"excluded_{skip_reason}")
+        if daily is None or daily.is_empty():
+            return untouched("no_1d")
+        seams_1d = find_split_seams(self._valid_closes(daily))
+        reversing_1d = bool(reversing_seams(seams_1d))
+
+        derived = self._derive_period_bars(daily, timeframe)
+        if derived.is_empty():
+            return untouched("no_eligible_period")
+        first_period = derived["_period"].min()
+        derived = derived.filter(pl.col("_period") > first_period)      # the first 1D period may be partial
+        if derived.is_empty():
+            return untouched("no_eligible_period")
+
+        ts_dtype = coarse.schema["timestamp"]
+        naive = pl.col("_period").cast(pl.Datetime(getattr(ts_dtype, "time_unit", "ms") or "ms"))
+        tz = getattr(ts_dtype, "time_zone", None)
+        if tz:
+            local = pl.coalesce(
+                naive.dt.replace_time_zone(tz, ambiguous="earliest", non_existent="null"),
+                (naive + pl.duration(hours=1)).dt.replace_time_zone(tz, ambiguous="earliest", non_existent="null"),
+            )
+        else:
+            local = naive
+        derived = derived.with_columns(local.cast(ts_dtype).alias("timestamp"))
+
+        cp = coarse.with_columns(period_key_expr(timeframe).alias("_period"))
+        both = cp.select("_period", "timestamp", "close").join(
+            derived.select("_period", pl.col("close").alias("_close_d")), on="_period", how="inner")
+        ratio = (both["close"] / both["_close_d"]).to_list() if both.height else []
+        if reversing_1d:
+            # SIL-SEAM-SCOPE-01: the 1D is a vendor glitch (its own series is quarantined), so nothing is rebuilt
+            # from it. A coarse series that EQUALS that 1D carries its wrong basis (MNST 1W) and is quarantined
+            # whole; one that differs from it is the independent, right side (MNST 1M) and is left clean.
+            same = sum(1 for r in ratio if math.isfinite(r) and abs(r - 1) <= COARSE_REBUILD_TOL)
+            inherits = bool(ratio) and same >= SEAM_INHERIT_SHARE * len(ratio)
+            logger.warning(f"[OHLCVProcessor] {symbol}/{timeframe}: 1D holds reversing split-factor seams - "
+                           f"{timeframe} not rebuilt from it"
+                           + (f"; {same}/{len(ratio)} periods equal the 1D close, so the series carries its "
+                              f"basis and is_clean=False" if inherits else ""))
+            return untouched("skipped_1d_seam",
+                             coarse.with_columns(pl.lit(False).alias("is_clean")) if inherits else coarse)
+        # a persistent (non-reversing) 1D seam is an unadjusted split OR a real move: rebuild, but look harder for
+        # a constant basis step, since a recent split leaves fewer than BASIS_MIN_PERIODS mismatching periods
+        step = constant_ratio_step(ratio, COARSE_REBUILD_TOL,
+                                   min_periods=SEAM_BASIS_MIN_PERIODS if seams_1d else None)
+        if step is not None and abs(math.log(step)) >= BASIS_FAIL_LOG:
+            logger.warning(f"[OHLCVProcessor] {symbol}/{timeframe}: constant ratio {step:.5g} against 1D "
+                           f"(split-like basis step) - not rebuilt, which side is stale cannot be decided")
+            return untouched("skipped_basis")
+
+        wrong = both.filter(
+            ((pl.col("close") / pl.col("_close_d") - 1).abs() > COARSE_REBUILD_TOL)
+            | (pl.col("timestamp").dt.date() != pl.col("_period"))
+        )["_period"]
+        have = cp["_period"]
+        take = derived.filter(pl.col("_period").is_in(wrong.implode()) | ~pl.col("_period").is_in(have.implode()))
+        stats["replaced"] = int(wrong.len())
+        stats["filled"] = int(take.height - wrong.len())
+        keep = cp.filter(~pl.col("_period").is_in(wrong.implode()))
+        stats["kept"] = keep.height
+        if not take.height:
+            stats["status"] = "rebuilt"
+            return coarse.with_columns(pl.lit(False).alias("rebuilt_from_1d")), stats
+
+        base = ["timestamp", "open", "high", "low", "close", "volume"]
+        raw = pl.concat([
+            keep.select(base).with_columns(pl.lit(False).alias("rebuilt_from_1d")),
+            take.select([pl.col(c).cast(coarse.schema[c]) for c in base]).with_columns(
+                pl.lit(True).alias("rebuilt_from_1d")),
+        ]).sort("timestamp")
+        flag = raw["rebuilt_from_1d"]
+        out = (
+            raw.drop("rebuilt_from_1d")
+            .pipe(self._add_derived_fields, timeframe=timeframe)
+            .pipe(self._add_adjustment_flags, is_adjusted=is_adjusted, adj_factor=adj_factor)
+            .pipe(self._flag_is_clean)
+            .pipe(self._add_metadata, symbol=symbol, timeframe=timeframe, market=market, actual_source=actual_source)
+            .with_columns(flag.alias("rebuilt_from_1d"))
+        )
+        order = [c for c in coarse.columns if c in out.columns]
+        stats["status"] = "rebuilt"
+        return out.select(order + ["rebuilt_from_1d"]), stats
 
     @staticmethod
     def _add_metadata(
@@ -642,6 +916,11 @@ class OHLCVProcessor:
                 & (pl.col("close") >= pl.col("low"))
                 & (pl.col("close") <= pl.col("high"))
             )
+            # FIX SIL-OHLC-POSITIVE-01: a non-finite or non-positive price is never clean on any timeframe
+            # (CL 2020-04: the vendor 1W/1M bars hold low <= 0 and were is_clean=TRUE; 1D was flagged only
+            # because its log_return turned NaN)
+            for _px in ("open", "high", "low", "close"):
+                clean = clean & pl.col(_px).is_finite() & (pl.col(_px) > 0)
 
         # Null check pada OHLCV
         for col in ["open", "high", "low", "close"]:
@@ -1008,6 +1287,50 @@ def _failed_checkpoint_warnings(job_name: str, run_date: date) -> tuple[str, ...
     )
 
 
+# FIX SIL-COARSE-REBUILD-01: 1W/1M are rebuilt from the symbol's Silver 1D file. PASS 1 loops timeframe-outer,
+# symbol-inner in the order 1D, 1W, 1M (_RUN_BRONZE_TFS, _RUN_CONTEXT_TFS), so the 1D file of the same run is on
+# disk when 1W/1M are processed; a resumed run finds the one written earlier.
+_REBUILD_ALERT_STATUSES = frozenset({"skipped_1d_seam", "skipped_basis", "rebuild_error"})
+_DAILY_REBUILD_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
+
+
+def _rebuild_coarse(proc: "OHLCVProcessor", silver_df: pl.DataFrame, inst, tf: str, notes: list[str]) -> pl.DataFrame:
+    """Rebuild one symbol's coarse Silver from its 1D Silver (see OHLCVProcessor.rebuild_coarse_from_daily).
+    A failure here must not lose the Bronze-built bars: it is logged, recorded in ``notes`` (surfaced as a
+    JobResult warning) and the Bronze-built frame is written with rebuilt_from_1d = False."""
+    try:
+        daily_path = (SILVER_OHLCV_PATH / inst.market / f"symbol={inst.symbol}"
+                      / f"{inst.symbol}_1D_silver.parquet")
+        # SIL-RPQ-001: lazy scan (an eager read is pinned out of this module), only the columns the rebuild needs
+        daily = (pl.scan_parquet(daily_path).select(_DAILY_REBUILD_COLUMNS).collect()
+                 if daily_path.exists() else None)
+        source = (silver_df["data_source"][0]
+                  if "data_source" in silver_df.columns and silver_df.height else "yfinance")
+        out, st = proc.rebuild_coarse_from_daily(
+            silver_df, daily, symbol=inst.symbol, market=inst.market, timeframe=tf,
+            skip_reason=coarse_rebuild_exclusion(inst.market, getattr(inst, "context_category", None)),
+            actual_source=source,
+        )
+    except Exception as e:                                           # noqa: BLE001 - recorded, not swallowed
+        logger.warning(f"[silver_ohlcv] {inst.symbol}/{tf}: rebuild from 1D failed ({type(e).__name__}: {e}) - "
+                       f"Bronze-built bars kept")
+        notes.append(f"{inst.symbol}/{tf}: rebuild_error")
+        return silver_df.with_columns(pl.lit(False).alias("rebuilt_from_1d"))
+    if st["status"] in _REBUILD_ALERT_STATUSES:
+        notes.append(f"{inst.symbol}/{tf}: {st['status']}")
+    if st["replaced"] or st["filled"]:
+        logger.info(f"[silver_ohlcv] {inst.symbol}/{tf} rebuilt from 1D: replaced={st['replaced']} "
+                    f"filled={st['filled']} kept={st['kept']}")
+    return out
+
+
+def _rebuild_warnings(job: str, notes: list[str]) -> tuple[str, ...]:
+    if not notes:
+        return ()
+    more = f" (+{len(notes) - 10} more)" if len(notes) > 10 else ""
+    return (f"{job}: {len(notes)} 1W/1M series not rebuilt from 1D: {'; '.join(notes[:10])}{more}",)
+
+
 def run(run_date: date) -> JobResult:
     """
     Job entry point for 'silver_ohlcv' — dipanggil oleh job_registry.py.
@@ -1045,6 +1368,7 @@ def run(run_date: date) -> JobResult:
     proc   = OHLCVProcessor()
     loader = get_loader()
     rows_written = 0
+    rebuild_notes: list[str] = []
 
     # ── PASS 1: Bronze raw TFs → Silver ──────────────────────────────────────
     logger.info(f"[silver_ohlcv] PASS 1: Bronze raw TFs → Silver | run_date={run_date}")
@@ -1102,6 +1426,8 @@ def run(run_date: date) -> JobResult:
                     timeframe=tf,
                     tz_hint=inst.timezone,
                 )
+                if tf in _PERIOD_DEDUP_TIMEFRAMES and silver_df is not None and len(silver_df) > 0:
+                    silver_df = _rebuild_coarse(proc, silver_df, inst, tf, rebuild_notes)
                 if silver_df is not None and len(silver_df) > 0:
                     proc.write(silver_df, inst.symbol, inst.market, tf)
                     rows_written += len(silver_df)
@@ -1168,6 +1494,7 @@ def run(run_date: date) -> JobResult:
         warnings=(
             _failed_checkpoint_warnings("silver_ohlcv_p1", run_date)
             + _failed_checkpoint_warnings("silver_ohlcv_4h", run_date)
+            + _rebuild_warnings("silver_ohlcv", rebuild_notes)
         ),
     )
 
@@ -1203,6 +1530,7 @@ def run_context(run_date: date) -> JobResult:
     proc   = OHLCVProcessor()
     loader = get_loader()
     context_instruments = loader.all_context(include_deferred=False)
+    rebuild_notes: list[str] = []
 
     logger.info(
         f"[silver_ohlcv_context] Bronze context TFs → Silver | "
@@ -1252,6 +1580,8 @@ def run_context(run_date: date) -> JobResult:
                     timeframe=tf,
                     tz_hint=inst.timezone,    # per-instrument, bukan market dict
                 )
+                if tf in _PERIOD_DEDUP_TIMEFRAMES and silver_df is not None and len(silver_df) > 0:
+                    silver_df = _rebuild_coarse(proc, silver_df, inst, tf, rebuild_notes)
                 if silver_df is not None and len(silver_df) > 0:
                     proc.write(silver_df, inst.symbol, inst.market, tf)
 
@@ -1267,4 +1597,5 @@ def run_context(run_date: date) -> JobResult:
         f"{ProgressCheckpoint('silver_ohlcv_context', run_date).summary()}"
     )
     # FIX SIL-BRZ-SCHEMA-02: rows_written stays unknown (None); only the failures are reported.
-    return JobResult(warnings=_failed_checkpoint_warnings("silver_ohlcv_context", run_date))
+    return JobResult(warnings=(_failed_checkpoint_warnings("silver_ohlcv_context", run_date)
+                               + _rebuild_warnings("silver_ohlcv_context", rebuild_notes)))

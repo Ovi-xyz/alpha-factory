@@ -611,9 +611,18 @@ class TestRunEntryPoint:
 
         silver_dir = tmp_path / ohlcv_mod.SILVER_OHLCV_PATH / "us_stocks" / "symbol=AAPL"
         rows_1d = len(pl.read_parquet(silver_dir / "AAPL_1D_silver.parquet"))
-        rows_1w = len(pl.read_parquet(silver_dir / "AAPL_1W_silver.parquet"))
+        w = pl.read_parquet(silver_dir / "AAPL_1W_silver.parquet")
+        rows_1w = len(w)
         assert rows_1d == 40
-        assert rows_1w == 5
+        # FIX SIL-COARSE-REBUILD-01 [18 Nov 2026]: 1W is now rebuilt from Silver 1D wherever 1D covers the whole
+        # week. The 1D fixture spans Jan 1..Feb 9 2024 (six Monday weeks, the first one left to Bronze), the
+        # Bronze 1W fixture five June weeks outside it: five weeks are filled from 1D, five Bronze weeks kept.
+        # The test's point (1D and 1W must not blend) holds: the two files still differ, and none of the June
+        # Bronze rows is taken from, or replaced by, 1D.
+        assert rows_1w == 10
+        assert w.filter(pl.col("rebuilt_from_1d")).height == 5
+        kept = w.filter(~pl.col("rebuilt_from_1d"))
+        assert kept.height == 5 and kept["timestamp"].dt.date().min() >= date(2024, 6, 1)
         assert rows_1d != rows_1w
 
     def test_run_pass2_synthesizes_4h_from_silver_1h(self, tmp_path, monkeypatch):
@@ -1374,10 +1383,15 @@ class TestBronzeCoarseZoneDrift:
             # 10 stamps (Sep 1..10 2026) are ten bars only for 1D; as 1W / 1M bars they fall in two weeks
             # (Sun..Sat: 1-5 Sep and 6-10 Sep) and one month, and the earliest stamp of each period survives
             # (FIX SIL-DEDUP-PERIOD-01).
-            expected = {"1D": list(range(1, 11)), "1W": [1, 6], "1M": [1]}[tf]
+            # FIX SIL-COARSE-REBUILD-01 [18 Nov 2026]: VIX is not FX, so 1W is rebuilt from its Silver 1D. The first
+            # 1D period (week of Aug 31, month of September) may be partial and keeps its Bronze bar; the second
+            # week is rebuilt, stamped at its Monday (Sep 7, not the Bronze Sunday stamp of Sep 6) and closing at
+            # the last daily close of Sep 6..10 (110.0).
+            expected = {"1D": list(range(1, 11)), "1W": [1, 7], "1M": [1]}[tf]
+            closes = {"1D": [100.0 + d for d in expected], "1W": [101.0, 110.0], "1M": [101.0]}[tf]
             assert s["timestamp"].is_unique().all()
             assert s["timestamp"].dt.day().to_list() == expected
-            assert s["close"].to_list() == [100.0 + d for d in expected]
+            assert s["close"].to_list() == closes
 
 
 class TestFailedReadVisibility:
