@@ -1,5 +1,24 @@
 # CHANGELOG — Data Platform
 
+## Unreleased (tanpa version bump `pyproject.toml`, tetap 1.24.0) — kolom usang dihapus dari `gold_screener` dan `signal_aggregation`
+
+### Lima kolom placeholder Finnhub dan `sector_momentum` dihapus
+
+Upstream Finnhub sudah diretire (ADR-043/044), sehingga `days_to_earnings`, `next_earnings_date`, `near_earnings_flag`, `sentiment_score`, dan `buzz_score` hanya tersisa sebagai placeholder NULL bertipe di query utama screener. Keputusan Ovi (21 Nov 2026): kelimanya, bersama `sector_momentum`, tidak lagi dibutuhkan. `sector_momentum` dihapus dari watchlist dan dari `signal_aggregation` sendiri. Perubahan skema ini dimungkinkan karena belum ada Trading Engine dan skema watchlist masih provisional (ADR-055 keputusan 5).
+
+**Perubahan:**
+- `src/gold/screener.py`: enam kolom dihapus dari query utama, dari daftar `select` signal_aggregation, dan dari frame kosong `_empty_signal_agg_df`; docstring dan komentar diperbarui. Watchlist tetap membawa `composite_score`, `composite_grade`, `sector_breadth_pct`, `breadth_divergence`.
+- `src/gold/signal_aggregation.py`: `sector_momentum` tidak lagi dihitung atau ditulis; `_load_prior_sector_breadth` dan konstanta `SECTOR_MOMENTUM_TARGET_DAYS/_MIN_DAYS/_MAX_DAYS` dihapus; `AGG_VERSION` 1.0 -> 1.1. Fungsi itu satu-satunya tempat modul membaca output-nya sendiri, jadi hasil satu run kini tidak bergantung pada file bertanggal sebelumnya.
+- `src/backtest/pit_data.py` (`get_signal_aggregation`) dan `src/gold/views.py` (`v_signal_aggregation`): `union_by_name=true`.
+- `src/scheduler/job_registry.py`: hanya komentar pada entri `gold_screener`.
+- Tes: `test_screener.py` 65 -> 66 (pin ADR-044 "lima kolom ada dan NULL" dibalik menjadi "enam kolom tidak ada"; satu tes baru untuk file tanpa `sector_momentum`); `test_signal_aggregation.py` 40 -> 40 (empat tes `TestSectorMomentum` diganti empat tes `TestSectorMomentumRemoved`: nama fungsi/konstanta hilang, kolom output persis, versi, hasil tidak bergantung pada file output sebelumnya); `test_pit_data.py` 38 -> 39; `test_views.py` 22 -> 24. `tests/COUNT_BASELINE.txt` 3877 -> 3881.
+- `README.md`: dua baris tabel Separation of Concerns (`days_to_earnings`, `sentiment_score`) dihapus. `KNOWN_RISKS.md`: pembaruan bertanggal di RISK-4.
+
+**Yang perlu diketahui:**
+1. Tanpa `union_by_name`, menghapus kolom ini akan merusak pembacaan secara diam-diam. Diukur pada DuckDB 1.5.4: bila file lama (dengan `sector_momentum`) berurutan lebih dulu daripada file baru (tanpa kolom itu), `read_parquet` melempar schema mismatch; `get_signal_aggregation` menelan exception dan mengembalikan None untuk setiap simbol, sedangkan `v_signal_aggregation` error. Bila file berskema baru berurutan lebih dulu, glob biasa kebetulan berhasil, jadi kegagalannya bergantung pada nama file. Keduanya kini memakai `union_by_name=true` (baris lama menyimpan nilainya, baris baru NULL).
+2. File `signal_aggregation_*.parquet` dan `watchlist_*.parquet` lama masih punya kolom-kolom itu; view tetap menampilkannya (NULL pada baris baru) sampai file lama diarsipkan.
+3. Terbuka: aturan availability earnings di docstring `PITDataLoader` (hanya docstring); GD §0.4/§17.6 masih mencantumkan kolom-kolom itu sampai kontrak Trading Engine direvisi (ADR-054).
+
 ## Unreleased (tanpa version bump `pyproject.toml`, tetap 1.24.0; `CURRENT_SILVER_VERSION` 1.3 -> 1.4)
 
 ### FIX SIL-SEAM-SCOPE-01, SIL-OHLC-POSITIVE-01, SIL-AUDIT-OHLCV-03 - patch 18 Nov terlalu lebar; Silver OHLCV belum layak naik ke Gold (audit 19 Nov)

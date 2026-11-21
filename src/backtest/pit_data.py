@@ -479,12 +479,18 @@ class PITDataLoader:
         symbol as of trade_date. Same idiom as get_mtf_score() — the
         producer also writes one dated file per day (signal_aggregation_
         {date}.parquet), globbed the same way mtf_alignment_*.parquet is.
+
+        union_by_name=true (21 Nov 2026): files written before `sector_momentum` was removed
+        carry that column, later files do not. A plain glob over the mix raises a schema
+        mismatch whenever an older file sorts first, and this method swallows exceptions —
+        it would return None for every symbol, silently (the get_mtf_score failure of
+        ADR-055 v2). Rows from older files have NULL for columns they lack.
         """
         try:
             result = self._con.execute(
                 """
                 SELECT *
-                FROM read_parquet($path, hive_partitioning=false)
+                FROM read_parquet($path, hive_partitioning=false, union_by_name=true)
                 WHERE symbol = $symbol
                   AND date   <= $trade_date
                 ORDER BY date DESC

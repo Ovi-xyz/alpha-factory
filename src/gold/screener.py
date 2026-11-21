@@ -36,19 +36,28 @@ optional source here):
 Also gone, for the same reason: `sector_weight_adj`, the sector concentration guard built on it,
 and the `sector` column itself. `gold_sector` (regime -> sector weights) was archived with
 macro_regime.py — regime-free it had nothing left to do — and the watchlist carries no sector
-label (Ovi, 21 Oct 2026). The sector *breadth* columns (`sector_breadth_pct`, `sector_momentum`)
-still arrive from signal_aggregation, joined by symbol.
+label (Ovi, 21 Oct 2026). The sector *breadth* column `sector_breadth_pct` still arrives from
+signal_aggregation, joined by symbol; `sector_momentum` no longer exists (21 Nov 2026, see below).
 The screener is the only job allowed to read the HMM engine's store besides the HMM engine itself
 and PITDataLoader: it is the synthesis tip, not one of the three independent domains.
 
 FIX ADR-043/ADR-044 (GMI_Decision_Document_v10.docx): Finnhub retired in
 full — _enrich_earnings() and _enrich_sentiment() (and their call sites)
 removed. days_to_earnings, next_earnings_date, near_earnings_flag,
-sentiment_score, and buzz_score remain in the watchlist output schema
-exactly as before — sourced entirely from this module's own main query,
-which hardcodes each as a typed NULL placeholder. No Interface Contract
-change (GD §0.4, §17.6): the promised columns still exist, still
-correctly typed, simply permanently null instead of sometimes-populated.
+sentiment_score, and buzz_score were kept in the watchlist schema as typed
+NULL placeholders hardcoded in this module's main query.
+
+REMOVED 21 Nov 2026 (Ovi): those five columns are no longer part of the
+watchlist schema — their upstream is retired and they carried no value. Nothing
+outside the repo reads the watchlist (ADR-055 decision 5: no Trading Engine yet,
+schema provisional), so this is a schema change without a consumer to break.
+`sector_momentum` is dropped from the watchlist in the same change and from
+signal_aggregation itself (agg_version 1.1). Unlike the five above it was a
+computed column, not a placeholder. The screener no longer selects it, so a
+signal_aggregation file written before that change (column present) and one
+written after it (column absent) are read the same way; selecting a missing
+column would have raised inside the try/except that falls back to the empty
+frame and turned every signal_aggregation column NULL.
 
 v1.2 additions (retained):
     - Correlation cluster deduplication: max 2 per cluster
@@ -62,8 +71,7 @@ EXACT same soft-dependency, graceful-degrade-to-NULL pattern already
 established here for active_tbl/regime_tbl — never a filter
 or ranking input, purely informational DATA fields (Section 0.2/0.3
 Separation of Concerns: pipeline supplies data, Trading Engine decides),
-same treatment as days_to_earnings/sentiment_score before Finnhub's
-retirement:
+same treatment as the other soft-joined informational fields:
 
     global_regime_tbl (data/gold/cross_asset/global_regime.parquet,
         GlobalIndexRegimeModule, daily) -> global_risk_score,
@@ -99,11 +107,10 @@ ADD GMI-SIGAGG-001 — signal_aggregation integration (Architecture v2.0
 §5.2.7, §9.1 Phase 5). A fourth soft source, same idiom as the three
 above: signal_agg_tbl (data/gold/signal_aggregation/
 signal_aggregation_{date}.parquet, one row per active_ohlcv symbol) ->
-composite_score, composite_grade, sector_breadth_pct, sector_momentum,
-breadth_divergence. Purely informational DATA fields (Section 0.2/0.3
-Separation of Concerns), never a filter or ranking input — identical
-treatment to days_to_earnings/sentiment_score before Finnhub's
-retirement. NOT in gold_screener's depends_on, for the same reliability
+composite_score, composite_grade, sector_breadth_pct,
+breadth_divergence (sector_momentum removed 21 Nov 2026). Purely informational
+DATA fields (Section 0.2/0.3 Separation of Concerns), never a filter or ranking
+input. NOT in gold_screener's depends_on, for the same reliability
 reason as the three CrossAssetEngine sources: see
 signal_aggregation.py's own module docstring for the full rationale
 (this deliberately supersedes Architecture v2.0 §6.6's dependency-graph
@@ -342,7 +349,6 @@ def _empty_signal_agg_df() -> pl.DataFrame:
         "composite_score":     pl.Series([], dtype=pl.Float64),
         "composite_grade":     pl.Series([], dtype=pl.Utf8),
         "sector_breadth_pct":  pl.Series([], dtype=pl.Float64),
-        "sector_momentum":     pl.Series([], dtype=pl.Float64),
         "breadth_divergence":  pl.Series([], dtype=pl.Float64),
     })
 
@@ -551,7 +557,7 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
         try:
             signal_agg_df = pl.read_parquet(signal_agg_path).select([
                 "symbol", "composite_score", "composite_grade",
-                "sector_breadth_pct", "sector_momentum", "breadth_divergence",
+                "sector_breadth_pct", "breadth_divergence",
             ])
         except Exception:
             signal_agg_df = _empty_signal_agg_df()
@@ -600,11 +606,6 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
         r.context_transition,
         r.context_transition_alert,
         r.regime_in_sample,
-        NULL::INTEGER                               AS days_to_earnings,
-        NULL::DATE                                  AS next_earnings_date,
-        (NULL::INTEGER) <= 3                        AS near_earnings_flag,
-        NULL::DOUBLE                                AS sentiment_score,
-        NULL::DOUBLE                                AS buzz_score,
         gr.global_risk_score,
         gr.global_regime_label,
         gr.dm_em_divergence,
@@ -617,7 +618,6 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
         sa.composite_score,
         sa.composite_grade,
         sa.sector_breadth_pct,
-        sa.sector_momentum,
         sa.breadth_divergence,
         $run_date                                  AS watchlist_date
     FROM mtf m
@@ -667,14 +667,9 @@ def build_watchlist(run_date: date) -> pl.DataFrame:
     if df.is_empty():
         return df
 
-    # FIX ADR-044 (GMI_Decision_Document_v10.docx): _enrich_earnings() and
-    # _enrich_sentiment() call sites removed — Finnhub retired in full
-    # (ADR-043). days_to_earnings, next_earnings_date, near_earnings_flag,
-    # sentiment_score, buzz_score remain in the watchlist output schema
-    # exactly as before, sourced entirely from the main query's own typed
-    # NULL placeholders above — no Interface Contract change (GD §0.4,
-    # §17.6): the promised columns still exist, still correctly typed,
-    # simply permanently null instead of sometimes-populated.
+    # FIX ADR-044: _enrich_earnings() / _enrich_sentiment() call sites removed (Finnhub
+    # retired, ADR-043). The five columns they once fed, and the NULL placeholders that
+    # replaced them, are gone from the schema (21 Nov 2026) — see the module docstring.
 
     # Correlation cluster deduplication (GD §15.1: max 2 per cluster)
     if has_corr:

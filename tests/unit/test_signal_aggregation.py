@@ -10,7 +10,7 @@ breadth_divergence (soft mtf dependency), and the run() entry point
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from unittest.mock import patch
 
 import polars as pl
@@ -25,7 +25,6 @@ from src.gold.signal_aggregation import (
     _compute,
     _compute_composite_scores,
     _compute_sector_breadth,
-    _load_prior_sector_breadth,
     _load_sector_map,
     _load_tf_components,
     load_signal_aggregation,
@@ -289,44 +288,69 @@ class TestSectorBreadth:
         assert out["sector"].to_list() == ["Unknown"]
 
 
-class TestSectorMomentum:
-    def test_no_prior_file_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(sa_mod, "GOLD_SIGNAL_AGG_PATH", tmp_path)
-        out = _load_prior_sector_breadth(date(2026, 9, 22))
-        assert out.is_empty()
+EXPECTED_OUTPUT_COLUMNS = [
+    "symbol", "market", "sector",
+    "composite_score", "composite_grade", "tf_coverage_count",
+    "mtf_score", "breadth_divergence",
+    "sector_breadth_pct", "sector_symbol_count",
+    "agg_version", "date",
+]
 
-    def test_finds_prior_file_within_window(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(sa_mod, "GOLD_SIGNAL_AGG_PATH", tmp_path)
-        run_date = date(2026, 9, 22)
-        prior_date = run_date - timedelta(days=7)   # exact target
+
+def _write_compute_fixture(tmp_path, monkeypatch) -> None:
+    """Minimal inputs for _compute(): two symbols (both unmapped, so one 'Unknown' sector) with a
+    close above ema_50 on every timeframe, no MTF file. The output directory exists and is empty."""
+    monkeypatch.setattr(sa_mod, "GOLD_SIGNALS_PATH", tmp_path / "signals")
+    monkeypatch.setattr(sa_mod, "GOLD_MTF_PATH", tmp_path / "mtf")
+    monkeypatch.setattr(sa_mod, "GOLD_SIGNAL_AGG_PATH", tmp_path / "out")
+    for tf in TIMEFRAMES:
+        _write_tf_fixture(tmp_path / "signals", tf, [_base_row("AAA"), _base_row("BBB")])
+    (tmp_path / "mtf").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "out").mkdir(parents=True, exist_ok=True)
+
+
+class TestSectorMomentumRemoved:
+    """21 Nov 2026 (Ovi): `sector_momentum` is no longer produced. Replaces TestSectorMomentum, which
+    pinned the lookup of an earlier output file. That lookup was the module's only read of its own
+    previous output, so a run's output must not depend on which earlier files exist."""
+
+    RUN_DATE = date(2026, 9, 22)
+
+    def _compute_once(self):
+        with patch.object(sa_mod, "_active_ohlcv_symbols", return_value=["AAA", "BBB"]):
+            return _compute(self.RUN_DATE)
+
+    def test_prior_output_reader_and_lookback_constants_are_gone(self):
+        for name in ("_load_prior_sector_breadth", "SECTOR_MOMENTUM_TARGET_DAYS",
+                     "SECTOR_MOMENTUM_MIN_DAYS", "SECTOR_MOMENTUM_MAX_DAYS"):
+            assert not hasattr(sa_mod, name), f"{name} should have been removed"
+
+    def test_output_columns_are_exactly_the_documented_set(self, tmp_path, monkeypatch):
+        _write_compute_fixture(tmp_path, monkeypatch)
+        df = self._compute_once()
+        assert df.columns == EXPECTED_OUTPUT_COLUMNS
+        assert "sector_momentum" not in df.columns
+
+    def test_agg_version_column_carries_the_bumped_version(self, tmp_path, monkeypatch):
+        _write_compute_fixture(tmp_path, monkeypatch)
+        df = self._compute_once()
+        assert df["agg_version"].unique().to_list() == [sa_mod.AGG_VERSION]
+        assert sa_mod.AGG_VERSION != "1.0"   # 1.0 is the schema that still carried sector_momentum
+
+    def test_output_does_not_depend_on_earlier_output_files(self, tmp_path, monkeypatch):
+        _write_compute_fixture(tmp_path, monkeypatch)
+        alone = self._compute_once()
+        assert alone["sector_breadth_pct"].null_count() == 0   # breadth really is computed (not vacuous)
+
+        # An old-schema file (still holding sector_momentum) 7 days back: exactly the file the
+        # removed lookup used to read and subtract from today's breadth.
         pl.DataFrame({
-            "sector": ["Technology"], "sector_breadth_pct": [42.0],
-        }).write_parquet(tmp_path / f"signal_aggregation_{prior_date.isoformat()}.parquet")
+            "symbol": ["AAA"], "sector": ["Unknown"], "sector_breadth_pct": [10.0],
+            "sector_momentum": [1.0], "agg_version": ["1.0"], "date": ["2026-09-15"],
+        }).write_parquet(tmp_path / "out" / "signal_aggregation_2026-09-15.parquet")
 
-        out = _load_prior_sector_breadth(run_date)
-        assert out.filter(pl.col("sector") == "Technology")["prior_sector_breadth_pct"][0] == 42.0
-
-    def test_ignores_files_outside_window(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(sa_mod, "GOLD_SIGNAL_AGG_PATH", tmp_path)
-        run_date = date(2026, 9, 22)
-        too_recent = run_date - timedelta(days=1)   # < MIN_DAYS (4)
-        pl.DataFrame({
-            "sector": ["Technology"], "sector_breadth_pct": [99.0],
-        }).write_parquet(tmp_path / f"signal_aggregation_{too_recent.isoformat()}.parquet")
-
-        out = _load_prior_sector_breadth(run_date)
-        assert out.is_empty()
-
-    def test_picks_closest_to_target_when_multiple_available(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(sa_mod, "GOLD_SIGNAL_AGG_PATH", tmp_path)
-        run_date = date(2026, 9, 22)
-        for offset, val in [(5, 10.0), (7, 20.0), (9, 30.0)]:
-            d = run_date - timedelta(days=offset)
-            pl.DataFrame({"sector": ["Technology"], "sector_breadth_pct": [val]}).write_parquet(
-                tmp_path / f"signal_aggregation_{d.isoformat()}.parquet"
-            )
-        out = _load_prior_sector_breadth(run_date)   # target=7 -> exact match wins
-        assert out["prior_sector_breadth_pct"][0] == 20.0
+        with_prior = self._compute_once()
+        assert with_prior.equals(alone)
 
 
 class TestBreadthDivergenceIntegration:

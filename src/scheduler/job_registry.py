@@ -743,9 +743,9 @@ JOB_REGISTRY: dict[str, dict[str, Any]] = {
         # "silver_fundamental" dan "silver_sentiment" kini tidak ada sama sekali di
         # JOB_REGISTRY (dihapus, bukan sekadar di-skip) — lihat ADR-043 Consequences.
         # gold/screener.py::_enrich_earnings() dan _enrich_sentiment() juga dihapus
-        # (FIX ADR-044) — kolom days_to_earnings/near_earnings_flag/sentiment_score/
-        # buzz_score tetap ada di watchlist output, permanently NULL (Interface
-        # Contract GD §0.4/§17.6 tidak berubah — hanya nilainya, bukan skema).
+        # (FIX ADR-044). Kolom days_to_earnings/next_earnings_date/near_earnings_flag/
+        # sentiment_score/buzz_score sempat tetap ada di watchlist sebagai NULL permanen;
+        # 21 Nov 2026 kolom-kolom itu dihapus dari skema watchlist (lihat docstring screener.py).
         # ADR-055 v2: "gold_regime" removed. The HMM context regime is a SOFT source (screener.py
         # reads it as-of, within tolerance, degrading to NULL) exactly like the CrossAssetEngine
         # sources — so there is no hard edge here; DAILY_SEQUENCE orders the HMM engine before this

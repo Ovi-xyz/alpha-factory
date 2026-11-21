@@ -494,6 +494,44 @@ instruction, not defaulted into. Re-integrating either half in future
 means writing new ingesters/processors from scratch, not un-commenting
 anything — nothing was archived, everything was deleted.
 
+### Update — 21 Nov 2026: the five Finnhub placeholder columns and `sector_momentum` removed (watchlist and `signal_aggregation`) (no version bump)
+
+**What changed:** `gold/screener.py` no longer emits `days_to_earnings`, `next_earnings_date`,
+`near_earnings_flag`, `sentiment_score`, `buzz_score` (typed `NULL` placeholders since ADR-044) or
+`sector_momentum`; `gold/signal_aggregation.py` no longer computes or writes `sector_momentum`
+(`AGG_VERSION` 1.0 -> 1.1). Decision (Ovi, 21 Nov 2026): the upstream is retired and the columns carry
+no value. The ADR-044 sentence above ("watchlist output schema unchanged ... remain, permanently `NULL`")
+is superseded by this update and left as written, per this file's accretive rule.
+
+**Why a schema change is acceptable now:** ADR-055 decision 5 — there is no Trading Engine yet, the
+`watchlist_*` schema is provisional and nothing outside the repo reads it; GD §0.4/§17.6 are to be
+revised when the Gold layer is finished.
+
+**`sector_momentum` was a computed column, not a placeholder.** Removing it from `signal_aggregation`
+also deletes `_load_prior_sector_breadth` and `SECTOR_MOMENTUM_TARGET_DAYS/_MIN_DAYS/_MAX_DAYS`. That
+function was the module's only read of its OWN previous output, so a `signal_aggregation` run no longer
+depends on which earlier dated files exist (a first run, a gap, or old files archived now give the same
+output). Nothing else in the repo read the column (the screener dropped it the same day).
+
+**The reader fix that had to ship with it (measured on DuckDB 1.5.4, both file orders):**
+`PITDataLoader.get_signal_aggregation` and `v_signal_aggregation` read `signal_aggregation_*.parquet`
+as a plain glob. With an older file that has `sector_momentum` sorting BEFORE a newer file that lacks
+it, DuckDB raises a schema-mismatch error (the first file's schema wins); with the newer-schema file
+first, the plain glob happens to work, so the failure depends on file names. `get_signal_aggregation`
+swallows exceptions, so it would have returned `None` for every symbol — silently, the mechanism of
+ADR-055 v2's `get_mtf_score` — and the view would have errored. Both now use `union_by_name=true`
+(older rows keep their value, newer rows are `NULL`). Pinned by `test_pit_data.py` and `test_views.py`.
+
+**Not done / open:**
+1. `signal_aggregation_*.parquet` and `watchlist_*.parquet` written before this change still hold the
+   removed columns, so `v_signal_aggregation` / `v_screener` keep them (`NULL` on newer rows) until the
+   old files are archived.
+2. `PITDataLoader`'s module docstring still lists an earnings availability rule
+   (`next_earnings_date`); no earnings data exists in the platform. Docstring only, left unchanged.
+3. GD §0.4/§17.6 still list the columns (to be revised with the Trading Engine contract, ADR-054).
+4. `agg_version` is only a column value; nothing in the repo reads it, so the 1.0 -> 1.1 bump is a label
+   for people and audits, not a gate.
+
 ## RISK-5 (NEW): `add_adx()` crashed on every real invocation — RESOLVED (fixed)
 
 **Status:** ✅ **FIXED.** Discovered empirically while adding the first-

@@ -227,6 +227,29 @@ class TestGetSignalAggregation:
         _patch(monkeypatch, "GOLD_SIGNAL_AGG_PATH", str(tmp_path / "nothing_*.parquet"))
         assert loader.get_signal_aggregation("AAPL", date(2026, 9, 25)) is None
 
+    def test_files_before_and_after_sector_momentum_removal_are_readable_together(
+        self, loader, monkeypatch, tmp_path
+    ):
+        """21 Nov 2026: files written before `sector_momentum` was removed carry it, later files do
+        not. A plain DuckDB glob over the mix raises a schema mismatch when the older file sorts
+        first, and this method swallows exceptions — it returned None for every symbol (the
+        get_mtf_score failure of ADR-055 v2). The older file is dated first on purpose."""
+        pl.DataFrame({
+            "symbol": ["AAPL"], "date": ["2026-09-24"], "composite_score": [0.1],
+            "sector_momentum": [2.0],
+        }).write_parquet(tmp_path / "signal_aggregation_2026-09-24.parquet")
+        pl.DataFrame({
+            "symbol": ["AAPL"], "date": ["2026-09-26"], "composite_score": [0.3],
+        }).write_parquet(tmp_path / "signal_aggregation_2026-09-26.parquet")
+        _patch(monkeypatch, "GOLD_SIGNAL_AGG_PATH", str(tmp_path / "signal_aggregation_*.parquet"))
+
+        new = loader.get_signal_aggregation("AAPL", date(2026, 9, 26))
+        assert new is not None and new["composite_score"] == pytest.approx(0.3)
+        assert new["sector_momentum"] is None            # absent in the newer file -> NULL
+        old = loader.get_signal_aggregation("AAPL", date(2026, 9, 25))
+        assert old is not None and old["composite_score"] == pytest.approx(0.1)
+        assert old["sector_momentum"] == pytest.approx(2.0)   # the older file keeps its value
+
 
 class TestGetContextRegime:
 

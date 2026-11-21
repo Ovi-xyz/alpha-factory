@@ -178,11 +178,14 @@ VIEW_DEFINITIONS = {
     # ADD GMI-SIGAGG-001 — composite indicator score + sector breadth
     # (Architecture v2.0 §5.2.7). Same per-date-file glob shape as
     # v_mtf_alignment / v_screener above.
+    # union_by_name=true (21 Nov 2026): files written before `sector_momentum` was removed
+    # carry that column, later files do not — a plain glob over the mix fails.
     "v_signal_aggregation": """
         CREATE OR REPLACE VIEW v_signal_aggregation AS
         SELECT * FROM read_parquet(
             'data/gold/signal_aggregation/signal_aggregation_*.parquet',
-            hive_partitioning=false
+            hive_partitioning=false,
+            union_by_name=true
         )
     """,
 

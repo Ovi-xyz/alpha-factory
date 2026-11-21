@@ -262,7 +262,7 @@ class TestViewsAcrossTheAdr055Cutover:
             assert "data/gold/sector" not in sql, name
             assert "data/gold/correlation" not in sql, name   # legacy_correlation_bridge archived
 
-    @pytest.mark.parametrize("name", ["v_mtf_alignment", "v_screener", "v_watchlist_latest"])
+    @pytest.mark.parametrize("name", ["v_mtf_alignment", "v_screener", "v_watchlist_latest", "v_signal_aggregation"])
     def test_dated_file_globs_use_union_by_name(self, name):
         assert name in VIEW_DEFINITIONS
         assert VIEW_DEFINITIONS[name].count("union_by_name=true") == VIEW_DEFINITIONS[name].count("read_parquet(")
@@ -285,3 +285,27 @@ class TestViewsAcrossTheAdr055Cutover:
         con.execute(VIEW_DEFINITIONS["v_mtf_alignment"])
         rows = con.execute("SELECT date, mtf_score FROM v_mtf_alignment ORDER BY date").fetchall()
         assert rows == [("2026-10-16", 3), ("2026-10-19", 4)]
+
+    def test_v_signal_aggregation_reads_files_before_and_after_sector_momentum_removal(
+        self, tmp_path, monkeypatch
+    ):
+        """21 Nov 2026: older signal_aggregation files carry `sector_momentum`, newer ones do not.
+        The older file is dated first so a plain glob (first file's schema wins) would raise."""
+        import duckdb
+        import polars as pl
+        from src.config.instrument_loader import get_loader
+
+        get_loader()
+        monkeypatch.chdir(tmp_path)
+        d = tmp_path / "data" / "gold" / "signal_aggregation"
+        d.mkdir(parents=True)
+        pl.DataFrame({"symbol": ["A"], "composite_score": [0.1], "sector_momentum": [2.0],
+                      "date": ["2026-11-19"]}).write_parquet(d / "signal_aggregation_2026-11-19.parquet")
+        pl.DataFrame({"symbol": ["A"], "composite_score": [0.3], "date": ["2026-11-23"]}
+                     ).write_parquet(d / "signal_aggregation_2026-11-23.parquet")
+        con = duckdb.connect()
+        con.execute(VIEW_DEFINITIONS["v_signal_aggregation"])
+        rows = con.execute(
+            "SELECT date, composite_score, sector_momentum FROM v_signal_aggregation ORDER BY date"
+        ).fetchall()
+        assert rows == [("2026-11-19", 0.1, 2.0), ("2026-11-23", 0.3, None)]

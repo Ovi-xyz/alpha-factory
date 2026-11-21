@@ -454,8 +454,6 @@ This pipeline is **data platform only**.
 | MTF score + signal quality grade | Entry/exit execution |
 | Regime classification + transition flag | Position sizing |
 | Sector weight multipliers | Stop loss / take profit management |
-| `days_to_earnings` (data field) | Whether to trade around earnings |
-| `sentiment_score` (numeric) | Sentiment-based filtering |
 | Domain scores (planned, Cycle 4) | Portfolio rebalancing |
 
 ---

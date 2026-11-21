@@ -605,7 +605,7 @@ class TestSignalAggregationIntegration:
         assert row["composite_score"] is None
         assert row["composite_grade"] is None
         assert row["sector_breadth_pct"] is None
-        assert row["sector_momentum"] is None
+        assert "sector_momentum" not in result.columns   # removed 21 Nov 2026
         assert row["breadth_divergence"] is None
 
     def test_present_populates_columns_per_symbol(self, tmp_path, monkeypatch):
@@ -632,6 +632,29 @@ class TestSignalAggregationIntegration:
         assert msft["composite_score"] == pytest.approx(-0.41)
         assert msft["composite_grade"] == "B"
         assert aapl["sector_breadth_pct"] == pytest.approx(80.0)
+        assert aapl["breadth_divergence"] == pytest.approx(0.18)
+        assert msft["breadth_divergence"] == pytest.approx(-0.19)
+        # files written before the removal still carry sector_momentum (fixture above); ignored.
+        assert "sector_momentum" not in result.columns
+
+    def test_file_without_sector_momentum_still_populates_other_columns(self, tmp_path, monkeypatch):
+        """signal_aggregation no longer writes sector_momentum (and the screener no longer selects
+        it), so a file without it must populate every remaining column (a missing selected column
+        raises inside the try/except that falls back to the empty frame, all NULL)."""
+        mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
+        run_date = date(2026, 6, 1)
+        _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
+        scr_mod.SIGNAL_AGG_PATH.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({
+            "symbol": ["AAPL"], "composite_score": [0.62], "composite_grade": ["A"],
+            "sector_breadth_pct": [80.0], "breadth_divergence": [0.18],
+        }).write_parquet(scr_mod.SIGNAL_AGG_PATH / f"signal_aggregation_{run_date.isoformat()}.parquet")
+
+        row = build_watchlist(run_date).row(0, named=True)
+        assert row["composite_score"] == pytest.approx(0.62)
+        assert row["composite_grade"] == "A"
+        assert row["sector_breadth_pct"] == pytest.approx(80.0)
+        assert row["breadth_divergence"] == pytest.approx(0.18)
 
     def test_symbol_not_in_signal_agg_output_degrades_to_null(self, tmp_path, monkeypatch):
         """A watchlist candidate absent from signal_aggregation's own
@@ -864,14 +887,11 @@ class TestRunIntegration:
         out = scr_mod.GOLD_SCREENER_PATH / f"watchlist_{run_date.isoformat()}.parquet"
         assert not out.exists()
 
-    def test_watchlist_schema_stable_without_finnhub_enrichment(self, tmp_path, monkeypatch):
-        """FIX ADR-044 (GMI_Decision_Document_v10.docx): with _enrich_earnings()
-        and _enrich_sentiment() removed entirely, the watchlist output schema
-        must be byte-identical to before — column names and types unchanged,
-        values permanently null instead of sometimes-populated. The NULL
-        placeholders live in build_watchlist()'s own main query, not in
-        either (now-deleted) enrichment step, so this must hold with zero
-        Silver fundamental/sentiment data present at all."""
+    def test_deprecated_columns_absent_from_watchlist(self, tmp_path, monkeypatch):
+        """21 Nov 2026 (Ovi): the five Finnhub-era placeholder columns and sector_momentum are no
+        longer part of the watchlist schema. Replaces the ADR-044 pin that required the five to
+        exist as typed, permanently-NULL columns. The neighbours of the removed SQL lines are
+        asserted present, so an over-broad deletion fails here too."""
         mtf_dir = _patch_all_optional_sources(tmp_path, monkeypatch)
         run_date = date(2026, 6, 1)
         _write_mtf(_mtf_path(mtf_dir, run_date), [_mtf_row("AAPL", 7, "A")])
@@ -880,22 +900,18 @@ class TestRunIntegration:
         out = scr_mod.GOLD_SCREENER_PATH / f"watchlist_{run_date.isoformat()}.parquet"
         written = pl.read_parquet(out)
 
-        expected_dtypes = {
-            "days_to_earnings":   pl.Int32,
-            "next_earnings_date": pl.Date,
-            "near_earnings_flag": pl.Boolean,
-            "sentiment_score":    pl.Float64,
-            "buzz_score":         pl.Float64,
-        }
-        for col, dtype in expected_dtypes.items():
-            assert col in written.columns, f"{col} missing from watchlist output"
-            assert written.schema[col] == dtype, (
-                f"{col} dtype changed: expected {dtype}, got {written.schema[col]}"
-            )
-            assert written[col].null_count() == len(written), (
-                f"{col} expected to be permanently null (no enrichment source), "
-                f"found {len(written) - written[col].null_count()} non-null value(s)"
-            )
+        removed = [
+            "days_to_earnings", "next_earnings_date", "near_earnings_flag",
+            "sentiment_score", "buzz_score", "sector_momentum",
+        ]
+        for col in removed:
+            assert col not in written.columns, f"{col} must not be in the watchlist output"
+        survivors = [
+            "regime_in_sample", "global_risk_score", "composite_score",
+            "sector_breadth_pct", "breadth_divergence", "watchlist_date",
+        ]
+        for col in survivors:
+            assert col in written.columns, f"{col} was removed by mistake"
 
 
 class TestLoadWatchlist:

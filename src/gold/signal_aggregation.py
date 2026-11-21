@@ -15,7 +15,8 @@ references.
 
 Output columns (Architecture v2.0 §5.2.7 table):
     composite_score, composite_grade, sector_breadth_pct,
-    sector_momentum, breadth_divergence
+    breadth_divergence
+(`sector_momentum` was removed on 21 Nov 2026 — see the note after the formulas.)
 
 None of these are spelled out to the formula level anywhere upstream —
 Architecture v2.0 §5.3 only says composite_score is a "weighted avg of
@@ -96,16 +97,15 @@ tunable later, not asserted as the one true weighting scheme:
                         gold_sector (no regime left to select on), and the
                         label was always registry data.
 
-  sector_momentum   = sector_breadth_pct(run_date) minus the most recent
-                        prior signal_aggregation_{date}.parquet's
-                        sector_breadth_pct for that sector, found by
-                        scanning this module's own output directory for
-                        the file dated closest to run_date - 7 calendar
-                        days (~5 trading days) within a
-                        [run_date-10, run_date-4] window. Null (not 0.0 —
-                        genuinely unknown, not "no change") when no prior
-                        output exists yet (first ever run, or a gap wider
-                        than the window).
+  REMOVED 21 Nov 2026 (Ovi): `sector_momentum` (sector_breadth_pct(run_date) minus
+                        the value in an earlier output file, ~7 calendar days back).
+                        Nothing in the repo consumes it any more (the screener dropped
+                        it the same day), and it was this module's ONLY read of its own
+                        previous output: a run no longer depends on which earlier dated
+                        files exist (first run, a gap, files archived). `AGG_VERSION`
+                        1.0 -> 1.1. Files written before keep the column, so every
+                        reader of the dated files must use union_by_name=true
+                        (PITDataLoader.get_signal_aggregation, views.v_signal_aggregation).
 
   breadth_divergence = (mtf_score / 5.0) - composite_score — both terms
                         rescaled onto the same [-1, 1] axis
@@ -149,13 +149,13 @@ Output: data/gold/signal_aggregation/signal_aggregation_{date}.parquet
 Schema:
     symbol, market, sector, composite_score, composite_grade,
     tf_coverage_count, mtf_score, breadth_divergence,
-    sector_breadth_pct, sector_momentum, sector_symbol_count,
+    sector_breadth_pct, sector_symbol_count,
     agg_version, date
 """
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -170,19 +170,13 @@ GOLD_SIGNALS_PATH    = Path("data/gold/signals")
 GOLD_MTF_PATH         = Path("data/gold/mtf")
 GOLD_SIGNAL_AGG_PATH  = Path("data/gold/signal_aggregation")
 
-AGG_VERSION = "1.0"
+# 1.1 (21 Nov 2026): `sector_momentum` column removed. Pre-1.1 files still carry it.
+AGG_VERSION = "1.1"
 
 # ── composite_grade thresholds — this module's own choice, tunable ──────────
 GRADE_A_THRESHOLD = 0.60
 GRADE_B_THRESHOLD = 0.35
 GRADE_C_THRESHOLD = 0.15
-
-# ── sector_momentum lookback window (calendar days) ──────────────────────────
-# ~5 trading days back, tolerant of weekends the same way silver_macro's
-# stale_tolerance windows elsewhere in this codebase are (job_registry.py).
-SECTOR_MOMENTUM_TARGET_DAYS = 7
-SECTOR_MOMENTUM_MIN_DAYS    = 4
-SECTOR_MOMENTUM_MAX_DAYS    = 10
 
 
 def run(run_date: date) -> None:
@@ -492,44 +486,6 @@ def _compute_sector_breadth(
     return breadth
 
 
-def _load_prior_sector_breadth(run_date: date) -> pl.DataFrame:
-    """
-    Find the most recent signal_aggregation_{date}.parquet dated closest
-    to run_date - SECTOR_MOMENTUM_TARGET_DAYS, within
-    [run_date - MAX_DAYS, run_date - MIN_DAYS]. Returns sector,
-    sector_breadth_pct (renamed to prior_sector_breadth_pct) — empty if
-    no file in that window exists (e.g. first ever run).
-    """
-    best_path: Path | None = None
-    best_delta: int | None = None
-    for offset in range(SECTOR_MOMENTUM_MIN_DAYS, SECTOR_MOMENTUM_MAX_DAYS + 1):
-        candidate_date = run_date - timedelta(days=offset)
-        candidate = GOLD_SIGNAL_AGG_PATH / f"signal_aggregation_{candidate_date.isoformat()}.parquet"
-        if candidate.exists():
-            delta = abs(offset - SECTOR_MOMENTUM_TARGET_DAYS)
-            if best_delta is None or delta < best_delta:
-                best_delta = delta
-                best_path = candidate
-
-    if best_path is None:
-        return pl.DataFrame({
-            "sector":                    pl.Series([], dtype=pl.Utf8),
-            "prior_sector_breadth_pct":  pl.Series([], dtype=pl.Float64),
-        })
-
-    try:
-        prior = pl.read_parquet(best_path).select(["sector", "sector_breadth_pct"]).unique(
-            subset=["sector"], keep="first"
-        )
-        return prior.rename({"sector_breadth_pct": "prior_sector_breadth_pct"})
-    except Exception as e:
-        logger.debug(f"[signal_aggregation] Prior breadth read failed ({best_path}): {e}")
-        return pl.DataFrame({
-            "sector":                    pl.Series([], dtype=pl.Utf8),
-            "prior_sector_breadth_pct":  pl.Series([], dtype=pl.Float64),
-        })
-
-
 # ── MTF scores (soft input — breadth_divergence only) ─────────────────────────
 
 def _load_mtf_scores(run_date: date) -> pl.DataFrame:
@@ -566,15 +522,8 @@ def _compute(run_date: date) -> pl.DataFrame:
         pl.col("market").fill_null("Unknown"),
     ])
 
-    # Sector breadth + momentum — broadcast sector-level metrics onto each
-    # member symbol row.
+    # Sector breadth — broadcast sector-level metrics onto each member symbol row.
     breadth = _compute_sector_breadth(run_date, active_symbols, sector_map)
-    prior_breadth = _load_prior_sector_breadth(run_date)
-    breadth = breadth.join(prior_breadth, on="sector", how="left")
-    breadth = breadth.with_columns(
-        (pl.col("sector_breadth_pct") - pl.col("prior_sector_breadth_pct")).alias("sector_momentum")
-    ).drop("prior_sector_breadth_pct")
-
     df = df.join(breadth, on="sector", how="left")
 
     # MTF (soft) — breadth_divergence null when unavailable, not 0.0.
@@ -593,7 +542,7 @@ def _compute(run_date: date) -> pl.DataFrame:
         "symbol", "market", "sector",
         "composite_score", "composite_grade", "tf_coverage_count",
         "mtf_score", "breadth_divergence",
-        "sector_breadth_pct", "sector_momentum", "sector_symbol_count",
+        "sector_breadth_pct", "sector_symbol_count",
         "agg_version", "date",
     ])
 
